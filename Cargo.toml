@@ -1,0 +1,33 @@
+[workspace]
+members = [
+  "crates/shlop-agent",
+  "crates/shlop-cli",
+  "crates/shlop-config",
+  "crates/shlop-core",
+  "crates/shlop-ext-fs",
+  "crates/shlop-ext-shell",
+  "crates/shlop-proto",
+  "crates/shlop-socket",
+  "crates/shlop-supervisor",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.86"
+version = "0.1.0"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unwrap_used = "deny"
+
+[profile.ci]
+debug = "line-tables-only"
+incremental = false
+inherits = "dev"
+lto = "off"
