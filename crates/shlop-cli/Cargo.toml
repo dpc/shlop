@@ -9,3 +9,12 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+shlop-agent = { path = "../shlop-agent" }
+shlop-core = { path = "../shlop-core" }
+shlop-ext-fs = { path = "../shlop-ext-fs" }
+shlop-ext-shell = { path = "../shlop-ext-shell" }
+shlop-proto = { path = "../shlop-proto" }
+shlop-socket = { path = "../shlop-socket" }
+
+[dev-dependencies]
+tempfile = "3"

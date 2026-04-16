@@ -9,3 +9,4 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+shlop-proto = { path = "../shlop-proto" }

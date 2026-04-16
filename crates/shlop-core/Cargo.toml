@@ -9,3 +9,11 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+ciborium = "0.2.2"
+serde = { version = "1", features = ["derive"] }
+shlop-proto = { path = "../shlop-proto" }
+
+[dev-dependencies]
+shlop-agent = { path = "../shlop-agent" }
+shlop-ext-fs = { path = "../shlop-ext-fs" }
+tempfile = "3"
