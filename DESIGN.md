@@ -510,6 +510,8 @@ Current direction:
 
 ## Implementation roadmap sketch
 
+A more dispatch-oriented execution plan lives in `IMPLEMENTATION_PLAN.md`.
+
 A reasonable implementation order is:
 
 1. core event bus and connection abstraction
