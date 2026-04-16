@@ -19,7 +19,7 @@ use shlop_core::{
 use shlop_proto::{
     ChatMessage, ClientKind, DecodeError, Event, EventName, EventReader, EventSelector,
     EventWriter, LifecycleDisconnect, LifecycleHello, LifecycleSubscribe, PROTOCOL_VERSION,
-    ToolError, ToolRegister, ToolRequest, ToolResult,
+    ProgressUpdate, ToolError, ToolProgress, ToolRegister, ToolRequest, ToolResult,
 };
 use shlop_socket::{SocketListener, SocketPeer, SocketTransportError};
 
@@ -32,6 +32,13 @@ const RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 pub struct ServeOptions {
     pub max_clients: Option<usize>,
     pub policy_store_path: Option<PathBuf>,
+}
+
+/// One completed user interaction with optional progress updates.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InteractionOutcome {
+    pub progress_messages: Vec<String>,
+    pub response: String,
 }
 
 /// Errors returned by the minimal CLI runtime.
@@ -309,7 +316,7 @@ impl Harness {
                     agent_ready = true;
                 }
                 let agent_id = self.agent.connection_id.clone();
-                let _ = self.handle_participant_event(&agent_id, event)?;
+                let _ = self.handle_participant_event(&agent_id, event, &mut Vec::new())?;
             }
 
             let filesystem_event = {
@@ -327,7 +334,8 @@ impl Harness {
                     fs_registered |= register.tool.name == shlop_ext_fs::FS_READ_TOOL_NAME;
                 }
                 let filesystem_tool_id = self.filesystem_tool.connection_id.clone();
-                let _ = self.handle_participant_event(&filesystem_tool_id, event)?;
+                let _ =
+                    self.handle_participant_event(&filesystem_tool_id, event, &mut Vec::new())?;
             }
 
             let shell_event = {
@@ -344,7 +352,7 @@ impl Harness {
                     shell_registered |= register.tool.name == shlop_ext_shell::SHELL_EXEC_TOOL_NAME;
                 }
                 let shell_tool_id = self.shell_tool.connection_id.clone();
-                let _ = self.handle_participant_event(&shell_tool_id, event)?;
+                let _ = self.handle_participant_event(&shell_tool_id, event, &mut Vec::new())?;
             }
         }
 
@@ -356,7 +364,7 @@ impl Harness {
         session_id: &str,
         text: &str,
         source_id: Option<&str>,
-    ) -> Result<String, CliError> {
+    ) -> Result<InteractionOutcome, CliError> {
         self.store
             .append_user_message(session_id.to_owned(), text.to_owned())?;
         self.pending_request_sessions
@@ -371,23 +379,32 @@ impl Harness {
         self.wait_for_agent_response()
     }
 
-    fn wait_for_agent_response(&mut self) -> Result<String, CliError> {
+    fn wait_for_agent_response(&mut self) -> Result<InteractionOutcome, CliError> {
         let started_at = Instant::now();
+        let mut progress_messages = Vec::new();
         loop {
             if RESPONSE_TIMEOUT <= started_at.elapsed() {
                 return Err(CliError::ResponseTimeout);
             }
-            if let Some(response) = self.poll_participants_once()? {
-                return Ok(response.text);
+            if let Some(response) = self.poll_participants_once(&mut progress_messages)? {
+                return Ok(InteractionOutcome {
+                    progress_messages,
+                    response: response.text,
+                });
             }
         }
     }
 
-    fn poll_participants_once(&mut self) -> Result<Option<ChatMessage>, CliError> {
+    fn poll_participants_once(
+        &mut self,
+        progress_messages: &mut Vec<String>,
+    ) -> Result<Option<ChatMessage>, CliError> {
         let agent_event = { self.agent.peer.borrow_mut().recv_timeout(POLL_INTERVAL)? };
         if let Some(event) = agent_event {
             let agent_id = self.agent.connection_id.clone();
-            if let Some(message) = self.handle_participant_event(&agent_id, event)? {
+            if let Some(message) =
+                self.handle_participant_event(&agent_id, event, progress_messages)?
+            {
                 return Ok(Some(message));
             }
         }
@@ -399,7 +416,9 @@ impl Harness {
         };
         if let Some(event) = filesystem_event {
             let filesystem_tool_id = self.filesystem_tool.connection_id.clone();
-            if let Some(message) = self.handle_participant_event(&filesystem_tool_id, event)? {
+            if let Some(message) =
+                self.handle_participant_event(&filesystem_tool_id, event, progress_messages)?
+            {
                 return Ok(Some(message));
             }
         }
@@ -411,7 +430,9 @@ impl Harness {
         };
         if let Some(event) = shell_event {
             let shell_tool_id = self.shell_tool.connection_id.clone();
-            if let Some(message) = self.handle_participant_event(&shell_tool_id, event)? {
+            if let Some(message) =
+                self.handle_participant_event(&shell_tool_id, event, progress_messages)?
+            {
                 return Ok(Some(message));
             }
         }
@@ -422,6 +443,7 @@ impl Harness {
         &mut self,
         source_id: &str,
         event: Event,
+        progress_messages: &mut Vec<String>,
     ) -> Result<Option<ChatMessage>, CliError> {
         match event {
             Event::LifecycleHello(hello) => {
@@ -467,6 +489,13 @@ impl Harness {
                 let _ = self
                     .bus
                     .publish_from(Some(source_id), Event::ToolError(error));
+                Ok(None)
+            }
+            Event::ToolProgress(progress) => {
+                progress_messages.push(format_tool_progress(&progress));
+                let _ = self
+                    .bus
+                    .publish_from(Some(source_id), Event::ToolProgress(progress));
                 Ok(None)
             }
             Event::MessageAgent(message) => {
@@ -669,20 +698,46 @@ fn is_unexpected_eof(error: &DecodeError) -> bool {
     }
 }
 
+fn format_tool_progress(progress: &ToolProgress) -> String {
+    let mut text = progress.tool_name.clone();
+    if let Some(message) = &progress.message {
+        text.push_str(": ");
+        text.push_str(message);
+    }
+    if let Some(ProgressUpdate {
+        current: Some(current),
+        total: Some(total),
+    }) = &progress.progress
+    {
+        text.push_str(&format!(" ({current}/{total})"));
+    }
+    text
+}
+
+/// Runs one embedded interaction and returns progress plus the final agent
+/// response.
+pub fn run_embedded_message_with_trace(
+    session_store_path: impl Into<PathBuf>,
+    session_id: &str,
+    message: &str,
+) -> Result<InteractionOutcome, CliError> {
+    let session_store_path = session_store_path.into();
+    let mut harness = Harness::new(
+        session_store_path.clone(),
+        default_policy_store_path_from_session_store(&session_store_path),
+    )?;
+    let outcome = harness.send_user_message(session_id, message, None)?;
+    harness.shutdown()?;
+    Ok(outcome)
+}
+
 /// Runs one embedded interaction and returns the final agent response.
 pub fn run_embedded_message(
     session_store_path: impl Into<PathBuf>,
     session_id: &str,
     message: &str,
 ) -> Result<String, CliError> {
-    let session_store_path = session_store_path.into();
-    let mut harness = Harness::new(
-        session_store_path.clone(),
-        default_policy_store_path_from_session_store(&session_store_path),
-    )?;
-    let response = harness.send_user_message(session_id, message, None)?;
-    harness.shutdown()?;
-    Ok(response)
+    Ok(run_embedded_message_with_trace(session_store_path, session_id, message)?.response)
 }
 
 /// Runs the foreground daemon loop that accepts later socket clients.
@@ -729,7 +784,7 @@ pub fn run_daemon(
                     Err(error) => return Err(error),
                 }
             }
-            let _ = harness.poll_participants_once()?;
+            let _ = harness.poll_participants_once(&mut Vec::new())?;
         }
 
         let _ = harness.bus.disconnect(&client_id);
@@ -739,12 +794,13 @@ pub fn run_daemon(
     harness.shutdown()
 }
 
-/// Sends one user message to a running daemon and returns the final response.
-pub fn send_daemon_message(
+/// Sends one user message to a running daemon and returns progress plus the
+/// final response.
+pub fn send_daemon_message_with_trace(
     socket_path: impl Into<PathBuf>,
     session_id: &str,
     message: &str,
-) -> Result<String, CliError> {
+) -> Result<InteractionOutcome, CliError> {
     let mut peer = SocketPeer::connect(socket_path)?;
     peer.send(&Event::LifecycleHello(LifecycleHello {
         protocol_version: PROTOCOL_VERSION,
@@ -752,7 +808,10 @@ pub fn send_daemon_message(
         client_kind: ClientKind::Ui,
     }))?;
     peer.send(&Event::LifecycleSubscribe(LifecycleSubscribe {
-        selectors: vec![EventSelector::Exact(EventName::MessageAgent)],
+        selectors: vec![
+            EventSelector::Exact(EventName::MessageAgent),
+            EventSelector::Exact(EventName::ToolProgress),
+        ],
     }))?;
     peer.send(&Event::MessageUser(ChatMessage {
         session_id: Some(session_id.to_owned()),
@@ -760,19 +819,38 @@ pub fn send_daemon_message(
     }))?;
 
     let started_at = Instant::now();
+    let mut progress_messages = Vec::new();
     loop {
         if RESPONSE_TIMEOUT <= started_at.elapsed() {
             return Err(CliError::ResponseTimeout);
         }
         if let Some(event) = peer.recv_timeout(POLL_INTERVAL)? {
-            if let Event::MessageAgent(message) = event {
-                peer.send(&Event::LifecycleDisconnect(LifecycleDisconnect {
-                    reason: Some("done".to_owned()),
-                }))?;
-                return Ok(message.text);
+            match event {
+                Event::ToolProgress(progress) => {
+                    progress_messages.push(format_tool_progress(&progress))
+                }
+                Event::MessageAgent(message) => {
+                    peer.send(&Event::LifecycleDisconnect(LifecycleDisconnect {
+                        reason: Some("done".to_owned()),
+                    }))?;
+                    return Ok(InteractionOutcome {
+                        progress_messages,
+                        response: message.text,
+                    });
+                }
+                _ => {}
             }
         }
     }
+}
+
+/// Sends one user message to a running daemon and returns the final response.
+pub fn send_daemon_message(
+    socket_path: impl Into<PathBuf>,
+    session_id: &str,
+    message: &str,
+) -> Result<String, CliError> {
+    Ok(send_daemon_message_with_trace(socket_path, session_id, message)?.response)
 }
 
 /// Returns the default session-store path used by the CLI.
@@ -911,5 +989,62 @@ mod tests {
             .expect("embedded shell command should succeed");
         assert!(response.contains("shell.exec status 0"));
         assert!(response.contains("stdout:\nhi"));
+    }
+
+    #[test]
+    fn traced_embedded_interaction_reports_shell_progress() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let store_path = tempdir.path().join("sessions.cbor");
+
+        let outcome = run_embedded_message_with_trace(&store_path, "session-1", "shell printf hi")
+            .expect("embedded shell command should succeed");
+        assert_eq!(
+            outcome.progress_messages,
+            vec!["shell.exec: running shell command".to_owned()]
+        );
+        assert!(outcome.response.contains("shell.exec status 0"));
+    }
+
+    #[test]
+    fn traced_daemon_interaction_reports_shell_progress() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let socket_path = tempdir.path().join("daemon.sock");
+        let store_path = tempdir.path().join("sessions.cbor");
+
+        let server = thread::spawn({
+            let socket_path = socket_path.clone();
+            let store_path = store_path.clone();
+            move || {
+                run_daemon(
+                    socket_path,
+                    store_path,
+                    ServeOptions {
+                        max_clients: Some(1),
+                        policy_store_path: None,
+                    },
+                )
+            }
+        });
+
+        let started_at = Instant::now();
+        while !socket_path.exists() {
+            if Duration::from_secs(2) <= started_at.elapsed() {
+                panic!("daemon socket was not created in time");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let outcome = send_daemon_message_with_trace(&socket_path, "session-1", "shell printf hi")
+            .expect("daemon shell command should succeed");
+        assert_eq!(
+            outcome.progress_messages,
+            vec!["shell.exec: running shell command".to_owned()]
+        );
+        assert!(outcome.response.contains("shell.exec status 0"));
+
+        server
+            .join()
+            .expect("server thread should finish")
+            .expect("daemon should exit cleanly");
     }
 }
