@@ -567,109 +567,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "shlop-agent"
-version = "0.1.0"
-dependencies = [
- "shlop-proto",
-]
-
-[[package]]
-name = "shlop-cli"
-version = "0.1.0"
-dependencies = [
- "clap",
- "dirs",
- "shlop-agent",
- "shlop-config",
- "shlop-core",
- "shlop-ext-fs",
- "shlop-ext-shell",
- "shlop-proto",
- "shlop-socket",
- "shlop-supervisor",
- "tempfile",
-]
-
-[[package]]
-name = "shlop-cli-term"
-version = "0.1.0"
-dependencies = [
- "crossterm",
- "vt100",
-]
-
-[[package]]
-name = "shlop-config"
-version = "0.1.0"
-dependencies = [
- "dirs",
- "serde",
- "tempfile",
- "toml",
-]
-
-[[package]]
-name = "shlop-core"
-version = "0.1.0"
-dependencies = [
- "ciborium",
- "serde",
- "shlop-agent",
- "shlop-ext-fs",
- "shlop-proto",
- "tempfile",
-]
-
-[[package]]
-name = "shlop-ext-fs"
-version = "0.1.0"
-dependencies = [
- "shlop-proto",
- "tempfile",
-]
-
-[[package]]
-name = "shlop-ext-shell"
-version = "0.1.0"
-dependencies = [
- "shlop-proto",
-]
-
-[[package]]
-name = "shlop-proto"
-version = "0.1.0"
-dependencies = [
- "ciborium",
- "serde",
-]
-
-[[package]]
-name = "shlop-socket"
-version = "0.1.0"
-dependencies = [
- "shlop-proto",
- "shlop-test-support",
- "tempfile",
-]
-
-[[package]]
-name = "shlop-supervisor"
-version = "0.1.0"
-dependencies = [
- "shlop-core",
- "shlop-proto",
-]
-
-[[package]]
-name = "shlop-test-support"
-version = "0.1.0"
-dependencies = [
- "shlop-cli",
- "shlop-core",
- "tempfile",
-]
-
-[[package]]
 name = "signal-hook"
 version = "0.3.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -721,6 +618,109 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "tau-agent"
+version = "0.1.0"
+dependencies = [
+ "tau-proto",
+]
+
+[[package]]
+name = "tau-cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "dirs",
+ "tau-agent",
+ "tau-config",
+ "tau-core",
+ "tau-ext-fs",
+ "tau-ext-shell",
+ "tau-proto",
+ "tau-socket",
+ "tau-supervisor",
+ "tempfile",
+]
+
+[[package]]
+name = "tau-cli-term"
+version = "0.1.0"
+dependencies = [
+ "crossterm",
+ "vt100",
+]
+
+[[package]]
+name = "tau-config"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "serde",
+ "tempfile",
+ "toml",
+]
+
+[[package]]
+name = "tau-core"
+version = "0.1.0"
+dependencies = [
+ "ciborium",
+ "serde",
+ "tau-agent",
+ "tau-ext-fs",
+ "tau-proto",
+ "tempfile",
+]
+
+[[package]]
+name = "tau-ext-fs"
+version = "0.1.0"
+dependencies = [
+ "tau-proto",
+ "tempfile",
+]
+
+[[package]]
+name = "tau-ext-shell"
+version = "0.1.0"
+dependencies = [
+ "tau-proto",
+]
+
+[[package]]
+name = "tau-proto"
+version = "0.1.0"
+dependencies = [
+ "ciborium",
+ "serde",
+]
+
+[[package]]
+name = "tau-socket"
+version = "0.1.0"
+dependencies = [
+ "tau-proto",
+ "tau-test-support",
+ "tempfile",
+]
+
+[[package]]
+name = "tau-supervisor"
+version = "0.1.0"
+dependencies = [
+ "tau-core",
+ "tau-proto",
+]
+
+[[package]]
+name = "tau-test-support"
+version = "0.1.0"
+dependencies = [
+ "tau-cli",
+ "tau-core",
+ "tempfile",
 ]
 
 [[package]]

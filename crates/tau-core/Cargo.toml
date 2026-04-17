@@ -1,0 +1,19 @@
+[package]
+name = "tau-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ciborium = "0.2.2"
+serde = { version = "1", features = ["derive"] }
+tau-proto = { path = "../tau-proto" }
+
+[dev-dependencies]
+tau-agent = { path = "../tau-agent" }
+tau-ext-fs = { path = "../tau-ext-fs" }
+tempfile = "3"

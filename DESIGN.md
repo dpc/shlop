@@ -1,10 +1,10 @@
-# shlop Design
+# tau Design
 
 Status: evolving draft
 
 ## Summary
 
-`shlop` is a Unix-native LLM agent harness inspired by Pi, but built around operating system primitives instead of a TypeScript/npm runtime.
+`tau` is a Unix-native LLM agent harness inspired by Pi, but built around operating system primitives instead of a TypeScript/npm runtime.
 
 Core idea:
 
@@ -17,7 +17,7 @@ Core idea:
 
 The design goal is to preserve the strengths of Pi's agent model while making the system easier to package, synchronize across machines, sandbox, and extend in a Nix/Unix-centric workflow.
 
-Longer term, `shlop` should aim to match the feature set of the Pi agent harness, while replacing the implementation substrate with a Unix-process architecture.
+Longer term, `tau` should aim to match the feature set of the Pi agent harness, while replacing the implementation substrate with a Unix-process architecture.
 
 Decision policy for this document:
 
@@ -40,7 +40,7 @@ Problems to solve:
 
 ## Vision
 
-`shlop` should feel like a process-oriented, local-first agent operating system for developers.
+`tau` should feel like a process-oriented, local-first agent operating system for developers.
 
 Desired properties:
 
@@ -53,7 +53,7 @@ Desired properties:
 
 ## Initial product shape
 
-At a high level, `shlop` consists of:
+At a high level, `tau` consists of:
 
 - a core harness process
 - one or more extension processes
@@ -169,7 +169,7 @@ Examples of extension installation forms:
 - packaged binary in the system profile
 - binary managed by dotfiles/home-manager/NixOS
 - script or compiled executable in a project
-- `nix run github:dpc/shlop-todo`
+- `nix run github:dpc/tau-todo`
 
 ## Configuration and discovery
 
@@ -223,7 +223,7 @@ Likely future fields:
 
 Config syntax:
 
-- `shlop` configuration should use TOML
+- `tau` configuration should use TOML
 
 This keeps the native config format simple and editable, while still allowing external systems such as Nix to generate it if desired.
 
@@ -237,24 +237,24 @@ mode = "embedded"
 
 [[extensions]]
 name = "agent"
-command = "shlop-agent"
+command = "tau-agent"
 args = ["--model", "claude"]
 role = "agent"
 
 [[extensions]]
 name = "fs"
-command = "shlop-fs"
+command = "tau-fs"
 role = "tool"
 
 [[extensions]]
 name = "git"
-command = "shlop-git"
+command = "tau-git"
 role = "tool"
 
 [[extensions]]
 name = "todo"
 command = "nix"
-args = ["run", "github:dpc/shlop-todo"]
+args = ["run", "github:dpc/tau-todo"]
 role = "tool"
 ```
 
@@ -276,7 +276,7 @@ In embedded mode, a CLI command starts the core for the lifetime of one interact
 
 Typical structure:
 
-- `shlop` CLI starts the core
+- `tau` CLI starts the core
 - the core loads user config, then optional project config
 - the core starts supervised child processes over stdio
 - the core may also expose a Unix socket for additional clients during that session
@@ -290,7 +290,7 @@ In daemon mode, the core is a long-lived process.
 
 Typical structure:
 
-- a background `shlop` core process runs per user, workspace, or explicit session scope
+- a background `tau` core process runs per user, workspace, or explicit session scope
 - it loads configuration and supervises configured child processes
 - external CLIs, TUIs, or automation helpers attach over a Unix socket
 - supervised child processes still prefer stdio
@@ -551,7 +551,7 @@ This order intentionally proves the architectural seams before growing the produ
 
 ## MVP direction
 
-The first usable version of `shlop` should prioritize a small but coherent local-first core.
+The first usable version of `tau` should prioritize a small but coherent local-first core.
 
 Proposed MVP scope:
 
@@ -596,7 +596,7 @@ These are provisional defaults for moving the design forward without blocking on
 
 ### Product and scope
 
-- `shlop` is local-first and primarily targets interactive coding workflows first
+- `tau` is local-first and primarily targets interactive coding workflows first
 - automation and CI matter, but are not the first design center
 - the first release should intentionally narrow scope to get the core process architecture right
 - multi-user and remote-first operation are out of scope initially
@@ -663,7 +663,7 @@ These are the questions still most likely to affect the architecture materially:
 
 ## Current understanding
 
-The strongest differentiator of `shlop` is not just that it is "Pi in another language". The core differentiator is a Unix process architecture where extensibility, isolation, packaging, and operations all align with how Unix systems already work.
+The strongest differentiator of `tau` is not just that it is "Pi in another language". The core differentiator is a Unix process architecture where extensibility, isolation, packaging, and operations all align with how Unix systems already work.
 
 A second important differentiator is protocol philosophy: keep the extension boundary simple by using a CBOR message stream of events rather than a heavier request/response framework.
 

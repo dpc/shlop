@@ -1,10 +1,10 @@
-# shlop Implementation Plan
+# tau Implementation Plan
 
 Status: draft
 
 ## Goal
 
-Build a first usable `shlop` MVP that proves the architecture in `DESIGN.md`:
+Build a first usable `tau` MVP that proves the architecture in `DESIGN.md`:
 
 - core broker/supervisor/state host
 - agent as a process
@@ -26,7 +26,7 @@ These are working assumptions for execution, not permanent constraints.
 
 The MVP is done when all of the following are true:
 
-- a `shlop` core can start configured child processes
+- a `tau` core can start configured child processes
 - supervised children can speak the CBOR event protocol over stdio
 - external clients can attach over a Unix socket using the same protocol
 - an agent process can receive a user message and request a tool
@@ -39,33 +39,33 @@ The MVP is done when all of the following are true:
 
 A likely initial Rust workspace split:
 
-- `crates/shlop-proto`
+- `crates/tau-proto`
   - event types
   - CBOR encoding/decoding
   - shared protocol helpers
-- `crates/shlop-config`
+- `crates/tau-config`
   - TOML config loading
   - user/project config layering
-- `crates/shlop-core`
+- `crates/tau-core`
   - event bus
   - routing
   - session state
   - tool registry
   - policy hooks
-- `crates/shlop-supervisor`
+- `crates/tau-supervisor`
   - child process launch and restart
   - stdio transport adapters
-- `crates/shlop-socket`
+- `crates/tau-socket`
   - Unix socket listener and transport adapters
-- `crates/shlop-cli`
+- `crates/tau-cli`
   - embedded mode entrypoint
   - daemon attach commands
   - minimal interactive UI
-- `crates/shlop-agent`
+- `crates/tau-agent`
   - first-party agent process
-- `crates/shlop-ext-fs`
+- `crates/tau-ext-fs`
   - first-party filesystem tool extension
-- `crates/shlop-ext-shell`
+- `crates/tau-ext-shell`
   - first-party shell tool extension
 
 This exact split can be collapsed if it feels too fine-grained, but the separation of concerns should remain.
@@ -541,7 +541,7 @@ These should not block the MVP:
 
 The first demo should be deliberately small:
 
-- start `shlop` in embedded mode
+- start `tau` in embedded mode
 - load one agent extension and one filesystem extension
 - user asks to read a file
 - agent requests `fs.read`

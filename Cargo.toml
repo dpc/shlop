@@ -1,16 +1,16 @@
 [workspace]
 members = [
-  "crates/shlop-agent",
-  "crates/shlop-cli",
-  "crates/shlop-config",
-  "crates/shlop-core",
-  "crates/shlop-ext-fs",
-  "crates/shlop-ext-shell",
-  "crates/shlop-proto",
-  "crates/shlop-socket",
-  "crates/shlop-supervisor",
-  "crates/shlop-test-support",
-  "crates/shlop-cli-term",
+  "crates/tau-agent",
+  "crates/tau-cli",
+  "crates/tau-config",
+  "crates/tau-core",
+  "crates/tau-ext-fs",
+  "crates/tau-ext-shell",
+  "crates/tau-proto",
+  "crates/tau-socket",
+  "crates/tau-supervisor",
+  "crates/tau-test-support",
+  "crates/tau-cli-term",
 ]
 resolver = "2"
 

@@ -1,0 +1,16 @@
+[package]
+name = "tau-socket"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tau-proto = { path = "../tau-proto" }
+
+[dev-dependencies]
+tau-test-support = { path = "../tau-test-support" }
+tempfile = "3"

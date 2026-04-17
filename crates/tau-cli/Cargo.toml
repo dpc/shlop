@@ -1,0 +1,24 @@
+[package]
+name = "tau-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+dirs = "6"
+tau-agent = { path = "../tau-agent" }
+tau-config = { path = "../tau-config" }
+tau-core = { path = "../tau-core" }
+tau-ext-fs = { path = "../tau-ext-fs" }
+tau-ext-shell = { path = "../tau-ext-shell" }
+tau-proto = { path = "../tau-proto" }
+tau-socket = { path = "../tau-socket" }
+tau-supervisor = { path = "../tau-supervisor" }
+
+[dev-dependencies]
+tempfile = "3"

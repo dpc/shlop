@@ -1,4 +1,4 @@
-# shlop Agent Task Briefs
+# tau Agent Task Briefs
 
 Status: draft
 
@@ -191,7 +191,7 @@ Non-goals:
 
 Expected outputs:
 
-- `shlop-proto` crate
+- `tau-proto` crate
 - round-trip tests for representative messages
 - a small protocol README or module docs
 
@@ -224,7 +224,7 @@ Non-goals:
 
 Expected outputs:
 
-- `shlop-config` crate
+- `tau-config` crate
 - sample config fixture coverage
 - merge semantics documented in code or tests
 
@@ -256,7 +256,7 @@ Non-goals:
 
 Expected outputs:
 
-- `shlop-core` bus layer
+- `tau-core` bus layer
 - in-memory test clients
 - tests for subscription filtering
 
@@ -289,7 +289,7 @@ Non-goals:
 
 Expected outputs:
 
-- registry component in `shlop-core`
+- registry component in `tau-core`
 - tests for registration, duplicate warnings, and disconnect cleanup
 
 Acceptance criteria:
@@ -321,7 +321,7 @@ Non-goals:
 
 Expected outputs:
 
-- `shlop-supervisor` crate or equivalent module
+- `tau-supervisor` crate or equivalent module
 - dummy child-process integration test
 
 Acceptance criteria:
@@ -352,7 +352,7 @@ Non-goals:
 
 Expected outputs:
 
-- `shlop-socket` crate or equivalent module
+- `tau-socket` crate or equivalent module
 - socket transport tests
 
 Acceptance criteria:
@@ -383,7 +383,7 @@ Non-goals:
 
 Expected outputs:
 
-- storage abstraction in `shlop-core` or a dedicated crate
+- storage abstraction in `tau-core` or a dedicated crate
 - tests for append and reload behavior
 
 Acceptance criteria:
@@ -414,7 +414,7 @@ Non-goals:
 
 Expected outputs:
 
-- `shlop-agent` crate
+- `tau-agent` crate
 - one deterministic or very simple agent behavior for testing
 
 Acceptance criteria:
@@ -457,7 +457,7 @@ Priority: vertical-slice critical
 
 Objective:
 
-Provide the minimal user-facing way to drive `shlop`.
+Provide the minimal user-facing way to drive `tau`.
 
 Scope:
 
@@ -473,7 +473,7 @@ Non-goals:
 
 Expected outputs:
 
-- `shlop-cli` crate
+- `tau-cli` crate
 - one ergonomic path for embedded use
 - one ergonomic path for daemon attach
 
@@ -502,7 +502,7 @@ Non-goals:
 
 Expected outputs:
 
-- `shlop-ext-fs` crate
+- `tau-ext-fs` crate
 - tests with temporary directories
 
 Acceptance criteria:
@@ -530,7 +530,7 @@ Non-goals:
 
 Expected outputs:
 
-- `shlop-ext-shell` crate
+- `tau-ext-shell` crate
 - basic execution tests
 
 Acceptance criteria:
