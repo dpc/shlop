@@ -10,10 +10,10 @@
 //!
 //! Key differences from fish:
 //! - We don't track styling/attributes (yet), just character content.
-//! - We use a simpler line model (Vec<Vec<char>>) instead of fish's
-//!   Line struct with soft-wrap tracking.
-//! - We always use relative cursor movement (MoveUp, `\r`, `\n`,
-//!   MoveToColumn) — never absolute positioning.
+//! - We use a simpler line model (Vec<Vec<char>>) instead of fish's Line struct
+//!   with soft-wrap tracking.
+//! - We always use relative cursor movement (MoveUp, `\r`, `\n`, MoveToColumn)
+//!   — never absolute positioning.
 //!
 //! Downward movement uses `\n` rather than `MoveDown` because `\n`
 //! scrolls the terminal when at the bottom of the screen and creates
@@ -21,10 +21,10 @@
 
 use std::io::{self, Write};
 
+use crossterm::QueueableCommand;
 use crossterm::cursor::{MoveToColumn, MoveUp};
 use crossterm::style::Print;
 use crossterm::terminal::{self, ClearType};
-use crossterm::QueueableCommand;
 
 /// Virtual screen state with diff-based updates.
 pub struct Screen {
@@ -184,11 +184,9 @@ impl Screen {
             w.queue(MoveUp((self.cursor_row - row) as u16))?;
         } else if row > self.cursor_row {
             // Use \r\n for downward movement:
-            // - \n scrolls at the screen bottom (unlike MoveDown which
-            //   silently stops)
-            // - \r resets the column to 0, which is needed because \n
-            //   alone preserves the column, and in pending-wrap state
-            //   the column may be past the screen edge
+            // - \n scrolls at the screen bottom (unlike MoveDown which silently stops)
+            // - \r resets the column to 0, which is needed because \n alone preserves the
+            //   column, and in pending-wrap state the column may be past the screen edge
             let down = row - self.cursor_row;
             for _ in 0..down {
                 w.queue(Print("\r\n"))?;
@@ -503,19 +501,16 @@ mod tests {
     fn right_prompt_hidden_when_input_too_long() {
         let mut t = TestTerm::new(24, 20);
         // "> " (2) + 15 chars + 1 gap + "[ok]" (4) = 22 > 20.
-        let (lines, cursor) = build_prompt_layout(
-            "",
-            "> ",
-            "abcdefghijklmno",
-            "[ok]",
-            20,
-        );
+        let (lines, cursor) = build_prompt_layout("", "> ", "abcdefghijklmno", "[ok]", 20);
         let mut buf = Vec::new();
         t.screen.update(&mut buf, &lines, cursor).expect("ok");
         t.term.process(&buf);
 
         let row = t.row_text(0);
-        assert!(!row.contains("[ok]"), "right prompt should be hidden, row: {row:?}");
+        assert!(
+            !row.contains("[ok]"),
+            "right prompt should be hidden, row: {row:?}"
+        );
         assert!(row.starts_with("> abcdefghijklmno"), "row: {row:?}");
     }
 
@@ -537,13 +532,7 @@ mod tests {
     #[test]
     fn all_three_zones_together() {
         let mut t = TestTerm::new(24, 40);
-        let (lines, cursor) = build_prompt_layout(
-            "tau v0.1",
-            "$ ",
-            "ls",
-            "[main]",
-            40,
-        );
+        let (lines, cursor) = build_prompt_layout("tau v0.1", "$ ", "ls", "[main]", 40);
         let mut buf = Vec::new();
         t.screen.update(&mut buf, &lines, cursor).expect("ok");
         t.term.process(&buf);

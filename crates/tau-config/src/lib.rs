@@ -2,7 +2,8 @@
 //!
 //! Default paths follow standard platform conventions via the `dirs` crate:
 //!
-//! - user config: `<config_dir>/tau/config.toml` (e.g. `~/.config/tau/config.toml`)
+//! - user config: `<config_dir>/tau/config.toml` (e.g.
+//!   `~/.config/tau/config.toml`)
 //! - project config: `<project-root>/.tau.toml`
 //!
 //! Project config layering is additive for `[[extensions]]`: project entries

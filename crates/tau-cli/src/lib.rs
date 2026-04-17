@@ -25,7 +25,7 @@ use tau_proto::{
     ProgressUpdate, ToolError, ToolProgress, ToolRegister, ToolRequest, ToolResult,
 };
 use tau_socket::{SocketListener, SocketPeer, SocketTransportError};
-use tau_supervisor::{ExtensionCommand, SupervisionError, SupervisedChild};
+use tau_supervisor::{ExtensionCommand, SupervisedChild, SupervisionError};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(2);
@@ -248,9 +248,7 @@ enum ExtensionTransport {
         thread: Option<JoinHandle<Result<(), String>>>,
     },
     /// Real child process via stdio.
-    Supervised {
-        child: Rc<RefCell<SupervisedChild>>,
-    },
+    Supervised { child: Rc<RefCell<SupervisedChild>> },
 }
 
 /// One live extension managed by the harness.
@@ -296,11 +294,9 @@ impl ExtensionHandle {
             ExtensionTransport::InProcess { peer, .. } => {
                 Box::new(LocalPeerSink { peer: peer.clone() })
             }
-            ExtensionTransport::Supervised { child } => {
-                Box::new(SupervisedChildSink {
-                    child: child.clone(),
-                })
-            }
+            ExtensionTransport::Supervised { child } => Box::new(SupervisedChildSink {
+                child: child.clone(),
+            }),
         }
     }
 }
@@ -338,7 +334,11 @@ impl Harness {
             spawn_local_participant("shell-tool", ClientKind::Tool, |reader, writer| {
                 tau_ext_shell::run(reader, writer).map_err(|error| error.to_string())
             })?;
-        Self::init(vec![agent, filesystem_tool, shell_tool], store_path, policy_store_path)
+        Self::init(
+            vec![agent, filesystem_tool, shell_tool],
+            store_path,
+            policy_store_path,
+        )
     }
 
     /// Creates a harness from loaded configuration, spawning real child
@@ -424,8 +424,7 @@ impl Harness {
                             ready_count += 1;
                         }
                         let conn_id = self.extensions[i].connection_id.clone();
-                        let _ =
-                            self.handle_participant_event(&conn_id, event, &mut Vec::new())?;
+                        let _ = self.handle_participant_event(&conn_id, event, &mut Vec::new())?;
                     }
                     TransportPoll::Disconnected => {
                         let name = self.extensions[i].name.clone();
@@ -721,9 +720,7 @@ impl Harness {
                 ExtensionTransport::InProcess { thread, .. } => {
                     if let Some(handle) = thread.take() {
                         let name = self.extensions[i].name.clone();
-                        let result = handle
-                            .join()
-                            .map_err(|_| CliError::ThreadJoin(name))?;
+                        let result = handle.join().map_err(|_| CliError::ThreadJoin(name))?;
                         result.map_err(CliError::Participant)?;
                     }
                 }

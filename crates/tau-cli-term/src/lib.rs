@@ -8,14 +8,14 @@
 //!
 //! The prompt display is composed of three configurable zones:
 //!
-//! - **Above-prompt**: Optional multi-line text displayed above the input
-//!   line (e.g. status information, context). Updated via
+//! - **Above-prompt**: Optional multi-line text displayed above the input line
+//!   (e.g. status information, context). Updated via
 //!   [`Prompt::set_above_prompt`].
-//! - **Left-prompt**: The prefix before user input (e.g. `"> "`). Updated
-//!   via [`Prompt::set_left_prompt`].
-//! - **Right-prompt**: Right-justified text on the first physical line of
-//!   the input area. Hidden when the user input would overlap it. Updated
-//!   via [`Prompt::set_right_prompt`].
+//! - **Left-prompt**: The prefix before user input (e.g. `"> "`). Updated via
+//!   [`Prompt::set_left_prompt`].
+//! - **Right-prompt**: Right-justified text on the first physical line of the
+//!   input area. Hidden when the user input would overlap it. Updated via
+//!   [`Prompt::set_right_prompt`].
 //!
 //! All zones are part of the diff-rendered screen area, so changes are
 //! applied with minimal terminal I/O.
@@ -38,9 +38,7 @@ use std::thread::{self, JoinHandle};
 
 use crossterm::event::{self, Event as CtEvent, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::style::Print;
-use crossterm::terminal;
-use crossterm::QueueableCommand;
-
+use crossterm::{QueueableCommand, terminal};
 use screen::{Screen, layout_lines};
 
 /// Events flowing into the UI loop from any producer.
@@ -271,11 +269,7 @@ impl Prompt {
             KeyCode::Char('w') if ctrl => {
                 if self.cursor > 0 {
                     let before = &self.buffer[..self.cursor];
-                    let new_end = before
-                        .trim_end()
-                        .rfind(' ')
-                        .map(|i| i + 1)
-                        .unwrap_or(0);
+                    let new_end = before.trim_end().rfind(' ').map(|i| i + 1).unwrap_or(0);
                     self.buffer.drain(new_end..self.cursor);
                     self.cursor = new_end;
                     self.render()?;
@@ -416,8 +410,8 @@ impl Prompt {
     ///
     /// Layout (top to bottom):
     /// 1. Above-prompt lines (if non-empty)
-    /// 2. Left-prompt + user input (possibly wrapped), with right-prompt
-    ///    on the first physical line if it fits
+    /// 2. Left-prompt + user input (possibly wrapped), with right-prompt on the
+    ///    first physical line if it fits
     fn render(&mut self) -> io::Result<()> {
         self.screen.set_width(term_width());
         let width = self.screen.width();

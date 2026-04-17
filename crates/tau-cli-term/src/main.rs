@@ -40,7 +40,10 @@ fn spawn_animator(tx: OutputSender) {
             tick += 1;
 
             // Bouncing ball in a 3-line-high box spanning terminal width.
-            let ball_width = terminal::size().map(|(w, _)| w as usize).unwrap_or(80).max(2);
+            let ball_width = terminal::size()
+                .map(|(w, _)| w as usize)
+                .unwrap_or(80)
+                .max(2);
             let mut above = String::new();
             for row in 0..3_usize {
                 for col in 0..ball_width {
