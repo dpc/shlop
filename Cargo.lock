@@ -621,6 +621,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "tau"
+version = "0.1.0"
+dependencies = [
+ "tau-cli",
+]
+
+[[package]]
 name = "tau-agent"
 version = "0.1.0"
 dependencies = [

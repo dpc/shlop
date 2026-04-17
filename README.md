@@ -1,6 +1,31 @@
-# tau
+# Tau coding agent
 
-Rust workspace skeleton for the `tau` agent harness.
+> Tau is like [Pi][pi], but twice as much.
+
+[Pi][pi] is truly a breath of fresh air in the AI harness space,
+but it doesn't go far enough. Tau is twice as as Unix-like,
+which is twice as everything.
+
+Instead of being built on top of a Typescript runtime, Tau builds on top
+the most venerable, powerful and ubiquitous runtime there is: Unix itself.
+
+Tau runs all its components as standalone Posix processes, communicating
+over stdio/rpc.
+
+Components include:
+
+* UI
+* harness
+* LLM API
+* each extension
+
+This architecture has tremendous benefits:
+
+* each component can be ran and sandboxed individually using tools like bubblewrap, docker, VM, or a different machine
+* components can be implemented in any programming language,
+*
+
+[pi]: https://shittycodingagent.ai/
 
 ## Workspace layout
 

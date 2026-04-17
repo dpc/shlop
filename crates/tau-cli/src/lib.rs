@@ -242,7 +242,7 @@ impl ConnectionSink for SupervisedChildSink {
 
 /// Transport backend for one extension connection.
 enum ExtensionTransport {
-    /// In-process via `UnixStream` pair (used by tests and in-process spawning).
+    /// In-process via `UnixStream` pair (used by tests).
     InProcess {
         peer: Rc<RefCell<LocalPeer>>,
         thread: Option<JoinHandle<Result<(), String>>>,
@@ -964,21 +964,6 @@ fn latest_agent_preview(session: &tau_core::SessionSnapshot) -> Option<String> {
 // Public API — interactive chat loop
 // ---------------------------------------------------------------------------
 
-/// Runs an interactive chat loop reading from stdin with in-process
-/// extensions.
-pub fn run_interactive(
-    session_store_path: impl Into<PathBuf>,
-    session_id: &str,
-) -> Result<(), CliError> {
-    let session_store_path = session_store_path.into();
-    let mut harness = Harness::new(
-        session_store_path.clone(),
-        default_policy_store_path_from_session_store(&session_store_path),
-    )?;
-    interactive_loop(&mut harness, session_id)?;
-    harness.shutdown()
-}
-
 /// Runs an interactive chat loop reading from stdin using extensions from
 /// configuration.
 pub fn run_interactive_with_config(
@@ -1034,8 +1019,44 @@ fn interactive_loop(harness: &mut Harness, session_id: &str) -> Result<(), CliEr
     Ok(())
 }
 
+/// Returns a default configuration that spawns built-in components via
+/// `tau component <name>`. Used when no config file is found.
+pub fn default_config() -> tau_config::Config {
+    use tau_config::{Config, CoreConfig, CoreMode, ExtensionConfig};
+
+    let tau_binary = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "tau".to_owned());
+
+    Config {
+        core: CoreConfig {
+            mode: CoreMode::Embedded,
+        },
+        extensions: vec![
+            ExtensionConfig {
+                name: "agent".to_owned(),
+                command: tau_binary.clone(),
+                args: vec!["component".to_owned(), "agent".to_owned()],
+                role: Some("agent".to_owned()),
+            },
+            ExtensionConfig {
+                name: "filesystem-tool".to_owned(),
+                command: tau_binary.clone(),
+                args: vec!["component".to_owned(), "ext-fs".to_owned()],
+                role: Some("tool".to_owned()),
+            },
+            ExtensionConfig {
+                name: "shell-tool".to_owned(),
+                command: tau_binary,
+                args: vec!["component".to_owned(), "ext-shell".to_owned()],
+                role: Some("tool".to_owned()),
+            },
+        ],
+    }
+}
+
 // ---------------------------------------------------------------------------
-// Public API — in-process (test-friendly) path
+// Public API — in-process path (test-only, requires extension crates)
 // ---------------------------------------------------------------------------
 
 /// Runs one embedded interaction and returns progress plus the final agent
@@ -1361,6 +1382,181 @@ pub fn policy_lines(path: impl AsRef<Path>) -> Result<Vec<String>, CliError> {
             )
         })
         .collect())
+}
+
+// ---------------------------------------------------------------------------
+// Entrypoint for the unified binary
+// ---------------------------------------------------------------------------
+
+/// Parses CLI arguments via clap and dispatches to the appropriate
+/// command. Intended to be called from the unified `tau` binary or
+/// from the standalone `tau-cli` binary.
+pub fn main_with_args() -> std::process::ExitCode {
+    use std::process::ExitCode;
+
+    use clap::Parser;
+    use tau_config::{LoadConfigError, LoadOptions};
+
+    fn try_load_config(
+        explicit_path: Option<&std::path::Path>,
+    ) -> Result<Option<tau_config::Config>, CliError> {
+        let options = match explicit_path {
+            Some(path) => LoadOptions {
+                user_config_path: Some(path.to_owned()),
+                enable_project_config: false,
+                project_config_path: None,
+            },
+            None => LoadOptions {
+                user_config_path: None,
+                enable_project_config: true,
+                project_config_path: None,
+            },
+        };
+
+        match tau_config::load(&options) {
+            Ok(config) if !config.extensions.is_empty() => Ok(Some(config)),
+            Ok(_) => Ok(None),
+            Err(LoadConfigError::MissingExplicitFile { path }) => Err(CliError::Participant(
+                format!("config file not found: {}", path.display()),
+            )),
+            Err(
+                LoadConfigError::CurrentDirectory(_)
+                | LoadConfigError::ReadFile { .. }
+                | LoadConfigError::ParseFile { .. },
+            ) => Ok(None),
+        }
+    }
+
+    fn resolve_config(
+        explicit_path: Option<&std::path::Path>,
+    ) -> Result<tau_config::Config, CliError> {
+        match try_load_config(explicit_path)? {
+            Some(cfg) => Ok(cfg),
+            None => Ok(default_config()),
+        }
+    }
+
+    fn run() -> Result<(), CliError> {
+        let parsed = cli::Cli::parse();
+
+        match parsed.command {
+            cli::Command::Chat {
+                session_id,
+                session_store,
+                config,
+            } => {
+                let cfg = resolve_config(config.as_deref())?;
+                run_interactive_with_config(&cfg, session_store, &session_id)
+            }
+
+            cli::Command::Embedded {
+                message,
+                session_id,
+                session_store,
+                config,
+            } => {
+                let cfg = resolve_config(config.as_deref())?;
+                match message {
+                    Some(message) => {
+                        let outcome = run_embedded_message_with_config(
+                            &cfg,
+                            session_store,
+                            &session_id,
+                            &message,
+                        )?;
+                        println!("user: {message}");
+                        for lifecycle in outcome.lifecycle_messages {
+                            println!("lifecycle: {lifecycle}");
+                        }
+                        for progress in outcome.progress_messages {
+                            println!("progress: {progress}");
+                        }
+                        println!("agent: {}", outcome.response);
+                        Ok(())
+                    }
+                    None => run_interactive_with_config(&cfg, session_store, &session_id),
+                }
+            }
+
+            cli::Command::Serve {
+                socket,
+                session_store,
+                policy_store,
+                config,
+            } => {
+                let cfg = resolve_config(config.as_deref())?;
+                eprintln!("serving on {}", socket.display());
+                let options = ServeOptions {
+                    max_clients: None,
+                    policy_store_path: Some(policy_store),
+                };
+                run_daemon_with_config(&cfg, socket, session_store, options)
+            }
+
+            cli::Command::Send {
+                message,
+                session_id,
+                socket,
+            } => {
+                let outcome = send_daemon_message_with_trace(socket, &session_id, &message)?;
+                println!("user: {message}");
+                for lifecycle in outcome.lifecycle_messages {
+                    println!("lifecycle: {lifecycle}");
+                }
+                for progress in outcome.progress_messages {
+                    println!("progress: {progress}");
+                }
+                println!("agent: {}", outcome.response);
+                Ok(())
+            }
+
+            cli::Command::SessionList { session_store } => {
+                for line in session_list_lines(session_store)? {
+                    println!("{line}");
+                }
+                Ok(())
+            }
+
+            cli::Command::SessionShow {
+                session_id,
+                session_store,
+            } => {
+                for line in session_lines(session_store, &session_id)? {
+                    println!("{line}");
+                }
+                Ok(())
+            }
+
+            cli::Command::PolicyShow { policy_store } => {
+                for line in policy_lines(policy_store)? {
+                    println!("{line}");
+                }
+                Ok(())
+            }
+
+            cli::Command::Component { name } => {
+                let runner: fn() -> Result<(), Box<dyn std::error::Error>> = match name.as_str() {
+                    "agent" => tau_agent::run_stdio,
+                    "ext-fs" => tau_ext_fs::run_stdio,
+                    "ext-shell" => tau_ext_shell::run_stdio,
+                    _ => {
+                        return Err(CliError::Participant(format!(
+                            "unknown component: {name}\navailable: agent, ext-fs, ext-shell"
+                        )));
+                    }
+                };
+                runner().map_err(|e| CliError::Participant(e.to_string()))
+            }
+        }
+    }
+
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("error: {error}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

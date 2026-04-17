@@ -107,4 +107,12 @@ pub enum Command {
         #[arg(long, default_value_os_t = default_policy_store_path())]
         policy_store: PathBuf,
     },
+
+    /// Run an internal component as a standalone process (used by the
+    /// harness to spawn extensions from the unified binary).
+    #[command(hide = true)]
+    Component {
+        /// Component name (agent, ext-fs, ext-shell)
+        name: String,
+    },
 }

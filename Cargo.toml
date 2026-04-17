@@ -11,6 +11,7 @@ members = [
   "crates/tau-supervisor",
   "crates/tau-test-support",
   "crates/tau-cli-term",
+  "crates/tau",
 ]
 resolver = "2"
 
