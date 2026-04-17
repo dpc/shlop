@@ -73,6 +73,11 @@ fn spawn_animator(tx: OutputSender) {
             let mins = (secs / 60) % 60;
             let s = secs % 60;
             let _ = tx.set_right_prompt(format!("{hours:02}:{mins:02}:{s:02}"));
+
+            // Log a tick message every second (every 5th iteration).
+            if tick % 5 == 0 {
+                let _ = tx.send(format!("[tick {}]", tick / 5));
+            }
         }
     });
 }
