@@ -10,3 +10,6 @@ workspace = true
 
 [dependencies]
 crossterm = "0.28"
+
+[dev-dependencies]
+vt100 = "0.16"

@@ -116,15 +116,13 @@ impl Screen {
             if common_prefix < desired_slice.len() {
                 let new_content: String = desired_slice[common_prefix..].iter().collect();
                 w.queue(Print(new_content))?;
-                let new_col = desired_slice.len();
-                if new_col >= self.width {
-                    // Printed a full line — the terminal wraps the cursor
-                    // to column 0 of the next row.
-                    self.cursor_row += new_col / self.width;
-                    self.cursor_col = new_col % self.width;
-                } else {
-                    self.cursor_col = new_col;
-                }
+                // layout_lines guarantees each line is at most `width`
+                // chars. At exactly `width`, the terminal enters a
+                // "pending wrap" state — the cursor is still on the
+                // current row at column `width`, not yet on the next
+                // row. We track this accurately so move_to computes
+                // correct relative movement.
+                self.cursor_col = desired_slice.len();
             }
 
             // Clear trailing characters / lines below as needed.
@@ -185,14 +183,16 @@ impl Screen {
         if row < self.cursor_row {
             w.queue(MoveUp((self.cursor_row - row) as u16))?;
         } else if row > self.cursor_row {
-            // Use \n for downward movement — it scrolls the terminal
-            // when at the bottom, unlike MoveDown which silently stops.
+            // Use \r\n for downward movement:
+            // - \n scrolls at the screen bottom (unlike MoveDown which
+            //   silently stops)
+            // - \r resets the column to 0, which is needed because \n
+            //   alone preserves the column, and in pending-wrap state
+            //   the column may be past the screen edge
             let down = row - self.cursor_row;
             for _ in 0..down {
-                w.queue(Print("\n"))?;
+                w.queue(Print("\r\n"))?;
             }
-            // \n may or may not reset column depending on terminal and
-            // raw mode settings, so always set column explicitly after.
             self.cursor_col = 0;
         }
 
@@ -223,20 +223,60 @@ pub fn layout_lines(content: &str, width: usize) -> Vec<Vec<char>> {
 mod tests {
     use super::*;
 
-    /// Captures output bytes so we can inspect what escape sequences the
-    /// screen emitted without needing a real terminal.
-    fn capture_update(
-        screen: &mut Screen,
-        desired: &[Vec<char>],
-        cursor: (usize, usize),
-    ) -> Vec<u8> {
-        let mut buf = Vec::new();
-        screen.update(&mut buf, desired, cursor).expect("update should succeed");
-        buf
+    /// Test harness: pairs our `Screen` with a `vt100::Parser` acting as
+    /// a headless terminal emulator. We feed our escape-sequence output
+    /// into vt100 and assert on the resulting screen state.
+    struct TestTerm {
+        screen: Screen,
+        term: vt100::Parser,
     }
 
-    fn chars(s: &str) -> Vec<char> {
-        s.chars().collect()
+    impl TestTerm {
+        fn new(rows: u16, cols: u16) -> Self {
+            Self {
+                screen: Screen::new(cols as usize),
+                term: vt100::Parser::new(rows, cols, 0),
+            }
+        }
+
+        /// Builds desired layout from content, feeds the diff output into
+        /// the terminal emulator.
+        fn render(&mut self, content: &str, cursor_char_offset: usize) {
+            let width = self.screen.width();
+            let desired = layout_lines(content, width);
+            let cursor = (cursor_char_offset / width, cursor_char_offset % width);
+            let mut buf = Vec::new();
+            self.screen
+                .update(&mut buf, &desired, cursor)
+                .expect("update should succeed");
+            self.term.process(&buf);
+        }
+
+        /// Invalidates the screen (as async output would) and re-renders.
+        fn invalidate_and_render(&mut self, content: &str, cursor_char_offset: usize) {
+            let mut buf = Vec::new();
+            self.screen
+                .erase_all(&mut buf)
+                .expect("erase should succeed");
+            self.screen.invalidate();
+            self.term.process(&buf);
+            self.render(content, cursor_char_offset);
+        }
+
+        /// Returns the text on a given terminal row (trimmed of trailing
+        /// whitespace).
+        fn row_text(&self, row: usize) -> String {
+            self.term
+                .screen()
+                .rows(0, self.term.screen().size().1)
+                .nth(row)
+                .unwrap_or_default()
+        }
+
+        /// Returns the cursor position as (row, col).
+        fn cursor(&self) -> (u16, u16) {
+            self.term.screen().cursor_position()
+        }
     }
 
     // --- layout tests ---
@@ -262,83 +302,110 @@ mod tests {
         assert_eq!(layout_lines("abc", 3), vec![vec!['a', 'b', 'c']]);
     }
 
-    // --- diff tests ---
+    // --- screen rendering tests (using vt100 as a headless terminal) ---
 
     #[test]
-    fn first_render_emits_full_content() {
-        let mut screen = Screen::new(80);
-        let desired = vec![chars("> hello")];
-        let output = capture_update(&mut screen, &desired, (0, 7));
-        let text = String::from_utf8_lossy(&output);
-        // Should contain the full prompt text.
-        assert!(text.contains("> hello"), "output: {text:?}");
+    fn first_render_shows_prompt() {
+        let mut t = TestTerm::new(24, 80);
+        t.render("> hello", 7);
+        assert_eq!(t.row_text(0), "> hello");
+        assert_eq!(t.cursor(), (0, 7));
     }
 
     #[test]
-    fn appending_one_char_emits_only_that_char() {
-        let mut screen = Screen::new(80);
-        let desired_1 = vec![chars("> hell")];
-        capture_update(&mut screen, &desired_1, (0, 6));
+    fn appending_one_char_updates_correctly() {
+        let mut t = TestTerm::new(24, 80);
+        t.render("> hell", 6);
+        assert_eq!(t.row_text(0), "> hell");
 
-        let desired_2 = vec![chars("> hello")];
-        let output = capture_update(&mut screen, &desired_2, (0, 7));
-        let text = String::from_utf8_lossy(&output);
-        // Should emit just "o", not the full line.
-        assert!(text.contains('o'), "output: {text:?}");
-        assert!(!text.contains("> hell"), "should not reprint prefix, output: {text:?}");
+        t.render("> hello", 7);
+        assert_eq!(t.row_text(0), "> hello");
+        assert_eq!(t.cursor(), (0, 7));
     }
 
     #[test]
-    fn identical_content_emits_nothing_except_cursor() {
-        let mut screen = Screen::new(80);
-        let desired = vec![chars("> hello")];
-        capture_update(&mut screen, &desired, (0, 7));
+    fn cursor_moves_without_changing_content() {
+        let mut t = TestTerm::new(24, 80);
+        t.render("> hello", 7);
 
-        // Same content, different cursor position.
-        let output = capture_update(&mut screen, &desired, (0, 2));
-        let text = String::from_utf8_lossy(&output);
-        // Should NOT contain the text content.
-        assert!(!text.contains("hello"), "output: {text:?}");
+        // Move cursor to position 2 (after "> ").
+        t.render("> hello", 2);
+        assert_eq!(t.row_text(0), "> hello");
+        assert_eq!(t.cursor(), (0, 2));
     }
 
     #[test]
-    fn shrinking_line_clears_remainder() {
-        let mut screen = Screen::new(80);
-        let desired_1 = vec![chars("> hello world")];
-        capture_update(&mut screen, &desired_1, (0, 13));
+    fn shrinking_clears_old_text() {
+        let mut t = TestTerm::new(24, 80);
+        t.render("> hello world", 13);
+        assert_eq!(t.row_text(0), "> hello world");
 
-        let desired_2 = vec![chars("> hi")];
-        let output = capture_update(&mut screen, &desired_2, (0, 4));
-        let text = String::from_utf8_lossy(&output);
-        // Should contain the clear-to-end-of-line escape.
-        // crossterm's UntilNewLine emits \x1b[K
-        assert!(text.contains("\x1b[K"), "should clear line tail, output: {text:?}");
+        t.render("> hi", 4);
+        assert_eq!(t.row_text(0), "> hi");
+        assert_eq!(t.cursor(), (0, 4));
     }
 
     #[test]
-    fn wrapping_to_second_line_works() {
-        let mut screen = Screen::new(10);
-        // "> " is 2 chars, "abcdefghij" is 10 chars = 12 total, wraps at col 10.
-        let desired = vec![chars("> abcdefgh"), chars("ij")];
-        let output = capture_update(&mut screen, &desired, (1, 2));
-        let text = String::from_utf8_lossy(&output);
-        // Should contain both line segments.
-        assert!(text.contains("> abcdefgh"), "output: {text:?}");
-        assert!(text.contains("ij"), "output: {text:?}");
+    fn wrapping_to_second_line() {
+        let mut t = TestTerm::new(24, 10);
+        // 12 chars total, wraps at column 10.
+        t.render("> abcdefghij", 12);
+        assert_eq!(t.row_text(0), "> abcdefgh");
+        assert_eq!(t.row_text(1), "ij");
+        assert_eq!(t.cursor(), (1, 2));
     }
 
     #[test]
     fn removing_wrapped_line_clears_it() {
-        let mut screen = Screen::new(10);
-        let desired_1 = vec![chars("> abcdefgh"), chars("ij")];
-        capture_update(&mut screen, &desired_1, (1, 2));
+        let mut t = TestTerm::new(24, 10);
+        t.render("> abcdefghij", 12);
+        assert_eq!(t.row_text(1), "ij");
 
-        // Now content fits on one line.
-        let desired_2 = vec![chars("> ab")];
-        let output = capture_update(&mut screen, &desired_2, (0, 4));
-        let text = String::from_utf8_lossy(&output);
-        // Should contain clear-from-cursor-down (\x1b[J) to wipe the
-        // stale second line.
-        assert!(text.contains("\x1b[J"), "should clear below, output: {text:?}");
+        t.render("> ab", 4);
+        assert_eq!(t.row_text(0), "> ab");
+        assert_eq!(t.row_text(1), "");
+        assert_eq!(t.cursor(), (0, 4));
+    }
+
+    #[test]
+    fn invalidate_and_rerender_after_async_output() {
+        let mut t = TestTerm::new(24, 80);
+        t.render("> hello", 7);
+        assert_eq!(t.row_text(0), "> hello");
+
+        // Simulate async output clearing the prompt area.
+        t.invalidate_and_render("> hello", 7);
+        assert_eq!(t.row_text(0), "> hello");
+        assert_eq!(t.cursor(), (0, 7));
+    }
+
+    #[test]
+    fn growing_from_one_to_two_lines() {
+        let mut t = TestTerm::new(24, 10);
+        t.render("> abcdefg", 9);
+        assert_eq!(t.row_text(0), "> abcdefg");
+        assert_eq!(t.row_text(1), "");
+
+        // Add one more char, fills the line exactly.
+        t.render("> abcdefgh", 10);
+        assert_eq!(t.row_text(0), "> abcdefgh");
+        // Cursor offset 10 / width 10 = row 1, col 0 (start of next line).
+        assert_eq!(t.cursor(), (1, 0));
+
+        // One more.
+        t.render("> abcdefghi", 11);
+        assert_eq!(t.row_text(0), "> abcdefgh");
+        assert_eq!(t.row_text(1), "i");
+        assert_eq!(t.cursor(), (1, 1));
+    }
+
+    #[test]
+    fn cursor_in_middle_of_wrapped_content() {
+        let mut t = TestTerm::new(24, 10);
+        // 15 chars, cursor at position 5.
+        t.render("> abcdefghijklm", 5);
+        assert_eq!(t.row_text(0), "> abcdefgh");
+        assert_eq!(t.row_text(1), "ijklm");
+        assert_eq!(t.cursor(), (0, 5));
     }
 }
