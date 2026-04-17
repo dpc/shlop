@@ -303,11 +303,13 @@ name = "shlop-cli"
 version = "0.1.0"
 dependencies = [
  "shlop-agent",
+ "shlop-config",
  "shlop-core",
  "shlop-ext-fs",
  "shlop-ext-shell",
  "shlop-proto",
  "shlop-socket",
+ "shlop-supervisor",
  "tempfile",
 ]
 

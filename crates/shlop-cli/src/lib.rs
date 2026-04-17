@@ -11,6 +11,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use shlop_config::{Config, ExtensionConfig};
 use shlop_core::{
     Connection, ConnectionMetadata, ConnectionOrigin, ConnectionSendError, ConnectionSink,
     DefaultSubscriptionPolicy, EventBus, PolicyStore, RouteError, SessionEntry, SessionStore,
@@ -22,6 +23,7 @@ use shlop_proto::{
     ProgressUpdate, ToolError, ToolProgress, ToolRegister, ToolRequest, ToolResult,
 };
 use shlop_socket::{SocketListener, SocketPeer, SocketTransportError};
+use shlop_supervisor::{ExtensionCommand, SupervisionError, SupervisedChild};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(2);
@@ -50,12 +52,14 @@ pub enum CliError {
     ProtocolEncode(shlop_proto::EncodeError),
     SessionStore(SessionStoreError),
     SocketTransport(SocketTransportError),
+    Supervision(SupervisionError),
     Route(RouteError),
     ToolRoute(ToolRouteError),
     StartupTimeout,
     ResponseTimeout,
-    ThreadJoin(&'static str),
+    ThreadJoin(String),
     Participant(String),
+    NoAgentConfigured,
 }
 
 impl fmt::Display for CliError {
@@ -66,6 +70,7 @@ impl fmt::Display for CliError {
             Self::ProtocolEncode(source) => write!(f, "protocol encode error: {source}"),
             Self::SessionStore(source) => write!(f, "session store error: {source}"),
             Self::SocketTransport(source) => write!(f, "socket transport error: {source}"),
+            Self::Supervision(source) => write!(f, "supervision error: {source}"),
             Self::Route(source) => write!(f, "routing error: {source}"),
             Self::ToolRoute(source) => write!(f, "tool routing error: {source}"),
             Self::StartupTimeout => {
@@ -74,6 +79,9 @@ impl fmt::Display for CliError {
             Self::ResponseTimeout => f.write_str("timed out waiting for agent response"),
             Self::ThreadJoin(name) => write!(f, "failed to join {name} thread cleanly"),
             Self::Participant(message) => write!(f, "participant error: {message}"),
+            Self::NoAgentConfigured => {
+                f.write_str("no extension with role \"agent\" in configuration")
+            }
         }
     }
 }
@@ -86,12 +94,14 @@ impl std::error::Error for CliError {
             Self::ProtocolEncode(source) => Some(source),
             Self::SessionStore(source) => Some(source),
             Self::SocketTransport(source) => Some(source),
+            Self::Supervision(source) => Some(source),
             Self::Route(source) => Some(source),
             Self::ToolRoute(source) => Some(source),
-            Self::StartupTimeout => None,
-            Self::ResponseTimeout => None,
-            Self::ThreadJoin(_) => None,
-            Self::Participant(_) => None,
+            Self::StartupTimeout
+            | Self::ResponseTimeout
+            | Self::ThreadJoin(_)
+            | Self::Participant(_)
+            | Self::NoAgentConfigured => None,
         }
     }
 }
@@ -120,6 +130,12 @@ impl From<SocketTransportError> for CliError {
     }
 }
 
+impl From<SupervisionError> for CliError {
+    fn from(source: SupervisionError) -> Self {
+        Self::Supervision(source)
+    }
+}
+
 impl From<RouteError> for CliError {
     fn from(source: RouteError) -> Self {
         Self::Route(source)
@@ -132,8 +148,12 @@ impl From<ToolRouteError> for CliError {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Transport types
+// ---------------------------------------------------------------------------
+
 #[derive(Debug)]
-enum LocalPeerPoll {
+enum TransportPoll {
     Event(Event),
     Timeout,
     Disconnected,
@@ -163,13 +183,13 @@ impl LocalPeer {
         Ok(())
     }
 
-    fn recv_timeout(&mut self, timeout: Duration) -> Result<LocalPeerPoll, CliError> {
+    fn recv_timeout(&mut self, timeout: Duration) -> Result<TransportPoll, CliError> {
         match self.incoming.recv_timeout(timeout) {
-            Ok(Ok(event)) => Ok(LocalPeerPoll::Event(event)),
-            Ok(Err(error)) if is_unexpected_eof(&error) => Ok(LocalPeerPoll::Disconnected),
+            Ok(Ok(event)) => Ok(TransportPoll::Event(event)),
+            Ok(Err(error)) if is_unexpected_eof(&error) => Ok(TransportPoll::Disconnected),
             Ok(Err(error)) => Err(CliError::ProtocolDecode(error)),
-            Err(RecvTimeoutError::Timeout) => Ok(LocalPeerPoll::Timeout),
-            Err(RecvTimeoutError::Disconnected) => Ok(LocalPeerPoll::Disconnected),
+            Err(RecvTimeoutError::Timeout) => Ok(TransportPoll::Timeout),
+            Err(RecvTimeoutError::Disconnected) => Ok(TransportPoll::Disconnected),
         }
     }
 }
@@ -201,13 +221,91 @@ impl ConnectionSink for SocketPeerSink {
     }
 }
 
-#[derive(Debug)]
-struct ParticipantHandle {
+struct SupervisedChildSink {
+    child: Rc<RefCell<SupervisedChild>>,
+}
+
+impl ConnectionSink for SupervisedChildSink {
+    fn send(&mut self, event: shlop_core::RoutedEvent) -> Result<(), ConnectionSendError> {
+        self.child
+            .borrow_mut()
+            .send(&event.event)
+            .map_err(|error| ConnectionSendError::new(error.to_string()))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Extension handle — transport-agnostic wrapper for one extension connection
+// ---------------------------------------------------------------------------
+
+/// Transport backend for one extension connection.
+enum ExtensionTransport {
+    /// In-process via `UnixStream` pair (used by tests and in-process spawning).
+    InProcess {
+        peer: Rc<RefCell<LocalPeer>>,
+        thread: Option<JoinHandle<Result<(), String>>>,
+    },
+    /// Real child process via stdio.
+    Supervised {
+        child: Rc<RefCell<SupervisedChild>>,
+    },
+}
+
+/// One live extension managed by the harness.
+struct ExtensionHandle {
+    name: String,
+    kind: ClientKind,
     connection_id: String,
     connected: bool,
-    peer: Rc<RefCell<LocalPeer>>,
-    thread: Option<JoinHandle<Result<(), String>>>,
+    transport: ExtensionTransport,
 }
+
+impl ExtensionHandle {
+    fn poll(&self, timeout: Duration) -> Result<TransportPoll, CliError> {
+        match &self.transport {
+            ExtensionTransport::InProcess { peer, .. } => peer.borrow_mut().recv_timeout(timeout),
+            ExtensionTransport::Supervised { child } => {
+                let result = child
+                    .borrow_mut()
+                    .recv_timeout(timeout)
+                    .map_err(|e| CliError::Participant(e.to_string()))?;
+                match result {
+                    Some(event) => Ok(TransportPoll::Event(event)),
+                    None => {
+                        // Distinguish timeout from child exit.
+                        if child
+                            .borrow_mut()
+                            .try_wait()
+                            .map_err(|e| CliError::Participant(e.to_string()))?
+                            .is_some()
+                        {
+                            Ok(TransportPoll::Disconnected)
+                        } else {
+                            Ok(TransportPoll::Timeout)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn make_sink(&self) -> Box<dyn ConnectionSink> {
+        match &self.transport {
+            ExtensionTransport::InProcess { peer, .. } => {
+                Box::new(LocalPeerSink { peer: peer.clone() })
+            }
+            ExtensionTransport::Supervised { child } => {
+                Box::new(SupervisedChildSink {
+                    child: child.clone(),
+                })
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Harness — the core runtime that manages extensions, routing, and state
+// ---------------------------------------------------------------------------
 
 struct Harness {
     bus: EventBus,
@@ -217,21 +315,16 @@ struct Harness {
     pending_tool_sessions: std::collections::HashMap<String, String>,
     extension_statuses: std::collections::HashMap<String, Event>,
     lifecycle_messages: Vec<String>,
-    agent: ParticipantHandle,
-    filesystem_tool: ParticipantHandle,
-    shell_tool: ParticipantHandle,
+    extensions: Vec<ExtensionHandle>,
+    agent_index: usize,
 }
 
 impl Harness {
+    /// Creates a harness using in-process extensions (agent, fs, shell).
     fn new(
         store_path: impl Into<PathBuf>,
         policy_store_path: impl Into<PathBuf>,
     ) -> Result<Self, CliError> {
-        let mut bus = EventBus::with_subscription_policy(Box::new(
-            DefaultSubscriptionPolicy::with_store(PolicyStore::open(policy_store_path.into())?),
-        ));
-        let store = SessionStore::open(store_path)?;
-
         let agent = spawn_local_participant("agent", ClientKind::Agent, |reader, writer| {
             shlop_agent::run(reader, writer).map_err(|error| error.to_string())
         })?;
@@ -243,40 +336,52 @@ impl Harness {
             spawn_local_participant("shell-tool", ClientKind::Tool, |reader, writer| {
                 shlop_ext_shell::run(reader, writer).map_err(|error| error.to_string())
             })?;
+        Self::init(vec![agent, filesystem_tool, shell_tool], store_path, policy_store_path)
+    }
 
-        let agent_id = bus.connect(Connection::new(
-            ConnectionMetadata {
-                id: String::new(),
-                name: "agent".to_owned(),
-                kind: ClientKind::Agent,
-                origin: ConnectionOrigin::Supervised,
-            },
-            Box::new(LocalPeerSink {
-                peer: agent.peer.clone(),
-            }),
+    /// Creates a harness from loaded configuration, spawning real child
+    /// processes.
+    fn from_config(
+        config: &Config,
+        store_path: impl Into<PathBuf>,
+        policy_store_path: impl Into<PathBuf>,
+    ) -> Result<Self, CliError> {
+        let extensions = config
+            .extensions
+            .iter()
+            .map(spawn_supervised_extension)
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::init(extensions, store_path, policy_store_path)
+    }
+
+    fn init(
+        mut extensions: Vec<ExtensionHandle>,
+        store_path: impl Into<PathBuf>,
+        policy_store_path: impl Into<PathBuf>,
+    ) -> Result<Self, CliError> {
+        let mut bus = EventBus::with_subscription_policy(Box::new(
+            DefaultSubscriptionPolicy::with_store(PolicyStore::open(policy_store_path.into())?),
         ));
-        let filesystem_tool_id = bus.connect(Connection::new(
-            ConnectionMetadata {
-                id: String::new(),
-                name: "filesystem-tool".to_owned(),
-                kind: ClientKind::Tool,
-                origin: ConnectionOrigin::Supervised,
-            },
-            Box::new(LocalPeerSink {
-                peer: filesystem_tool.peer.clone(),
-            }),
-        ));
-        let shell_tool_id = bus.connect(Connection::new(
-            ConnectionMetadata {
-                id: String::new(),
-                name: "shell-tool".to_owned(),
-                kind: ClientKind::Tool,
-                origin: ConnectionOrigin::Supervised,
-            },
-            Box::new(LocalPeerSink {
-                peer: shell_tool.peer.clone(),
-            }),
-        ));
+        let store = SessionStore::open(store_path)?;
+
+        let agent_index = extensions
+            .iter()
+            .position(|ext| ext.kind == ClientKind::Agent)
+            .ok_or(CliError::NoAgentConfigured)?;
+
+        for ext in &mut extensions {
+            let connection_id = bus.connect(Connection::new(
+                ConnectionMetadata {
+                    id: String::new(),
+                    name: ext.name.clone(),
+                    kind: ext.kind.clone(),
+                    origin: ConnectionOrigin::Supervised,
+                },
+                ext.make_sink(),
+            ));
+            ext.connection_id = connection_id;
+            ext.connected = true;
+        }
 
         let mut harness = Self {
             bus,
@@ -286,124 +391,51 @@ impl Harness {
             pending_tool_sessions: std::collections::HashMap::new(),
             extension_statuses: std::collections::HashMap::new(),
             lifecycle_messages: Vec::new(),
-            agent: ParticipantHandle {
-                connection_id: agent_id,
-                connected: true,
-                ..agent
-            },
-            filesystem_tool: ParticipantHandle {
-                connection_id: filesystem_tool_id,
-                connected: true,
-                ..filesystem_tool
-            },
-            shell_tool: ParticipantHandle {
-                connection_id: shell_tool_id,
-                connected: true,
-                ..shell_tool
-            },
+            extensions,
+            agent_index,
         };
-        harness.emit_extension_starting("agent");
-        harness.emit_extension_starting("filesystem-tool");
-        harness.emit_extension_starting("shell-tool");
+
+        for i in 0..harness.extensions.len() {
+            let name = harness.extensions[i].name.clone();
+            harness.emit_extension_starting(&name);
+        }
         harness.wait_for_startup()?;
         Ok(harness)
     }
 
     fn wait_for_startup(&mut self) -> Result<(), CliError> {
         let started_at = Instant::now();
-        let mut agent_ready = false;
-        let mut filesystem_ready = false;
-        let mut shell_ready = false;
-        let mut echo_registered = false;
-        let mut fs_registered = false;
-        let mut shell_registered = false;
+        let total = self.extensions.len();
+        let mut ready_count = 0;
 
-        while !(agent_ready
-            && filesystem_ready
-            && shell_ready
-            && echo_registered
-            && fs_registered
-            && shell_registered)
-        {
+        while ready_count < total {
             if STARTUP_TIMEOUT <= started_at.elapsed() {
                 return Err(CliError::StartupTimeout);
             }
-
-            let agent_event = { self.agent.peer.borrow_mut().recv_timeout(POLL_INTERVAL)? };
-            match agent_event {
-                LocalPeerPoll::Event(event) => {
-                    if matches!(event, Event::LifecycleReady(_)) {
-                        agent_ready = true;
+            for i in 0..self.extensions.len() {
+                if !self.extensions[i].connected {
+                    continue;
+                }
+                match self.extensions[i].poll(POLL_INTERVAL)? {
+                    TransportPoll::Event(event) => {
+                        if matches!(event, Event::LifecycleReady(_)) {
+                            ready_count += 1;
+                        }
+                        let conn_id = self.extensions[i].connection_id.clone();
+                        let _ =
+                            self.handle_participant_event(&conn_id, event, &mut Vec::new())?;
                     }
-                    let agent_id = self.agent.connection_id.clone();
-                    let _ = self.handle_participant_event(&agent_id, event, &mut Vec::new())?;
-                }
-                LocalPeerPoll::Disconnected => {
-                    self.handle_participant_disconnect("agent");
-                    return Err(CliError::Participant(
-                        "agent disconnected during startup".to_owned(),
-                    ));
-                }
-                LocalPeerPoll::Timeout => {}
-            }
-
-            let filesystem_event = {
-                self.filesystem_tool
-                    .peer
-                    .borrow_mut()
-                    .recv_timeout(POLL_INTERVAL)?
-            };
-            match filesystem_event {
-                LocalPeerPoll::Event(event) => {
-                    if matches!(event, Event::LifecycleReady(_)) {
-                        filesystem_ready = true;
+                    TransportPoll::Disconnected => {
+                        let name = self.extensions[i].name.clone();
+                        self.handle_extension_disconnect(i);
+                        return Err(CliError::Participant(format!(
+                            "{name} disconnected during startup"
+                        )));
                     }
-                    if let Event::ToolRegister(register) = &event {
-                        echo_registered |= register.tool.name == shlop_ext_fs::DEMO_ECHO_TOOL_NAME;
-                        fs_registered |= register.tool.name == shlop_ext_fs::FS_READ_TOOL_NAME;
-                    }
-                    let filesystem_tool_id = self.filesystem_tool.connection_id.clone();
-                    let _ =
-                        self.handle_participant_event(&filesystem_tool_id, event, &mut Vec::new())?;
+                    TransportPoll::Timeout => {}
                 }
-                LocalPeerPoll::Disconnected => {
-                    self.handle_participant_disconnect("filesystem-tool");
-                    return Err(CliError::Participant(
-                        "filesystem-tool disconnected during startup".to_owned(),
-                    ));
-                }
-                LocalPeerPoll::Timeout => {}
-            }
-
-            let shell_event = {
-                self.shell_tool
-                    .peer
-                    .borrow_mut()
-                    .recv_timeout(POLL_INTERVAL)?
-            };
-            match shell_event {
-                LocalPeerPoll::Event(event) => {
-                    if matches!(event, Event::LifecycleReady(_)) {
-                        shell_ready = true;
-                    }
-                    if let Event::ToolRegister(register) = &event {
-                        shell_registered |=
-                            register.tool.name == shlop_ext_shell::SHELL_EXEC_TOOL_NAME;
-                    }
-                    let shell_tool_id = self.shell_tool.connection_id.clone();
-                    let _ =
-                        self.handle_participant_event(&shell_tool_id, event, &mut Vec::new())?;
-                }
-                LocalPeerPoll::Disconnected => {
-                    self.handle_participant_disconnect("shell-tool");
-                    return Err(CliError::Participant(
-                        "shell-tool disconnected during startup".to_owned(),
-                    ));
-                }
-                LocalPeerPoll::Timeout => {}
             }
         }
-
         Ok(())
     }
 
@@ -448,66 +480,28 @@ impl Harness {
         &mut self,
         progress_messages: &mut Vec<String>,
     ) -> Result<Option<ChatMessage>, CliError> {
-        if self.agent.connected {
-            let agent_event = { self.agent.peer.borrow_mut().recv_timeout(POLL_INTERVAL)? };
-            match agent_event {
-                LocalPeerPoll::Event(event) => {
-                    let agent_id = self.agent.connection_id.clone();
+        for i in 0..self.extensions.len() {
+            if !self.extensions[i].connected {
+                continue;
+            }
+            match self.extensions[i].poll(POLL_INTERVAL)? {
+                TransportPoll::Event(event) => {
+                    let conn_id = self.extensions[i].connection_id.clone();
                     if let Some(message) =
-                        self.handle_participant_event(&agent_id, event, progress_messages)?
+                        self.handle_participant_event(&conn_id, event, progress_messages)?
                     {
                         return Ok(Some(message));
                     }
                 }
-                LocalPeerPoll::Disconnected => {
-                    self.handle_participant_disconnect("agent");
-                    return Err(CliError::Participant("agent disconnected".to_owned()));
-                }
-                LocalPeerPoll::Timeout => {}
-            }
-        }
-        if self.filesystem_tool.connected {
-            let filesystem_event = {
-                self.filesystem_tool
-                    .peer
-                    .borrow_mut()
-                    .recv_timeout(POLL_INTERVAL)?
-            };
-            match filesystem_event {
-                LocalPeerPoll::Event(event) => {
-                    let filesystem_tool_id = self.filesystem_tool.connection_id.clone();
-                    if let Some(message) = self.handle_participant_event(
-                        &filesystem_tool_id,
-                        event,
-                        progress_messages,
-                    )? {
-                        return Ok(Some(message));
+                TransportPoll::Disconnected => {
+                    let is_agent = i == self.agent_index;
+                    let name = self.extensions[i].name.clone();
+                    self.handle_extension_disconnect(i);
+                    if is_agent {
+                        return Err(CliError::Participant(format!("{name} disconnected")));
                     }
                 }
-                LocalPeerPoll::Disconnected => {
-                    self.handle_participant_disconnect("filesystem-tool")
-                }
-                LocalPeerPoll::Timeout => {}
-            }
-        }
-        if self.shell_tool.connected {
-            let shell_event = {
-                self.shell_tool
-                    .peer
-                    .borrow_mut()
-                    .recv_timeout(POLL_INTERVAL)?
-            };
-            match shell_event {
-                LocalPeerPoll::Event(event) => {
-                    let shell_tool_id = self.shell_tool.connection_id.clone();
-                    if let Some(message) =
-                        self.handle_participant_event(&shell_tool_id, event, progress_messages)?
-                    {
-                        return Ok(Some(message));
-                    }
-                }
-                LocalPeerPoll::Disconnected => self.handle_participant_disconnect("shell-tool"),
-                LocalPeerPoll::Timeout => {}
+                TransportPoll::Timeout => {}
             }
         }
         Ok(None)
@@ -710,13 +704,9 @@ impl Harness {
     }
 
     fn shutdown(&mut self) -> Result<(), CliError> {
-        for connection_id in [
-            &self.agent.connection_id,
-            &self.filesystem_tool.connection_id,
-            &self.shell_tool.connection_id,
-        ] {
+        for ext in &self.extensions {
             let _ = self.bus.send_to(
-                connection_id,
+                &ext.connection_id,
                 None,
                 Event::LifecycleDisconnect(LifecycleDisconnect {
                     reason: Some("shutdown".to_owned()),
@@ -724,24 +714,23 @@ impl Harness {
             );
         }
 
-        if let Some(handle) = self.agent.thread.take() {
-            let result = handle.join().map_err(|_| CliError::ThreadJoin("agent"))?;
-            result.map_err(CliError::Participant)?;
-            self.emit_extension_exited("agent");
-        }
-        if let Some(handle) = self.filesystem_tool.thread.take() {
-            let result = handle
-                .join()
-                .map_err(|_| CliError::ThreadJoin("filesystem-tool"))?;
-            result.map_err(CliError::Participant)?;
-            self.emit_extension_exited("filesystem-tool");
-        }
-        if let Some(handle) = self.shell_tool.thread.take() {
-            let result = handle
-                .join()
-                .map_err(|_| CliError::ThreadJoin("shell-tool"))?;
-            result.map_err(CliError::Participant)?;
-            self.emit_extension_exited("shell-tool");
+        for i in 0..self.extensions.len() {
+            match &mut self.extensions[i].transport {
+                ExtensionTransport::InProcess { thread, .. } => {
+                    if let Some(handle) = thread.take() {
+                        let name = self.extensions[i].name.clone();
+                        let result = handle
+                            .join()
+                            .map_err(|_| CliError::ThreadJoin(name))?;
+                        result.map_err(CliError::Participant)?;
+                    }
+                }
+                ExtensionTransport::Supervised { child } => {
+                    let _ = child.borrow_mut().wait_for_exit(Duration::from_secs(5));
+                }
+            }
+            let name = self.extensions[i].name.clone();
+            self.emit_extension_exited(&name);
         }
         Ok(())
     }
@@ -757,25 +746,14 @@ impl Harness {
         let _ = self.bus.publish(event);
     }
 
-    fn handle_participant_disconnect(&mut self, extension_name: &str) {
-        let connection_id = match extension_name {
-            "agent" => {
-                self.agent.connected = false;
-                self.agent.connection_id.clone()
-            }
-            "filesystem-tool" => {
-                self.filesystem_tool.connected = false;
-                self.filesystem_tool.connection_id.clone()
-            }
-            "shell-tool" => {
-                self.shell_tool.connected = false;
-                self.shell_tool.connection_id.clone()
-            }
-            _ => return,
-        };
-        let _ = self.bus.disconnect(&connection_id);
-        let _ = self.registry.unregister_connection(&connection_id);
-        self.emit_extension_exited(extension_name);
+    fn handle_extension_disconnect(&mut self, index: usize) {
+        let ext = &mut self.extensions[index];
+        ext.connected = false;
+        let conn_id = ext.connection_id.clone();
+        let name = ext.name.clone();
+        let _ = self.bus.disconnect(&conn_id);
+        let _ = self.registry.unregister_connection(&conn_id);
+        self.emit_extension_exited(&name);
     }
 
     fn emit_extension_ready(&mut self, connection_id: &str) {
@@ -815,20 +793,22 @@ impl Harness {
         }
         Ok(())
     }
+
+    #[cfg(test)]
+    fn find_extension(&self, name: &str) -> Option<&ExtensionHandle> {
+        self.extensions.iter().find(|ext| ext.name == name)
+    }
 }
 
-fn wants_extension_events(selectors: &[EventSelector]) -> bool {
-    selectors.iter().any(|selector| match selector {
-        EventSelector::Exact(name) => name.as_str().starts_with("extension."),
-        EventSelector::Prefix(prefix) => prefix.starts_with("extension."),
-    })
-}
+// ---------------------------------------------------------------------------
+// Extension spawning helpers
+// ---------------------------------------------------------------------------
 
 fn spawn_local_participant<F>(
-    _name: &str,
-    _kind: ClientKind,
+    name: &str,
+    kind: ClientKind,
     run: F,
-) -> Result<ParticipantHandle, CliError>
+) -> Result<ExtensionHandle, CliError>
 where
     F: FnOnce(UnixStream, UnixStream) -> Result<(), String> + Send + 'static,
 {
@@ -836,11 +816,37 @@ where
     let reader_stream = runtime_stream.try_clone()?;
     let peer = Rc::new(RefCell::new(LocalPeer::new(core_stream)?));
     let thread = thread::spawn(move || run(reader_stream, runtime_stream));
-    Ok(ParticipantHandle {
+    Ok(ExtensionHandle {
+        name: name.to_owned(),
+        kind,
         connection_id: String::new(),
         connected: false,
-        peer,
-        thread: Some(thread),
+        transport: ExtensionTransport::InProcess {
+            peer,
+            thread: Some(thread),
+        },
+    })
+}
+
+fn spawn_supervised_extension(config: &ExtensionConfig) -> Result<ExtensionHandle, CliError> {
+    let kind = match config.role.as_deref() {
+        Some("agent") => ClientKind::Agent,
+        _ => ClientKind::Tool,
+    };
+    let command = ExtensionCommand {
+        name: config.name.clone(),
+        program: PathBuf::from(&config.command),
+        args: config.args.clone(),
+    };
+    let child = SupervisedChild::spawn(command)?;
+    Ok(ExtensionHandle {
+        name: config.name.clone(),
+        kind,
+        connection_id: String::new(),
+        connected: false,
+        transport: ExtensionTransport::Supervised {
+            child: Rc::new(RefCell::new(child)),
+        },
     })
 }
 
@@ -871,6 +877,17 @@ fn is_unexpected_eof(error: &DecodeError) -> bool {
         _ => false,
     }
 }
+
+fn wants_extension_events(selectors: &[EventSelector]) -> bool {
+    selectors.iter().any(|selector| match selector {
+        EventSelector::Exact(name) => name.as_str().starts_with("extension."),
+        EventSelector::Prefix(prefix) => prefix.starts_with("extension."),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Formatting helpers
+// ---------------------------------------------------------------------------
 
 fn format_tool_progress(progress: &ToolProgress) -> String {
     let mut text = progress.tool_name.clone();
@@ -941,6 +958,10 @@ fn latest_agent_preview(session: &shlop_core::SessionSnapshot) -> Option<String>
     })
 }
 
+// ---------------------------------------------------------------------------
+// Public API — in-process (test-friendly) path
+// ---------------------------------------------------------------------------
+
 /// Runs one embedded interaction and returns progress plus the final agent
 /// response.
 pub fn run_embedded_message_with_trace(
@@ -982,6 +1003,55 @@ pub fn run_daemon(
         .clone()
         .unwrap_or_else(|| default_policy_store_path_from_session_store(&session_store_path));
     let mut harness = Harness::new(session_store_path, policy_store_path)?;
+    serve_daemon_loop(&mut harness, &listener, &options)
+}
+
+// ---------------------------------------------------------------------------
+// Public API — config-driven (real subprocess) path
+// ---------------------------------------------------------------------------
+
+/// Runs one embedded interaction using extensions from configuration.
+pub fn run_embedded_message_with_config(
+    config: &Config,
+    session_store_path: impl Into<PathBuf>,
+    session_id: &str,
+    message: &str,
+) -> Result<InteractionOutcome, CliError> {
+    let session_store_path = session_store_path.into();
+    let mut harness = Harness::from_config(
+        config,
+        session_store_path.clone(),
+        default_policy_store_path_from_session_store(&session_store_path),
+    )?;
+    let mut outcome = harness.send_user_message(session_id, message, None)?;
+    harness.shutdown()?;
+    outcome.lifecycle_messages = harness.lifecycle_messages;
+    Ok(outcome)
+}
+
+/// Runs the foreground daemon loop using extensions from configuration.
+pub fn run_daemon_with_config(
+    config: &Config,
+    socket_path: impl Into<PathBuf>,
+    session_store_path: impl Into<PathBuf>,
+    options: ServeOptions,
+) -> Result<(), CliError> {
+    let socket_path = socket_path.into();
+    let session_store_path = session_store_path.into();
+    let listener = SocketListener::bind(&socket_path)?;
+    let policy_store_path = options
+        .policy_store_path
+        .clone()
+        .unwrap_or_else(|| default_policy_store_path_from_session_store(&session_store_path));
+    let mut harness = Harness::from_config(config, session_store_path, policy_store_path)?;
+    serve_daemon_loop(&mut harness, &listener, &options)
+}
+
+fn serve_daemon_loop(
+    harness: &mut Harness,
+    listener: &SocketListener,
+    options: &ServeOptions,
+) -> Result<(), CliError> {
     let mut handled_clients = 0_usize;
 
     loop {
@@ -1097,6 +1167,10 @@ pub fn send_daemon_message(
     Ok(send_daemon_message_with_trace(socket_path, session_id, message)?.response)
 }
 
+// ---------------------------------------------------------------------------
+// Path helpers
+// ---------------------------------------------------------------------------
+
 /// Returns the default session-store path used by the CLI.
 #[must_use]
 pub fn default_session_store_path() -> PathBuf {
@@ -1127,6 +1201,10 @@ pub fn default_socket_path() -> PathBuf {
 pub fn default_session_id() -> &'static str {
     "default"
 }
+
+// ---------------------------------------------------------------------------
+// Inspection helpers
+// ---------------------------------------------------------------------------
 
 /// Opens the session store for inspection or tests.
 pub fn open_session_store(path: impl AsRef<Path>) -> Result<SessionStore, CliError> {
@@ -1203,6 +1281,10 @@ pub fn policy_lines(path: impl AsRef<Path>) -> Result<Vec<String>, CliError> {
         })
         .collect())
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -1308,9 +1390,12 @@ mod tests {
         let policy_path = tempdir.path().join("policy.cbor");
         let mut harness = Harness::new(&store_path, &policy_path).expect("harness should start");
 
-        let removed_tools = harness
-            .registry
-            .unregister_connection(&harness.shell_tool.connection_id);
+        let shell_conn_id = harness
+            .find_extension("shell-tool")
+            .expect("shell-tool should exist")
+            .connection_id
+            .clone();
+        let removed_tools = harness.registry.unregister_connection(&shell_conn_id);
         assert!(
             removed_tools
                 .iter()
@@ -1336,10 +1421,15 @@ mod tests {
         let policy_path = tempdir.path().join("policy.cbor");
         let mut harness = Harness::new(&store_path, &policy_path).expect("harness should start");
 
+        let shell_conn_id = harness
+            .find_extension("shell-tool")
+            .expect("shell-tool should exist")
+            .connection_id
+            .clone();
         harness
             .bus
             .send_to(
-                &harness.shell_tool.connection_id,
+                &shell_conn_id,
                 None,
                 Event::LifecycleDisconnect(LifecycleDisconnect {
                     reason: Some("test shutdown".to_owned()),
@@ -1348,12 +1438,21 @@ mod tests {
             .expect("disconnect should route");
         for _ in 0..10 {
             let _ = harness.poll_participants_once(&mut Vec::new());
-            if !harness.shell_tool.connected {
+            if !harness
+                .find_extension("shell-tool")
+                .expect("shell-tool should exist")
+                .connected
+            {
                 break;
             }
         }
 
-        assert!(!harness.shell_tool.connected);
+        assert!(
+            !harness
+                .find_extension("shell-tool")
+                .expect("shell-tool should exist")
+                .connected
+        );
         assert!(harness.registry.providers_for("shell.exec").is_empty());
         assert!(
             harness

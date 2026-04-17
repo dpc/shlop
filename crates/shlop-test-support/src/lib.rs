@@ -87,7 +87,7 @@ impl DaemonHandle {
     pub fn join(self) -> Result<(), CliError> {
         self.join_handle
             .join()
-            .map_err(|_| CliError::ThreadJoin("daemon"))?
+            .map_err(|_| CliError::ThreadJoin("daemon".to_owned()))?
     }
 }
 

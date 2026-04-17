@@ -10,11 +10,13 @@ workspace = true
 
 [dependencies]
 shlop-agent = { path = "../shlop-agent" }
+shlop-config = { path = "../shlop-config" }
 shlop-core = { path = "../shlop-core" }
 shlop-ext-fs = { path = "../shlop-ext-fs" }
 shlop-ext-shell = { path = "../shlop-ext-shell" }
 shlop-proto = { path = "../shlop-proto" }
 shlop-socket = { path = "../shlop-socket" }
+shlop-supervisor = { path = "../shlop-supervisor" }
 
 [dev-dependencies]
 tempfile = "3"
