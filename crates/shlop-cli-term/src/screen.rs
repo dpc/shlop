@@ -408,4 +408,150 @@ mod tests {
         assert_eq!(t.row_text(1), "ijklm");
         assert_eq!(t.cursor(), (0, 5));
     }
+
+    // --- multi-zone prompt tests ---
+
+    /// Helper to build a multi-zone layout: above-prompt lines, then
+    /// input line(s) with optional right-prompt on the first input line.
+    fn build_prompt_layout(
+        above: &str,
+        left: &str,
+        input: &str,
+        right: &str,
+        width: usize,
+    ) -> (Vec<Vec<char>>, (usize, usize)) {
+        let mut desired: Vec<Vec<char>> = Vec::new();
+        let above_row_count;
+
+        if above.is_empty() {
+            above_row_count = 0;
+        } else {
+            for line in above.lines() {
+                desired.extend(layout_lines(line, width));
+            }
+            above_row_count = desired.len();
+        }
+
+        let content = format!("{left}{input}");
+        let mut input_lines = layout_lines(&content, width);
+
+        // Right prompt on first input line if it fits and input is single-line.
+        if !right.is_empty() && !input_lines.is_empty() {
+            let first = &input_lines[0];
+            let right_chars: Vec<char> = right.chars().collect();
+            let needed = first.len() + 1 + right_chars.len();
+            if needed <= width && input_lines.len() == 1 {
+                let padding = width - first.len() - right_chars.len();
+                let mut padded = first.clone();
+                padded.extend(std::iter::repeat(' ').take(padding));
+                padded.extend(right_chars);
+                input_lines[0] = padded;
+            }
+        }
+
+        desired.extend(input_lines);
+
+        let cursor_chars = left.chars().count() + input.chars().count();
+        let cursor_row = above_row_count + cursor_chars / width;
+        let cursor_col = cursor_chars % width;
+
+        (desired, (cursor_row, cursor_col))
+    }
+
+    #[test]
+    fn above_prompt_renders_before_input() {
+        let mut t = TestTerm::new(24, 40);
+        let (lines, cursor) = build_prompt_layout("status line", "> ", "hello", "", 40);
+        let mut buf = Vec::new();
+        t.screen.update(&mut buf, &lines, cursor).expect("ok");
+        t.term.process(&buf);
+
+        assert_eq!(t.row_text(0), "status line");
+        assert_eq!(t.row_text(1), "> hello");
+        assert_eq!(t.cursor(), (1, 7));
+    }
+
+    #[test]
+    fn multi_line_above_prompt() {
+        let mut t = TestTerm::new(24, 40);
+        let (lines, cursor) = build_prompt_layout("line one\nline two", "> ", "hi", "", 40);
+        let mut buf = Vec::new();
+        t.screen.update(&mut buf, &lines, cursor).expect("ok");
+        t.term.process(&buf);
+
+        assert_eq!(t.row_text(0), "line one");
+        assert_eq!(t.row_text(1), "line two");
+        assert_eq!(t.row_text(2), "> hi");
+        assert_eq!(t.cursor(), (2, 4));
+    }
+
+    #[test]
+    fn right_prompt_shown_when_space_available() {
+        let mut t = TestTerm::new(24, 40);
+        let (lines, cursor) = build_prompt_layout("", "> ", "hi", "[ok]", 40);
+        let mut buf = Vec::new();
+        t.screen.update(&mut buf, &lines, cursor).expect("ok");
+        t.term.process(&buf);
+
+        let row = t.row_text(0);
+        assert!(row.starts_with("> hi"), "row: {row:?}");
+        assert!(row.ends_with("[ok]"), "row: {row:?}");
+        assert_eq!(row.len(), 40);
+    }
+
+    #[test]
+    fn right_prompt_hidden_when_input_too_long() {
+        let mut t = TestTerm::new(24, 20);
+        // "> " (2) + 15 chars + 1 gap + "[ok]" (4) = 22 > 20.
+        let (lines, cursor) = build_prompt_layout(
+            "",
+            "> ",
+            "abcdefghijklmno",
+            "[ok]",
+            20,
+        );
+        let mut buf = Vec::new();
+        t.screen.update(&mut buf, &lines, cursor).expect("ok");
+        t.term.process(&buf);
+
+        let row = t.row_text(0);
+        assert!(!row.contains("[ok]"), "right prompt should be hidden, row: {row:?}");
+        assert!(row.starts_with("> abcdefghijklmno"), "row: {row:?}");
+    }
+
+    #[test]
+    fn right_prompt_hidden_when_input_wraps() {
+        let mut t = TestTerm::new(24, 10);
+        // Input wraps to second line — right prompt should not appear.
+        let (lines, cursor) = build_prompt_layout("", "> ", "abcdefghij", "[x]", 10);
+        let mut buf = Vec::new();
+        t.screen.update(&mut buf, &lines, cursor).expect("ok");
+        t.term.process(&buf);
+
+        let row0 = t.row_text(0);
+        let row1 = t.row_text(1);
+        assert!(!row0.contains("[x]"), "row0: {row0:?}");
+        assert_eq!(row1, "ij");
+    }
+
+    #[test]
+    fn all_three_zones_together() {
+        let mut t = TestTerm::new(24, 40);
+        let (lines, cursor) = build_prompt_layout(
+            "shlop v0.1",
+            "$ ",
+            "ls",
+            "[main]",
+            40,
+        );
+        let mut buf = Vec::new();
+        t.screen.update(&mut buf, &lines, cursor).expect("ok");
+        t.term.process(&buf);
+
+        assert_eq!(t.row_text(0), "shlop v0.1");
+        let prompt_row = t.row_text(1);
+        assert!(prompt_row.starts_with("$ ls"), "row: {prompt_row:?}");
+        assert!(prompt_row.ends_with("[main]"), "row: {prompt_row:?}");
+        assert_eq!(t.cursor(), (1, 4));
+    }
 }

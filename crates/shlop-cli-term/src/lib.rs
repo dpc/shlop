@@ -4,22 +4,31 @@
 //! without corrupting the display. No alternate screen mode — just
 //! diff-based rendering in the normal terminal buffer.
 //!
+//! # Prompt zones
+//!
+//! The prompt display is composed of three configurable zones:
+//!
+//! - **Above-prompt**: Optional multi-line text displayed above the input
+//!   line (e.g. status information, context). Updated via
+//!   [`Prompt::set_above_prompt`].
+//! - **Left-prompt**: The prefix before user input (e.g. `"> "`). Updated
+//!   via [`Prompt::set_left_prompt`].
+//! - **Right-prompt**: Right-justified text on the first physical line of
+//!   the input area. Hidden when the user input would overlap it. Updated
+//!   via [`Prompt::set_right_prompt`].
+//!
+//! All zones are part of the diff-rendered screen area, so changes are
+//! applied with minimal terminal I/O.
+//!
 //! # Rendering
 //!
 //! Uses a dual-buffer diff approach inspired by fish shell's `screen.rs`:
 //! the [`screen::Screen`] tracks what is currently on the terminal
 //! ("actual") and diffs it against what should be there ("desired"),
-//! emitting only the escape sequences for characters that changed. This
-//! minimizes terminal I/O, which matters over slow SSH connections.
-//!
-//! For async output (printed above the prompt), we erase the prompt area
-//! using relative cursor movement + `ClearFromCursorDown`, print the
-//! output, then let the diff renderer redraw the prompt from scratch
-//! (since the actual state was invalidated by the erase).
+//! emitting only the escape sequences for characters that changed.
 //!
 //! References:
 //! - fish shell screen rendering: <https://github.com/fish-shell/fish-shell/blob/master/src/screen.rs>
-//! - fish `Screen::update()` for the diff-based repaint logic
 
 pub mod screen;
 
@@ -40,6 +49,12 @@ pub enum UiEvent {
     Key(KeyEvent),
     /// Async output that should be printed above the prompt.
     Output(String),
+    /// Update a prompt zone and re-render.
+    SetAbovePrompt(String),
+    /// Update the left prompt and re-render.
+    SetLeftPrompt(String),
+    /// Update the right prompt and re-render.
+    SetRightPrompt(String),
     /// A request to shut down the UI loop.
     Quit,
 }
@@ -64,6 +79,21 @@ impl OutputSender {
         self.tx.send(UiEvent::Output(text))
     }
 
+    /// Updates the above-prompt text and triggers a re-render.
+    pub fn set_above_prompt(&self, text: String) -> Result<(), mpsc::SendError<UiEvent>> {
+        self.tx.send(UiEvent::SetAbovePrompt(text))
+    }
+
+    /// Updates the left prompt and triggers a re-render.
+    pub fn set_left_prompt(&self, text: String) -> Result<(), mpsc::SendError<UiEvent>> {
+        self.tx.send(UiEvent::SetLeftPrompt(text))
+    }
+
+    /// Updates the right prompt and triggers a re-render.
+    pub fn set_right_prompt(&self, text: String) -> Result<(), mpsc::SendError<UiEvent>> {
+        self.tx.send(UiEvent::SetRightPrompt(text))
+    }
+
     /// Requests the UI loop to shut down.
     pub fn quit(&self) -> Result<(), mpsc::SendError<UiEvent>> {
         self.tx.send(UiEvent::Quit)
@@ -77,17 +107,20 @@ pub struct Prompt {
     stdout: Stdout,
     screen: Screen,
     input_handle: Option<JoinHandle<()>>,
-    prefix: String,
+    above_prompt: String,
+    left_prompt: String,
+    right_prompt: String,
     buffer: String,
     cursor: usize,
 }
 
 impl Prompt {
-    /// Creates a new prompt with the given display prefix (e.g. `"> "`).
+    /// Creates a new prompt with the given left prompt prefix (e.g.
+    /// `"> "`).
     ///
     /// Returns the prompt and an [`OutputSender`] that async producers can
     /// use to inject output.
-    pub fn new(prefix: &str) -> io::Result<(Self, OutputSender)> {
+    pub fn new(left_prompt: &str) -> io::Result<(Self, OutputSender)> {
         let (tx, rx) = mpsc::channel();
         let output_sender = OutputSender { tx: tx.clone() };
         let width = term_width();
@@ -98,12 +131,31 @@ impl Prompt {
                 stdout: io::stdout(),
                 screen: Screen::new(width),
                 input_handle: None,
-                prefix: prefix.to_owned(),
+                above_prompt: String::new(),
+                left_prompt: left_prompt.to_owned(),
+                right_prompt: String::new(),
                 buffer: String::new(),
                 cursor: 0,
             },
             output_sender,
         ))
+    }
+
+    /// Sets the text displayed above the input line. Can contain
+    /// newlines for multiple lines. Set to empty to hide.
+    pub fn set_above_prompt(&mut self, text: &str) {
+        self.above_prompt = text.to_owned();
+    }
+
+    /// Sets the left prompt prefix (e.g. `"> "`, `"$ "`).
+    pub fn set_left_prompt(&mut self, text: &str) {
+        self.left_prompt = text.to_owned();
+    }
+
+    /// Sets the right-justified text on the first prompt line. Hidden
+    /// when the user input would overlap. Set to empty to hide.
+    pub fn set_right_prompt(&mut self, text: &str) {
+        self.right_prompt = text.to_owned();
     }
 
     /// Enters raw mode and starts the input reader thread.
@@ -149,6 +201,18 @@ impl Prompt {
                 UiEvent::Output(text) => {
                     self.print_above(&text)?;
                 }
+                UiEvent::SetAbovePrompt(text) => {
+                    self.above_prompt = text;
+                    self.render()?;
+                }
+                UiEvent::SetLeftPrompt(text) => {
+                    self.left_prompt = text;
+                    self.render()?;
+                }
+                UiEvent::SetRightPrompt(text) => {
+                    self.right_prompt = text;
+                    self.render()?;
+                }
                 UiEvent::Quit => {
                     return Ok(PromptResult::Eof);
                 }
@@ -161,13 +225,9 @@ impl Prompt {
 
         match key.code {
             KeyCode::Enter => {
-                // Move cursor to end of content so the newline appears
-                // after the last character.
                 self.cursor = self.buffer.len();
                 self.render()?;
                 self.stdout.queue(Print("\r\n"))?.flush()?;
-                // The prompt area is now above us; invalidate so the next
-                // render starts fresh on the new line.
                 self.screen.invalidate();
                 let line = std::mem::take(&mut self.buffer);
                 self.cursor = 0;
@@ -276,31 +336,66 @@ impl Prompt {
         self.print_above(text)
     }
 
-    /// Erases the prompt area, prints text, then redraws the prompt via
-    /// the diff renderer (which will emit everything since actual was
-    /// invalidated).
     fn print_above(&mut self, text: &str) -> io::Result<()> {
         self.screen.erase_all(&mut self.stdout)?;
         for line in text.lines() {
             self.stdout.queue(Print(line))?.queue(Print("\r\n"))?;
         }
         self.stdout.flush()?;
-        // Actual state is gone — next render emits everything.
         self.screen.invalidate();
         self.render()
     }
 
-    /// Builds the desired screen content from prefix + buffer, then diffs
-    /// against the actual state via [`Screen::update`].
+    /// Builds the desired screen content and diffs it against the actual
+    /// state.
+    ///
+    /// Layout (top to bottom):
+    /// 1. Above-prompt lines (if non-empty)
+    /// 2. Left-prompt + user input (possibly wrapped), with right-prompt
+    ///    on the first physical line if it fits
     fn render(&mut self) -> io::Result<()> {
         self.screen.set_width(term_width());
         let width = self.screen.width();
-        let content = format!("{}{}", self.prefix, self.buffer);
-        let desired = layout_lines(&content, width);
 
-        // Cursor position in character offset, then map to (row, col).
-        let cursor_chars = self.prefix.chars().count() + char_count_for_bytes(&self.buffer, self.cursor);
-        let cursor_row = cursor_chars / width;
+        let mut desired: Vec<Vec<char>> = Vec::new();
+
+        // 1. Above-prompt lines.
+        let above_row_count = if self.above_prompt.is_empty() {
+            0
+        } else {
+            for line in self.above_prompt.lines() {
+                let laid_out = layout_lines(line, width);
+                desired.extend(laid_out);
+            }
+            desired.len()
+        };
+
+        // 2. Input area: left_prompt + buffer.
+        let input_content = format!("{}{}", self.left_prompt, self.buffer);
+        let mut input_lines = layout_lines(&input_content, width);
+
+        // 3. Right-prompt on the first input line, if it fits.
+        if !self.right_prompt.is_empty() && !input_lines.is_empty() {
+            let first_line = &input_lines[0];
+            let right_chars: Vec<char> = self.right_prompt.chars().collect();
+            // Need at least 1 space gap between content and right prompt.
+            let needed = first_line.len() + 1 + right_chars.len();
+            if needed <= width && input_lines.len() == 1 {
+                // Pad with spaces and append right prompt.
+                let padding = width - first_line.len() - right_chars.len();
+                let mut padded = first_line.clone();
+                padded.extend(std::iter::repeat(' ').take(padding));
+                padded.extend(right_chars);
+                input_lines[0] = padded;
+            }
+        }
+
+        desired.extend(input_lines);
+
+        // Cursor position: offset by above-prompt rows.
+        let left_chars = self.left_prompt.chars().count();
+        let cursor_chars = left_chars + char_count_for_bytes(&self.buffer, self.cursor);
+        let cursor_row = above_row_count + cursor_chars / width;
         let cursor_col = cursor_chars % width;
 
         self.screen
