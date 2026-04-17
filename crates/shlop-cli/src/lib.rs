@@ -959,6 +959,80 @@ fn latest_agent_preview(session: &shlop_core::SessionSnapshot) -> Option<String>
 }
 
 // ---------------------------------------------------------------------------
+// Public API — interactive chat loop
+// ---------------------------------------------------------------------------
+
+/// Runs an interactive chat loop reading from stdin with in-process
+/// extensions.
+pub fn run_interactive(
+    session_store_path: impl Into<PathBuf>,
+    session_id: &str,
+) -> Result<(), CliError> {
+    let session_store_path = session_store_path.into();
+    let mut harness = Harness::new(
+        session_store_path.clone(),
+        default_policy_store_path_from_session_store(&session_store_path),
+    )?;
+    interactive_loop(&mut harness, session_id)?;
+    harness.shutdown()
+}
+
+/// Runs an interactive chat loop reading from stdin using extensions from
+/// configuration.
+pub fn run_interactive_with_config(
+    config: &Config,
+    session_store_path: impl Into<PathBuf>,
+    session_id: &str,
+) -> Result<(), CliError> {
+    let session_store_path = session_store_path.into();
+    let mut harness = Harness::from_config(
+        config,
+        session_store_path.clone(),
+        default_policy_store_path_from_session_store(&session_store_path),
+    )?;
+    interactive_loop(&mut harness, session_id)?;
+    harness.shutdown()
+}
+
+fn interactive_loop(harness: &mut Harness, session_id: &str) -> Result<(), CliError> {
+    use std::io::Write;
+
+    let stdin = io::stdin();
+    let mut stdout = io::stdout();
+
+    loop {
+        print!("> ");
+        stdout.flush()?;
+
+        let mut line = String::new();
+        let bytes_read = stdin.read_line(&mut line)?;
+        if bytes_read == 0 {
+            break;
+        }
+
+        let text = line.trim();
+        if text.is_empty() {
+            continue;
+        }
+
+        match harness.send_user_message(session_id, text, None) {
+            Ok(outcome) => {
+                for progress in &outcome.progress_messages {
+                    println!("progress: {progress}");
+                }
+                println!("agent: {}", outcome.response);
+            }
+            Err(CliError::ResponseTimeout) => {
+                eprintln!("error: timed out waiting for agent response");
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Public API — in-process (test-friendly) path
 // ---------------------------------------------------------------------------
 

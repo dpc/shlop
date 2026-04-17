@@ -6,7 +6,8 @@ use shlop_cli::{
     CliError, ServeOptions, default_policy_store_path, default_session_id,
     default_session_store_path, default_socket_path, policy_lines, run_daemon,
     run_daemon_with_config, run_embedded_message_with_config, run_embedded_message_with_trace,
-    send_daemon_message_with_trace, session_lines, session_list_lines,
+    run_interactive, run_interactive_with_config, send_daemon_message_with_trace, session_lines,
+    session_list_lines,
 };
 use shlop_config::{Config, LoadConfigError, LoadOptions};
 
@@ -28,6 +29,35 @@ fn run_main() -> Result<(), CliError> {
     };
 
     match command.as_str() {
+        "chat" => {
+            let mut session_id = default_session_id().to_owned();
+            let mut session_store = default_session_store_path();
+            let mut config_path: Option<PathBuf> = None;
+            while let Some(flag) = args.next() {
+                match flag.as_str() {
+                    "--session-id" => {
+                        if let Some(value) = args.next() {
+                            session_id = value;
+                        }
+                    }
+                    "--session-store" => {
+                        if let Some(value) = args.next() {
+                            session_store = PathBuf::from(value);
+                        }
+                    }
+                    "--config" => {
+                        config_path = args.next().map(PathBuf::from);
+                    }
+                    _ => print_help(),
+                }
+            }
+            match try_load_config(config_path.as_deref())? {
+                Some(config) => {
+                    run_interactive_with_config(&config, session_store, &session_id)
+                }
+                None => run_interactive(session_store, &session_id),
+            }
+        }
         "embedded" => {
             let mut message = None;
             let mut session_id = default_session_id().to_owned();
@@ -52,24 +82,36 @@ fn run_main() -> Result<(), CliError> {
                     _ => print_help(),
                 }
             }
-            let message = message.unwrap_or_else(|| "hello".to_owned());
-            let outcome = match try_load_config(config_path.as_deref())? {
-                Some(config) => {
-                    run_embedded_message_with_config(&config, session_store, &session_id, &message)?
+            match message {
+                Some(message) => {
+                    let outcome = match try_load_config(config_path.as_deref())? {
+                        Some(config) => run_embedded_message_with_config(
+                            &config,
+                            session_store,
+                            &session_id,
+                            &message,
+                        )?,
+                        None => {
+                            run_embedded_message_with_trace(session_store, &session_id, &message)?
+                        }
+                    };
+                    println!("user: {message}");
+                    for lifecycle in outcome.lifecycle_messages {
+                        println!("lifecycle: {lifecycle}");
+                    }
+                    for progress in outcome.progress_messages {
+                        println!("progress: {progress}");
+                    }
+                    println!("agent: {}", outcome.response);
+                    Ok(())
                 }
-                None => {
-                    run_embedded_message_with_trace(session_store, &session_id, &message)?
-                }
-            };
-            println!("user: {message}");
-            for lifecycle in outcome.lifecycle_messages {
-                println!("lifecycle: {lifecycle}");
+                None => match try_load_config(config_path.as_deref())? {
+                    Some(config) => {
+                        run_interactive_with_config(&config, session_store, &session_id)
+                    }
+                    None => run_interactive(session_store, &session_id),
+                },
             }
-            for progress in outcome.progress_messages {
-                println!("progress: {progress}");
-            }
-            println!("agent: {}", outcome.response);
-            Ok(())
         }
         "serve" => {
             let mut socket_path = default_socket_path();
@@ -245,6 +287,7 @@ fn try_load_config(explicit_path: Option<&std::path::Path>) -> Result<Option<Con
 
 fn print_help() {
     eprintln!("shlop-cli commands:");
+    eprintln!("  chat [--session-id ID] [--session-store PATH] [--config PATH]");
     eprintln!(
         "  embedded [--message TEXT] [--session-id ID] [--session-store PATH] [--config PATH]"
     );
