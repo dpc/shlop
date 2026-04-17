@@ -178,11 +178,9 @@ impl Prompt {
             }
 
             KeyCode::Char('c') if ctrl => {
-                self.move_cursor_to_content_end()?;
-                self.stdout.queue(Print("^C\r\n"))?.flush()?;
                 self.buffer.clear();
                 self.cursor = 0;
-                self.draw_prompt()?;
+                self.redraw()?;
             }
 
             KeyCode::Char('u') if ctrl => {
