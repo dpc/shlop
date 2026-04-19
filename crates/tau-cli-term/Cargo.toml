@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 crossterm = "0.28"
+tau-blocking-notify-channel = { path = "../tau-blocking-notify-channel" }
 
 [dev-dependencies]
 vt100 = "0.16"

@@ -660,6 +660,7 @@ name = "tau-cli-term"
 version = "0.1.0"
 dependencies = [
  "crossterm",
+ "tau-blocking-notify-channel",
  "vt100",
 ]
 
