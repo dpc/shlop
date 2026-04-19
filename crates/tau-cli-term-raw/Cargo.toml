@@ -1,5 +1,5 @@
 [package]
-name = "tau-cli-term"
+name = "tau-cli-term-raw"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

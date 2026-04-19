@@ -160,3 +160,85 @@ impl From<Vec<Span>> for StyledText {
         Self { spans }
     }
 }
+
+/// Opaque numeric identifier for a [`StyledBlock`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct BlockId(pub u64);
+
+/// Horizontal alignment within a block.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Align {
+    #[default]
+    Left,
+    Center,
+}
+
+/// A unit of layout: styled content with background, alignment, and margins.
+///
+/// When rendered, the block's content is word-wrapped to the available
+/// width (after subtracting margins), aligned within that space, and
+/// the block's background color fills any remaining cells.
+#[derive(Clone, Debug)]
+pub struct StyledBlock {
+    pub content: StyledText,
+    pub bg: Option<Color>,
+    pub align: Align,
+    pub margin_left: u16,
+    pub margin_right: u16,
+}
+
+impl StyledBlock {
+    pub fn new(content: impl Into<StyledText>) -> Self {
+        Self {
+            content: content.into(),
+            bg: None,
+            align: Align::Left,
+            margin_left: 0,
+            margin_right: 0,
+        }
+    }
+
+    pub fn bg(mut self, color: Color) -> Self {
+        self.bg = Some(color);
+        self
+    }
+
+    pub fn align(mut self, align: Align) -> Self {
+        self.align = align;
+        self
+    }
+
+    pub fn margin_left(mut self, n: u16) -> Self {
+        self.margin_left = n;
+        self
+    }
+
+    pub fn margin_right(mut self, n: u16) -> Self {
+        self.margin_right = n;
+        self
+    }
+
+    pub fn margins(mut self, left: u16, right: u16) -> Self {
+        self.margin_left = left;
+        self.margin_right = right;
+        self
+    }
+}
+
+impl From<&str> for StyledBlock {
+    fn from(s: &str) -> Self {
+        Self::new(s)
+    }
+}
+
+impl From<String> for StyledBlock {
+    fn from(s: String) -> Self {
+        Self::new(s)
+    }
+}
+
+impl From<StyledText> for StyledBlock {
+    fn from(text: StyledText) -> Self {
+        Self::new(text)
+    }
+}

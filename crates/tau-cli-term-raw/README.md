@@ -1,4 +1,4 @@
-# tau-cli-term
+# tau-cli-term-raw
 
 Terminal prompt with async output support for tau.
 

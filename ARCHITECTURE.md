@@ -60,7 +60,7 @@ whether the binary is the unified `tau` or a standalone extension.
 |---|---|
 | `tau` | Unified binary (thin wrapper) |
 | `tau-cli` | CLI argument parsing, harness runtime, public API |
-| `tau-cli-term` | Terminal prompt with async output and diff rendering |
+| `tau-cli-term-raw` | Low-level terminal prompt with async output and diff rendering |
 | `tau-proto` | CBOR event protocol types and codec |
 | `tau-config` | TOML config loading and path resolution |
 | `tau-core` | Event bus, tool registry, session store, policy store |

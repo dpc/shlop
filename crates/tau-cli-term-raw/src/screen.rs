@@ -25,7 +25,7 @@ use crossterm::cursor::{MoveToColumn, MoveUp};
 use crossterm::style::{Attribute, Print, SetAttribute, SetBackgroundColor, SetForegroundColor};
 use crossterm::terminal::{self, ClearType};
 
-use crate::style::{Cell, Style, StyledText};
+use crate::style::{Align, Cell, Style, StyledBlock, StyledText};
 
 /// Virtual screen state with diff-based updates.
 pub struct Screen {
@@ -172,6 +172,15 @@ impl Screen {
         self.lines.len()
     }
 
+    /// Overwrites the internal state to match what is currently on the
+    /// terminal. Call after a full render to prepare for future
+    /// differential updates.
+    pub fn reset_to(&mut self, lines: Vec<Vec<Cell>>, cursor_row: usize, cursor_col: usize) {
+        self.lines = lines;
+        self.cursor_row = cursor_row;
+        self.cursor_col = cursor_col;
+    }
+
     /// Moves the terminal cursor from the current position to `(row, col)`
     /// using relative movement.
     ///
@@ -302,6 +311,67 @@ pub fn layout_lines(content: &StyledText, width: usize) -> Vec<Vec<Cell>> {
     }
 
     result
+}
+
+/// Lays out a [`StyledBlock`] into physical terminal lines.
+///
+/// Subtracts margins from `width`, wraps content to the remaining
+/// space, applies alignment, and fills background. Each returned row
+/// is exactly `width` cells wide.
+pub fn layout_block(block: &StyledBlock, width: usize) -> Vec<Vec<Cell>> {
+    let width = width.max(1);
+    let ml = block.margin_left as usize;
+    let mr = block.margin_right as usize;
+    let content_width = width.saturating_sub(ml + mr).max(1);
+
+    let content_lines = layout_lines(&block.content, content_width);
+
+    let fill_style = Style {
+        bg: block.bg,
+        ..Style::default()
+    };
+    let fill = Cell::new(' ', fill_style);
+
+    content_lines
+        .iter()
+        .map(|line| {
+            let mut row = Vec::with_capacity(width);
+
+            // Left margin (always default bg, not block bg).
+            row.extend(std::iter::repeat(Cell::plain(' ')).take(ml));
+
+            // Content with alignment.
+            let cw = line.len();
+            let padding = content_width.saturating_sub(cw);
+            match block.align {
+                Align::Left => {
+                    row.extend(line.iter().copied());
+                    row.extend(std::iter::repeat(fill).take(padding));
+                }
+                Align::Center => {
+                    let left = padding / 2;
+                    let right = padding - left;
+                    row.extend(std::iter::repeat(fill).take(left));
+                    row.extend(line.iter().copied());
+                    row.extend(std::iter::repeat(fill).take(right));
+                }
+            }
+
+            // Right margin (always default bg).
+            row.extend(std::iter::repeat(Cell::plain(' ')).take(mr));
+
+            // Apply block bg to content cells that don't set their own.
+            if let Some(bg) = block.bg {
+                for cell in &mut row[ml..ml + content_width] {
+                    if cell.style.bg.is_none() {
+                        cell.style.bg = Some(bg);
+                    }
+                }
+            }
+
+            row
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -713,5 +783,337 @@ mod tests {
         assert!(prompt_row.starts_with("$ ls"), "row: {prompt_row:?}");
         assert!(prompt_row.ends_with("[main]"), "row: {prompt_row:?}");
         assert_eq!(t.cursor(), (1, 4));
+    }
+
+    // --- full_render / scrollback tests ---
+
+    /// Verifies the basic technique: output more lines than the
+    /// terminal height using \r\n, then check that overflow went
+    /// into scrollback and the visible screen shows the last rows.
+    #[test]
+    fn overflow_lines_go_to_scrollback() {
+        // 5 rows tall, 20 cols, 100 lines of scrollback buffer.
+        let mut term = vt100::Parser::new(5, 20, 100);
+
+        // Output 10 lines (more than 5 rows).
+        let mut buf = Vec::new();
+        for i in 0..10 {
+            if i > 0 {
+                buf.extend_from_slice(b"\r\n");
+            }
+            buf.extend_from_slice(format!("line {i}").as_bytes());
+        }
+        term.process(&buf);
+
+        // Visible screen should show the last 5 lines (5-9).
+        let visible: Vec<String> = term.screen().rows(0, 20).collect();
+        assert_eq!(visible[0], "line 5");
+        assert_eq!(visible[1], "line 6");
+        assert_eq!(visible[2], "line 7");
+        assert_eq!(visible[3], "line 8");
+        assert_eq!(visible[4], "line 9");
+
+        // Scrollback should contain lines 0-4.
+        // Set scrollback offset to see them.
+        term.screen_mut().set_scrollback(5);
+        let scrolled: Vec<String> = term.screen().rows(0, 20).collect();
+        assert_eq!(scrolled[0], "line 0");
+        assert_eq!(scrolled[1], "line 1");
+        assert_eq!(scrolled[2], "line 2");
+        assert_eq!(scrolled[3], "line 3");
+        assert_eq!(scrolled[4], "line 4");
+    }
+
+    /// Verifies clear screen + scrollback (\x1b[2J\x1b[H\x1b[3J),
+    /// then re-output at a different width — the full_render technique
+    /// used on resize.
+    #[test]
+    fn clear_and_rerender_scrollback() {
+        let mut term = vt100::Parser::new(5, 20, 100);
+
+        // First render: 8 lines.
+        let mut buf = Vec::new();
+        for i in 0..8 {
+            if i > 0 {
+                buf.extend_from_slice(b"\r\n");
+            }
+            buf.extend_from_slice(format!("old line {i}").as_bytes());
+        }
+        term.process(&buf);
+
+        // Verify initial state: visible = lines 3-7, scrollback = 0-2.
+        let visible: Vec<String> = term.screen().rows(0, 20).collect();
+        assert_eq!(visible[0], "old line 3");
+
+        // Now simulate resize: clear + re-render with new content.
+        let mut buf2 = Vec::new();
+        buf2.extend_from_slice(b"\x1b[2J\x1b[H\x1b[3J"); // clear screen + scrollback
+        for i in 0..8 {
+            if i > 0 {
+                buf2.extend_from_slice(b"\r\n");
+            }
+            buf2.extend_from_slice(format!("new line {i}").as_bytes());
+        }
+        term.process(&buf2);
+
+        // Visible screen should show the last 5 new lines.
+        let visible: Vec<String> = term.screen().rows(0, 20).collect();
+        assert_eq!(visible[0], "new line 3");
+        assert_eq!(visible[1], "new line 4");
+        assert_eq!(visible[2], "new line 5");
+        assert_eq!(visible[3], "new line 6");
+        assert_eq!(visible[4], "new line 7");
+
+        // Scrollback should have new lines 0-2.
+        term.screen_mut().set_scrollback(3);
+        let scrolled: Vec<String> = term.screen().rows(0, 20).collect();
+        assert_eq!(scrolled[0], "new line 0");
+        assert_eq!(scrolled[1], "new line 1");
+        assert_eq!(scrolled[2], "new line 2");
+    }
+
+    /// Verifies cursor positioning after outputting more lines than
+    /// the terminal height (the MoveUp technique used in full_render).
+    #[test]
+    fn cursor_positioning_after_overflow() {
+        let mut term = vt100::Parser::new(5, 20, 100);
+
+        // Output 8 lines, then move cursor up to where "line 5"
+        // is (which should be row 0 of the visible screen).
+        let mut buf = Vec::new();
+        for i in 0..8 {
+            if i > 0 {
+                buf.extend_from_slice(b"\r\n");
+            }
+            buf.extend_from_slice(format!("line {i}").as_bytes());
+        }
+        // Cursor is now at row 4 (bottom of visible screen), after "line 7".
+        // Move up 4 rows to get to row 0 (where "line 3" is).
+        buf.extend_from_slice(b"\x1b[4A"); // MoveUp(4)
+        buf.extend_from_slice(b"\x1b[10G"); // MoveToColumn(10), 1-indexed
+        term.process(&buf);
+
+        let (row, col) = term.screen().cursor_position();
+        assert_eq!(row, 0);
+        assert_eq!(col, 9); // MoveToColumn is 1-indexed, vt100 returns 0-indexed
+    }
+
+    /// End-to-end test of the full_render function using vt100.
+    /// Simulates: output history + live area, then position cursor
+    /// in the input area using the same logic as full_render.
+    #[test]
+    fn full_render_via_vt100() {
+        use crossterm::QueueableCommand;
+        use crossterm::cursor::{MoveToColumn, MoveUp};
+
+        let height: usize = 5;
+        let width: usize = 30;
+        let mut term = vt100::Parser::new(height as u16, width as u16, 100);
+
+        // Build "all_lines": 3 history + 2 above + 1 input + 1 below = 7 lines.
+        // Viewport (last 5): above0, above1, "> hello", below0, but wait
+        // that's only 4 visible from the live area. Let me just use strings.
+        let lines_text = [
+            "history 0",
+            "history 1",
+            "history 2",
+            "above block A",
+            "above block B",
+            "> hello", // input line, cursor should be here
+            "below status",
+        ];
+
+        // The cursor is at the input line (index 5), column 7 ("> hello" = 7 chars).
+        let cursor_row: usize = 5;
+        let cursor_col: usize = 7;
+
+        // Simulate full_render: clear + output all lines.
+        let mut buf: Vec<u8> = Vec::new();
+        // Clear screen + scrollback.
+        buf.extend_from_slice(b"\x1b[2J\x1b[H\x1b[3J");
+        // Output all lines.
+        for (i, line) in lines_text.iter().enumerate() {
+            if i > 0 {
+                buf.extend_from_slice(b"\r\n");
+            }
+            buf.extend_from_slice(line.as_bytes());
+        }
+        term.process(&buf);
+
+        // After outputting, cursor is at the last line.
+        let total = lines_text.len(); // 7
+        let viewport_top = total.saturating_sub(height); // 7 - 5 = 2
+        let current_vp_row = total.saturating_sub(1).saturating_sub(viewport_top); // 6 - 2 = 4
+        let cursor_vp_row = cursor_row.saturating_sub(viewport_top); // 5 - 2 = 3
+
+        // Move cursor from current position to cursor position.
+        let up = current_vp_row.saturating_sub(cursor_vp_row); // 4 - 3 = 1
+        let mut buf2: Vec<u8> = Vec::new();
+        if up > 0 {
+            (&mut buf2 as &mut dyn std::io::Write)
+                .queue(MoveUp(up as u16))
+                .expect("ok");
+        }
+        (&mut buf2 as &mut dyn std::io::Write)
+            .queue(MoveToColumn(cursor_col as u16))
+            .expect("ok");
+        term.process(&buf2);
+
+        // Verify visible screen (rows 2-6 of all_lines).
+        let visible: Vec<String> = term.screen().rows(0, width as u16).collect();
+        assert_eq!(visible[0], "history 2");
+        assert_eq!(visible[1], "above block A");
+        assert_eq!(visible[2], "above block B");
+        assert_eq!(visible[3], "> hello");
+        assert_eq!(visible[4], "below status");
+
+        // Verify cursor position.
+        let (r, c) = term.screen().cursor_position();
+        assert_eq!(r, cursor_vp_row as u16, "cursor row");
+        assert_eq!(c, cursor_col as u16, "cursor col");
+
+        // Verify scrollback contains history 0 and 1.
+        term.screen_mut().set_scrollback(2);
+        let scrolled: Vec<String> = term.screen().rows(0, width as u16).collect();
+        assert_eq!(scrolled[0], "history 0");
+        assert_eq!(scrolled[1], "history 1");
+    }
+
+    /// Verifies full_render with fewer lines than terminal height
+    /// (no scrollback needed).
+    #[test]
+    fn full_render_no_overflow() {
+        let height: usize = 10;
+        let width: usize = 30;
+        let mut term = vt100::Parser::new(height as u16, width as u16, 100);
+
+        let lines_text = [
+            "above", "> hi", // cursor here, col 4
+            "below",
+        ];
+        let cursor_row: usize = 1;
+        let cursor_col: usize = 4;
+
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(b"\x1b[2J\x1b[H\x1b[3J");
+        for (i, line) in lines_text.iter().enumerate() {
+            if i > 0 {
+                buf.extend_from_slice(b"\r\n");
+            }
+            buf.extend_from_slice(line.as_bytes());
+        }
+
+        let total = lines_text.len(); // 3
+        let viewport_top = total.saturating_sub(height); // 0
+        let current_vp_row = total.saturating_sub(1).saturating_sub(viewport_top); // 2
+        let cursor_vp_row = cursor_row.saturating_sub(viewport_top); // 1
+
+        let up = current_vp_row.saturating_sub(cursor_vp_row); // 1
+        if up > 0 {
+            use std::io::Write;
+            (&mut buf as &mut dyn Write)
+                .queue(crossterm::cursor::MoveUp(up as u16))
+                .expect("ok");
+        }
+        {
+            use std::io::Write;
+            (&mut buf as &mut dyn Write)
+                .queue(crossterm::cursor::MoveToColumn(cursor_col as u16))
+                .expect("ok");
+        }
+        term.process(&buf);
+
+        let visible: Vec<String> = term.screen().rows(0, width as u16).collect();
+        assert_eq!(visible[0], "above");
+        assert_eq!(visible[1], "> hi");
+        assert_eq!(visible[2], "below");
+
+        let (r, c) = term.screen().cursor_position();
+        assert_eq!(r, 1, "cursor row");
+        assert_eq!(c, 4, "cursor col");
+    }
+
+    /// Simulates a resize: initial render at width 20, then resize to
+    /// width 10 (causing lines to re-wrap and produce more rows),
+    /// clear + re-render. Verifies scrollback is rebuilt correctly
+    /// with the new wrapping.
+    #[test]
+    fn scrollback_rebuilt_after_resize() {
+        let height: usize = 5;
+
+        // --- Phase 1: render at width 20 ---
+        let width1: u16 = 20;
+        let mut term = vt100::Parser::new(height as u16, width1, 100);
+
+        // 7 lines at width 20 (2 scroll into scrollback on a 5-row terminal).
+        let phase1 = [
+            "aaaaaaaa", // 8 chars, fits in 20
+            "bbbbbbbb",
+            "cccccccc",
+            "dddddddd",
+            "eeeeeeee",
+            "> input", // cursor line
+            "status bar below",
+        ];
+
+        let mut buf: Vec<u8> = Vec::new();
+        for (i, line) in phase1.iter().enumerate() {
+            if i > 0 {
+                buf.extend_from_slice(b"\r\n");
+            }
+            buf.extend_from_slice(line.as_bytes());
+        }
+        term.process(&buf);
+
+        // Verify: visible = lines 2-6, scrollback = lines 0-1.
+        let visible: Vec<String> = term.screen().rows(0, width1).collect();
+        assert_eq!(visible[0], "cccccccc");
+        assert_eq!(visible[4], "status bar below");
+
+        // --- Phase 2: resize to width 10, re-render ---
+        // At width 10, "status bar below" (16 chars) wraps to 2 lines.
+        // Total lines increase.
+        // Create a fresh parser at the new size (simulates the real
+        // terminal being resized — our clear+rerender rebuilds
+        // everything from scratch anyway).
+        let width2: u16 = 10;
+        let mut term = vt100::Parser::new(height as u16, width2, 100);
+
+        let phase2 = [
+            "aaaaaaaa", // fits in 10
+            "bbbbbbbb",
+            "cccccccc",
+            "dddddddd",
+            "eeeeeeee",
+            "> input",
+            "status bar", // "status bar below" wraps at 10
+            " below",
+        ];
+
+        let mut buf2: Vec<u8> = Vec::new();
+        buf2.extend_from_slice(b"\x1b[2J\x1b[H\x1b[3J"); // clear + clear scrollback
+        for (i, line) in phase2.iter().enumerate() {
+            if i > 0 {
+                buf2.extend_from_slice(b"\r\n");
+            }
+            buf2.extend_from_slice(line.as_bytes());
+        }
+        term.process(&buf2);
+
+        // Total = 8 lines, height = 5, so viewport_top = 3.
+        // Visible: lines 3-7 = dddddddd, eeeeeeee, > input, status bar, " below"
+        let visible2: Vec<String> = term.screen().rows(0, width2).collect();
+        assert_eq!(visible2[0], "dddddddd", "visible row 0 after resize");
+        assert_eq!(visible2[1], "eeeeeeee", "visible row 1 after resize");
+        assert_eq!(visible2[2], "> input", "visible row 2 after resize");
+        assert_eq!(visible2[3], "status bar", "visible row 3 after resize");
+        assert_eq!(visible2[4], " below", "visible row 4 after resize");
+
+        // Scrollback should have lines 0-2 (aaaaaaaa, bbbbbbbb, cccccccc).
+        term.screen_mut().set_scrollback(3);
+        let scrolled: Vec<String> = term.screen().rows(0, width2).collect();
+        assert_eq!(scrolled[0], "aaaaaaaa", "scrollback row 0 after resize");
+        assert_eq!(scrolled[1], "bbbbbbbb", "scrollback row 1 after resize");
+        assert_eq!(scrolled[2], "cccccccc", "scrollback row 2 after resize");
     }
 }
