@@ -495,6 +495,98 @@ mod tests {
         assert_eq!(line_chars(&lines), vec!["abc", "def"]);
     }
 
+    // --- layout_block tests ---
+
+    #[test]
+    fn layout_block_plain() {
+        let block = StyledBlock::new("hello");
+        let lines = layout_block(&block, 20);
+        assert_eq!(lines.len(), 1);
+        // Row should be exactly 20 cells wide (content + padding).
+        assert_eq!(lines[0].len(), 20);
+        let text: String = lines[0].iter().map(|c| c.ch).collect();
+        assert!(text.starts_with("hello"), "text: {text:?}");
+        // Remaining chars should be spaces.
+        assert!(text[5..].chars().all(|c| c == ' '));
+    }
+
+    #[test]
+    fn layout_block_with_margins() {
+        let block = StyledBlock::new("hi").margin_left(2).margin_right(3);
+        let lines = layout_block(&block, 20);
+        assert_eq!(lines[0].len(), 20);
+        let text: String = lines[0].iter().map(|c| c.ch).collect();
+        // 2 margin + "hi" + padding + 3 margin = 20
+        assert_eq!(&text[..2], "  ", "left margin");
+        assert_eq!(&text[2..4], "hi", "content");
+        assert_eq!(&text[17..20], "   ", "right margin");
+    }
+
+    #[test]
+    fn layout_block_center_alignment() {
+        let block = StyledBlock::new("hi").align(Align::Center);
+        let lines = layout_block(&block, 10);
+        let text: String = lines[0].iter().map(|c| c.ch).collect();
+        // "hi" is 2 chars, padding = 8, left = 4, right = 4.
+        assert_eq!(text, "    hi    ");
+    }
+
+    #[test]
+    fn layout_block_bg_applied_to_content_area() {
+        let bg = Color::DarkBlue;
+        let block = StyledBlock::new("ab").bg(bg).margin_left(1).margin_right(1);
+        let lines = layout_block(&block, 10);
+        // Margin cells should NOT have block bg.
+        assert_eq!(lines[0][0].style.bg, None, "left margin has no bg");
+        assert_eq!(lines[0][9].style.bg, None, "right margin has no bg");
+        // Content area cells should have block bg.
+        assert_eq!(lines[0][1].style.bg, Some(bg), "content has bg");
+        assert_eq!(lines[0][2].style.bg, Some(bg), "content has bg");
+        // Padding within content area should also have bg.
+        assert_eq!(lines[0][3].style.bg, Some(bg), "padding has bg");
+    }
+
+    #[test]
+    fn layout_block_content_fg_preserved_with_bg() {
+        let fg = Color::Red;
+        let bg = Color::DarkGreen;
+        let block =
+            StyledBlock::new(StyledText::from(Span::new("x", Style::default().fg(fg)))).bg(bg);
+        let lines = layout_block(&block, 5);
+        // The 'x' cell should have both fg from the span and bg from the block.
+        assert_eq!(lines[0][0].ch, 'x');
+        assert_eq!(lines[0][0].style.fg, Some(fg));
+        assert_eq!(lines[0][0].style.bg, Some(bg));
+    }
+
+    #[test]
+    fn layout_block_renders_through_vt100() {
+        let bg = Color::Blue;
+        let block = StyledBlock::new(StyledText::from(Span::new(
+            "test",
+            Style::default().fg(Color::White),
+        )))
+        .bg(bg)
+        .margin_left(1);
+        let lines = layout_block(&block, 20);
+
+        // Render through Screen + vt100.
+        let mut term = vt100::Parser::new(5, 20, 0);
+        let mut screen = Screen::new(20);
+        let cursor = (0, 0);
+        let mut buf = Vec::new();
+        screen.update(&mut buf, &lines, cursor).expect("render ok");
+        term.process(&buf);
+
+        let row = term.screen().rows(0, 20).next().unwrap_or_default();
+        assert!(row.starts_with(" test"), "row: {row:?}");
+
+        // Check bg on the content cell (index 1 = after 1 margin).
+        let cell = term.screen().cell(0, 1).expect("cell exists");
+        // crossterm Color::Blue = bright blue = vt100 Idx(12).
+        assert_eq!(cell.fgcolor(), vt100::Color::Idx(15)); // White
+    }
+
     // --- screen rendering tests (using vt100 as a headless terminal) ---
 
     #[test]

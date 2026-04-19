@@ -999,32 +999,61 @@ fn interactive_loop(harness: &mut Harness, session_id: &str) -> Result<(), CliEr
                 }
 
                 // Echo user message.
-                term.print_output(StyledBlock::new(StyledText::from(vec![
-                    Span::new("> ", Style::default().fg(tau_cli_term::Color::DarkGrey)),
-                    Span::plain(text),
-                ])));
+                term.print_output(
+                    StyledBlock::new(StyledText::from(vec![
+                        Span::new("> ", Style::default().fg(tau_cli_term::Color::White)),
+                        Span::new(text, Style::default().fg(tau_cli_term::Color::White)),
+                    ]))
+                    .bg(tau_cli_term::Color::Rgb {
+                        r: 40,
+                        g: 40,
+                        b: 55,
+                    })
+                    .margin_left(1)
+                    .margin_right(1),
+                );
 
                 match harness.send_user_message(session_id, text, None) {
                     Ok(outcome) => {
                         for progress in &outcome.progress_messages {
-                            term.print_output(StyledBlock::new(StyledText::from(Span::new(
-                                format!("progress: {progress}"),
-                                Style::default().fg(tau_cli_term::Color::DarkYellow),
-                            ))));
+                            term.print_output(
+                                StyledBlock::new(StyledText::from(Span::new(
+                                    format!("  {progress}  "),
+                                    Style::default().fg(tau_cli_term::Color::DarkYellow),
+                                )))
+                                .bg(tau_cli_term::Color::Rgb {
+                                    r: 50,
+                                    g: 45,
+                                    b: 20,
+                                }),
+                            );
                         }
-                        term.print_output(StyledBlock::new(StyledText::from(vec![
-                            Span::new(
-                                "agent: ",
-                                Style::default().fg(tau_cli_term::Color::DarkCyan).bold(),
-                            ),
-                            Span::plain(&outcome.response),
-                        ])));
+                        term.print_output(
+                            StyledBlock::new(StyledText::from(vec![
+                                Span::new("  ", Style::default().fg(tau_cli_term::Color::White)),
+                                Span::new(
+                                    &outcome.response,
+                                    Style::default().fg(tau_cli_term::Color::White),
+                                ),
+                                Span::new("  ", Style::default().fg(tau_cli_term::Color::White)),
+                            ]))
+                            .bg(tau_cli_term::Color::Rgb {
+                                r: 25,
+                                g: 35,
+                                b: 45,
+                            })
+                            .margin_left(1)
+                            .margin_right(1),
+                        );
                     }
                     Err(CliError::ResponseTimeout) => {
-                        term.print_output(StyledBlock::new(StyledText::from(Span::new(
-                            "error: timed out waiting for agent response",
-                            Style::default().fg(tau_cli_term::Color::Red),
-                        ))));
+                        term.print_output(
+                            StyledBlock::new(StyledText::from(Span::new(
+                                "  timed out waiting for agent response  ",
+                                Style::default().fg(tau_cli_term::Color::White),
+                            )))
+                            .bg(tau_cli_term::Color::DarkRed),
+                        );
                     }
                     Err(error) => return Err(error),
                 }
