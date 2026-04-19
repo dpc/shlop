@@ -9,6 +9,7 @@ members = [
   "crates/tau-proto",
   "crates/tau-socket",
   "crates/tau-supervisor",
+  "crates/tau-blocking-notify-channel",
   "crates/tau-test-support",
   "crates/tau-cli-term",
   "crates/tau",
