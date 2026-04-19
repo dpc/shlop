@@ -7,25 +7,48 @@ Pre-implementation design exploration lives in `doc/ORIGINAL_DESIGN.md`.
 ## Core threading model
 
 Prefer a single thread blocking on one `mpsc::Receiver`, reacting to
-events. All I/O with external processes or sockets uses a pair of
-threads per connection (one reading, one implicitly via synchronous
-write from the event loop). Reader threads decode incoming data and
-send tagged events into the shared channel. The main loop dispatches
-immediately — no polling, no timeouts, no `select!`.
+events.  Each connection has two threads — a reader and a writer.
 
 ```
-  reader thread (ext stdout) ──┐
-  reader thread (ext stdout) ──┤
-  reader thread (socket)     ──┼──► mpsc::Receiver ──► event loop ──► write to sinks
-  accept thread (listener)   ──┘
+  reader thread ──┐                               ┌── writer thread ──► stdin/socket
+  reader thread ──┤                               ├── writer thread ──► stdin/socket
+  reader thread ──┼──► mpsc::Receiver ──► event ──┤
+  accept thread ──┘         loop        dispatch  └── writer thread ──► stdin/socket
+                                                        (channel per connection)
 ```
 
-This gives:
-- instant wakeup on any event from any source
-- no wasted cycles on idle sources
-- linear scaling with extension count (adding sources is just cloning
-  the Sender)
-- simple reasoning — one thread owns all mutable state
+**Reader threads** decode incoming events from each connection's
+stream and feed them into one shared channel.  The event loop wakes
+instantly on any event — no polling, no timeouts, no `select!`.
+
+**Writer threads** own the write half of each connection.  The bus
+delivers outgoing events by sending to the writer's per-connection
+channel (`mpsc::Sender<Event>`).  This is non-blocking — a slow or
+blocked consumer never stalls the event loop.  The writer thread
+drains its channel and writes to the stream.
+
+When a connection is disconnected from the bus, the `ChannelSink`
+(which holds the `Sender`) is dropped.  This closes the writer's
+channel, which triggers the writer thread's shutdown sequence:
+
+- For supervised children: send `LifecycleDisconnect`, close stdin
+  (drop the writer), wait for exit with timeout, then signal escalation
+  (SIGTERM → SIGKILL).  The writer thread owns the `Child` handle.
+- For socket clients and in-process peers: just drop the writer, which
+  closes the stream.
+
+This means `bus.disconnect(id)` is the single operation that tears
+down a connection — the writer thread handles the rest autonomously.
+
+**Design invariants:**
+
+- Instant wakeup on any event from any source
+- No wasted cycles on idle sources
+- Linear scaling with extension count (adding sources = cloning the
+  shared Sender)
+- One thread owns all mutable state (the event loop)
+- Slow writers never block the event loop
+- Shutdown is naturally coordinated through channel closure
 
 Timeouts are acceptable only as safety nets (e.g. extension startup),
 never as the primary dispatch mechanism.

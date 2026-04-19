@@ -1,8 +1,13 @@
 //! Harness daemon: manages extensions, routing, session state, and
 //! serves socket clients.
 //!
-//! All I/O sources feed a single `mpsc::channel`. The harness loop
-//! blocks on `rx.recv()` — wakes instantly on any event, zero polling.
+//! Each connection has a reader thread and a writer thread.  All
+//! reader threads feed one shared `mpsc::channel`.  The harness event
+//! loop blocks on `rx.recv()` and dispatches instantly.  The bus
+//! delivers outgoing events by sending to per-connection writer
+//! channels (non-blocking).  Writer threads drain their channel and
+//! write to the stream; on channel close they run the shutdown
+//! sequence for that connection.
 
 pub mod runtime_dir;
 
@@ -31,6 +36,7 @@ use tau_socket::{SocketPeer, SocketTransportError};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(2);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -140,7 +146,7 @@ impl From<ToolRouteError> for HarnessError {
 }
 
 // ---------------------------------------------------------------------------
-// Internal event type — all I/O sources feed this into one channel
+// Internal event type — all reader threads feed this into one channel
 // ---------------------------------------------------------------------------
 
 enum HarnessEvent {
@@ -153,34 +159,23 @@ enum HarnessEvent {
 }
 
 // ---------------------------------------------------------------------------
-// Writer sink — generic, used for both extension stdin and socket streams
+// Connection sink — sends to the per-connection writer channel
 // ---------------------------------------------------------------------------
 
-struct WriterSink {
-    writer: EventWriter<BufWriter<Box<dyn Write>>>,
+struct ChannelSink {
+    tx: Sender<Event>,
 }
 
-impl WriterSink {
-    fn new(writer: impl Write + 'static) -> Self {
-        Self {
-            writer: EventWriter::new(BufWriter::new(Box::new(writer))),
-        }
-    }
-}
-
-impl ConnectionSink for WriterSink {
+impl ConnectionSink for ChannelSink {
     fn send(&mut self, event: tau_core::RoutedEvent) -> Result<(), ConnectionSendError> {
-        self.writer
-            .write_event(&event.event)
-            .map_err(|e| ConnectionSendError::new(e.to_string()))?;
-        self.writer
-            .flush()
-            .map_err(|e| ConnectionSendError::new(e.to_string()))
+        self.tx
+            .send(event.event)
+            .map_err(|_| ConnectionSendError::new("writer closed"))
     }
 }
 
 // ---------------------------------------------------------------------------
-// Reader thread — one per I/O source, sends to the shared channel
+// Reader thread — one per connection, sends to the shared harness channel
 // ---------------------------------------------------------------------------
 
 fn spawn_reader_thread(
@@ -203,13 +198,7 @@ fn spawn_reader_thread(
                         return;
                     }
                 }
-                Ok(None) => {
-                    let _ = tx.send(HarnessEvent::Disconnected {
-                        connection_id: connection_id.clone(),
-                    });
-                    return;
-                }
-                Err(_) => {
+                Ok(None) | Err(_) => {
                     let _ = tx.send(HarnessEvent::Disconnected {
                         connection_id: connection_id.clone(),
                     });
@@ -221,18 +210,79 @@ fn spawn_reader_thread(
 }
 
 // ---------------------------------------------------------------------------
-// Extension tracking (for shutdown only)
+// Writer thread — one per connection, drains channel and writes to stream
 // ---------------------------------------------------------------------------
 
-enum ExtensionShutdown {
-    InProcess(Option<JoinHandle<Result<(), String>>>),
-    Supervised(Child),
+/// What the writer thread should do when its channel closes.
+enum WriterShutdown {
+    /// Just close the stream (socket clients, in-process peers).
+    CloseStream,
+    /// Supervised child: send disconnect, close stdin, wait/signal.
+    KillChild(Child),
 }
+
+fn spawn_writer_thread(
+    writer: impl Write + Send + 'static,
+    shutdown: WriterShutdown,
+) -> Sender<Event> {
+    let (tx, rx) = mpsc::channel::<Event>();
+    thread::spawn(move || {
+        let mut w = EventWriter::new(BufWriter::new(writer));
+
+        // Drain events until the channel closes.
+        while let Ok(event) = rx.recv() {
+            if w.write_event(&event).is_err() {
+                return;
+            }
+            if w.flush().is_err() {
+                return;
+            }
+        }
+
+        // Channel closed — run shutdown sequence.
+        match shutdown {
+            WriterShutdown::CloseStream => {
+                // Drop the writer → closes the stream.
+            }
+            WriterShutdown::KillChild(mut child) => {
+                // Best-effort disconnect message.
+                let _ = w.write_event(&Event::LifecycleDisconnect(LifecycleDisconnect {
+                    reason: Some("shutdown".to_owned()),
+                }));
+                let _ = w.flush();
+                // Drop the writer → closes stdin → extension sees EOF.
+                drop(w);
+
+                // Wait for graceful exit, then escalate.
+                let started = Instant::now();
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(_)) => return,
+                        Ok(None) => {}
+                        Err(_) => return,
+                    }
+                    if SHUTDOWN_GRACE <= started.elapsed() {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(50));
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    });
+    tx
+}
+
+// ---------------------------------------------------------------------------
+// Extension tracking
+// ---------------------------------------------------------------------------
 
 struct ExtensionEntry {
     name: String,
     connection_id: String,
-    shutdown: ExtensionShutdown,
+    /// In-process extension thread handle (for join on shutdown).
+    in_process_thread: Option<JoinHandle<Result<(), String>>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -280,7 +330,7 @@ impl Harness {
         extensions.push(ExtensionEntry {
             name: "agent".to_owned(),
             connection_id: conn_id,
-            shutdown: ExtensionShutdown::InProcess(Some(thread)),
+            in_process_thread: Some(thread),
         });
 
         // Filesystem tool
@@ -294,7 +344,7 @@ impl Harness {
         extensions.push(ExtensionEntry {
             name: "filesystem-tool".to_owned(),
             connection_id: conn_id,
-            shutdown: ExtensionShutdown::InProcess(Some(thread)),
+            in_process_thread: Some(thread),
         });
 
         // Shell tool
@@ -308,7 +358,7 @@ impl Harness {
         extensions.push(ExtensionEntry {
             name: "shell-tool".to_owned(),
             connection_id: conn_id,
-            shutdown: ExtensionShutdown::InProcess(Some(thread)),
+            in_process_thread: Some(thread),
         });
 
         let mut harness = Self {
@@ -355,8 +405,7 @@ impl Harness {
                 _ => ClientKind::Tool,
             };
 
-            let (conn_id, child) =
-                spawn_supervised(ext_config, kind.clone(), &mut bus, &tx)?;
+            let conn_id = spawn_supervised(ext_config, kind.clone(), &mut bus, &tx)?;
 
             if kind == ClientKind::Agent {
                 agent_connection_id = Some(conn_id.clone());
@@ -364,7 +413,7 @@ impl Harness {
             extensions.push(ExtensionEntry {
                 name: ext_config.name.clone(),
                 connection_id: conn_id,
-                shutdown: ExtensionShutdown::Supervised(child),
+                in_process_thread: None,
             });
         }
 
@@ -498,7 +547,7 @@ impl Harness {
 
     fn accept_client(&mut self, stream: UnixStream) -> Result<(), HarnessError> {
         let write_stream = stream.try_clone()?;
-        let sink = WriterSink::new(write_stream);
+        let writer_tx = spawn_writer_thread(write_stream, WriterShutdown::CloseStream);
         let conn_id = self.bus.connect(Connection::new(
             ConnectionMetadata {
                 id: String::new(),
@@ -506,7 +555,7 @@ impl Harness {
                 kind: ClientKind::Ui,
                 origin: ConnectionOrigin::Socket,
             },
-            Box::new(sink),
+            Box::new(ChannelSink { tx: writer_tx }),
         ));
         spawn_reader_thread(conn_id, stream, self.tx.clone());
         Ok(())
@@ -853,28 +902,20 @@ impl Harness {
     // -----------------------------------------------------------------------
 
     fn shutdown(&mut self) -> Result<(), HarnessError> {
+        // Disconnect all extensions from the bus.  Dropping the
+        // ChannelSink closes the writer channel, which triggers each
+        // writer thread's shutdown sequence (send disconnect, close
+        // stdin, wait/kill child).
         for ext in &self.extensions {
-            let _ = self.bus.send_to(
-                &ext.connection_id,
-                None,
-                Event::LifecycleDisconnect(LifecycleDisconnect {
-                    reason: Some("shutdown".to_owned()),
-                }),
-            );
+            let _ = self.bus.disconnect(&ext.connection_id);
         }
 
+        // Join in-process extension threads.
         for i in 0..self.extensions.len() {
-            match &mut self.extensions[i].shutdown {
-                ExtensionShutdown::InProcess(thread) => {
-                    if let Some(handle) = thread.take() {
-                        let name = self.extensions[i].name.clone();
-                        let result = handle.join().map_err(|_| HarnessError::ThreadJoin(name))?;
-                        result.map_err(HarnessError::Participant)?;
-                    }
-                }
-                ExtensionShutdown::Supervised(child) => {
-                    let _ = child.wait();
-                }
+            if let Some(handle) = self.extensions[i].in_process_thread.take() {
+                let name = self.extensions[i].name.clone();
+                let result = handle.join().map_err(|_| HarnessError::ThreadJoin(name))?;
+                result.map_err(HarnessError::Participant)?;
             }
             let name = self.extensions[i].name.clone();
             self.emit_extension_exited(&name);
@@ -905,11 +946,12 @@ fn spawn_in_process<F>(
 where
     F: FnOnce(UnixStream, UnixStream) -> Result<(), String> + Send + 'static,
 {
-    let (ext_stream, harness_stream) = UnixStream::pair()?;
-    let ext_reader = ext_stream.try_clone()?;
-    let harness_reader = harness_stream.try_clone()?;
+    // Two unidirectional pairs so dropping one end cleanly EOFs the
+    // other — no shared clones keeping the socket alive.
+    let (ext_read, harness_write) = UnixStream::pair()?; // harness → extension
+    let (harness_read, ext_write) = UnixStream::pair()?; // extension → harness
 
-    let sink = WriterSink::new(harness_stream);
+    let writer_tx = spawn_writer_thread(harness_write, WriterShutdown::CloseStream);
     let conn_id = bus.connect(Connection::new(
         ConnectionMetadata {
             id: String::new(),
@@ -917,12 +959,12 @@ where
             kind,
             origin: ConnectionOrigin::Supervised,
         },
-        Box::new(sink),
+        Box::new(ChannelSink { tx: writer_tx }),
     ));
 
-    spawn_reader_thread(conn_id.clone(), harness_reader, tx.clone());
+    spawn_reader_thread(conn_id.clone(), harness_read, tx.clone());
 
-    let thread = thread::spawn(move || run(ext_reader, ext_stream));
+    let thread = thread::spawn(move || run(ext_read, ext_write));
     Ok((conn_id, thread))
 }
 
@@ -931,7 +973,7 @@ fn spawn_supervised(
     kind: ClientKind,
     bus: &mut EventBus,
     tx: &Sender<HarnessEvent>,
-) -> Result<(String, Child), HarnessError> {
+) -> Result<String, HarnessError> {
     let mut child = Command::new(&config.command)
         .args(&config.args)
         .stdin(Stdio::piped())
@@ -949,7 +991,7 @@ fn spawn_supervised(
         .take()
         .ok_or_else(|| HarnessError::Participant("missing stdout".to_owned()))?;
 
-    let sink = WriterSink::new(stdin);
+    let writer_tx = spawn_writer_thread(stdin, WriterShutdown::KillChild(child));
     let conn_id = bus.connect(Connection::new(
         ConnectionMetadata {
             id: String::new(),
@@ -957,12 +999,12 @@ fn spawn_supervised(
             kind,
             origin: ConnectionOrigin::Supervised,
         },
-        Box::new(sink),
+        Box::new(ChannelSink { tx: writer_tx }),
     ));
 
     spawn_reader_thread(conn_id.clone(), stdout, tx.clone());
 
-    Ok((conn_id, child))
+    Ok(conn_id)
 }
 
 fn wants_extension_events(selectors: &[EventSelector]) -> bool {
@@ -1547,18 +1589,17 @@ mod tests {
             .expect("shell-tool")
             .to_owned();
 
-        // Send disconnect to the extension
-        h.bus
-            .send_to(
-                &conn_id,
-                None,
-                Event::LifecycleDisconnect(LifecycleDisconnect {
-                    reason: Some("test".to_owned()),
-                }),
-            )
-            .expect("send disconnect");
+        // Send disconnect to the extension via the bus (through the
+        // writer channel → writer thread → stream).
+        let _ = h.bus.send_to(
+            &conn_id,
+            None,
+            Event::LifecycleDisconnect(LifecycleDisconnect {
+                reason: Some("test".to_owned()),
+            }),
+        );
 
-        // Drive event loop until the disconnect arrives
+        // Drive event loop until the disconnect arrives.
         let started = Instant::now();
         loop {
             let event = h
