@@ -29,7 +29,7 @@ fn socket_transport_supports_later_attached_end_to_end_clients() {
         .open_session_store()
         .expect("session store should reopen");
     let session = store.session("session-1").expect("session should exist");
-    assert_eq!(session.entries.len(), 8);
+    assert_eq!(session.current_branch().len(), 8);
 }
 
 #[test]

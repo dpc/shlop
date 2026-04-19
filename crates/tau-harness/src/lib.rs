@@ -1076,8 +1076,8 @@ fn format_session_entry(entry: &SessionEntry) -> String {
     }
 }
 
-fn latest_agent_preview(session: &tau_core::SessionSnapshot) -> Option<String> {
-    session.entries.iter().rev().find_map(|e| match e {
+fn latest_agent_preview(session: &tau_core::SessionTree) -> Option<String> {
+    session.current_branch().into_iter().rev().find_map(|e| match e {
         SessionEntry::AgentMessage { text } => Some(text.clone()),
         _ => None,
     })
@@ -1386,12 +1386,12 @@ pub fn session_lines(
     session_id: &str,
 ) -> Result<Vec<String>, HarnessError> {
     let store = open_session_store(path)?;
-    let Some(session) = store.session(session_id) else {
+    let Some(tree) = store.session(session_id) else {
         return Ok(vec![format!("session {session_id} not found")]);
     };
-    Ok(session
-        .entries
-        .iter()
+    Ok(tree
+        .current_branch()
+        .into_iter()
         .enumerate()
         .map(|(i, e)| format!("{}: {}", i + 1, format_session_entry(e)))
         .collect())
@@ -1400,17 +1400,18 @@ pub fn session_lines(
 pub fn session_list_lines(path: impl AsRef<Path>) -> Result<Vec<String>, HarnessError> {
     let store = open_session_store(path)?;
     let mut sessions = store.sessions();
-    sessions.sort_by(|a, b| a.session_id.cmp(&b.session_id));
+    sessions.sort_by(|a, b| a.session_id().cmp(b.session_id()));
     if sessions.is_empty() {
         return Ok(vec!["no sessions".to_owned()]);
     }
     Ok(sessions
         .into_iter()
         .map(|s| {
+            let branch = s.current_branch();
             format!(
                 "{} ({} entries){}",
-                s.session_id,
-                s.entries.len(),
+                s.session_id(),
+                branch.len(),
                 latest_agent_preview(s)
                     .map(|p| format!(": {p}"))
                     .unwrap_or_default()
@@ -1495,7 +1496,7 @@ mod tests {
         let r = run_embedded_message(&sp, "s1", "hello").expect("should succeed");
         assert!(r.contains("demo.echo returned"));
         let store = open_session_store(&sp).expect("reopen");
-        assert_eq!(store.session("s1").expect("session").entries.len(), 4);
+        assert_eq!(store.session("s1").expect("session").current_branch().len(), 4);
     }
 
     #[test]
@@ -1532,7 +1533,7 @@ mod tests {
 
         server.join().expect("join").expect("daemon clean exit");
         let store = open_session_store(&sp).expect("reopen");
-        assert_eq!(store.session("s1").expect("session").entries.len(), 8);
+        assert_eq!(store.session("s1").expect("session").current_branch().len(), 8);
     }
 
     #[test]

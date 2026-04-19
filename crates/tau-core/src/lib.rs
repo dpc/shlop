@@ -866,17 +866,110 @@ pub enum ToolActivityOutcome {
     },
 }
 
-/// In-memory snapshot of one session and its persisted entries.
+/// Unique identifier for a node in the session tree.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+pub struct NodeId(pub u64);
+
+/// One node in the session tree.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SessionNode {
+    pub id: NodeId,
+    pub parent_id: Option<NodeId>,
+    pub entry: SessionEntry,
+}
+
+/// Tree-structured session history with branching.
+///
+/// Each entry is a node with a unique ID and parent pointer. The
+/// `head` tracks the current position. Branching = moving head to an
+/// earlier node; the next append creates a new branch.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct SessionSnapshot {
-    pub session_id: String,
-    pub entries: Vec<SessionEntry>,
+pub struct SessionTree {
+    session_id: String,
+    nodes: Vec<SessionNode>,
+    head: Option<NodeId>,
+}
+
+impl SessionTree {
+    /// Returns the session identifier.
+    #[must_use]
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    /// Returns the current head node ID, if any.
+    #[must_use]
+    pub fn head(&self) -> Option<NodeId> {
+        self.head
+    }
+
+    /// Returns a node by ID.
+    #[must_use]
+    pub fn node(&self, id: NodeId) -> Option<&SessionNode> {
+        self.nodes.get(id.0 as usize)
+    }
+
+    /// Returns all nodes.
+    #[must_use]
+    pub fn nodes(&self) -> &[SessionNode] {
+        &self.nodes
+    }
+
+    /// Returns the entries along the current branch (root to head).
+    #[must_use]
+    pub fn current_branch(&self) -> Vec<&SessionEntry> {
+        let mut path = Vec::new();
+        let mut current = self.head;
+        while let Some(id) = current {
+            if let Some(node) = self.nodes.get(id.0 as usize) {
+                path.push(&node.entry);
+                current = node.parent_id;
+            } else {
+                break;
+            }
+        }
+        path.reverse();
+        path
+    }
+
+    /// Returns the direct children of a node.
+    #[must_use]
+    pub fn children(&self, id: NodeId) -> Vec<NodeId> {
+        self.nodes
+            .iter()
+            .filter(|n| n.parent_id == Some(id))
+            .map(|n| n.id)
+            .collect()
+    }
+
+    fn append_node(&mut self, entry: SessionEntry) -> NodeId {
+        let id = NodeId(self.nodes.len() as u64);
+        self.nodes.push(SessionNode {
+            id,
+            parent_id: self.head,
+            entry,
+        });
+        self.head = Some(id);
+        id
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct PersistedSessionRecord {
     session_id: String,
-    entry: SessionEntry,
+    kind: RecordKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+enum RecordKind {
+    Node {
+        id: NodeId,
+        parent_id: Option<NodeId>,
+        entry: SessionEntry,
+    },
+    SetHead {
+        node_id: NodeId,
+    },
 }
 
 /// Errors returned by the append-only session store.
@@ -964,11 +1057,11 @@ impl Error for SessionStoreError {
     }
 }
 
-/// Append-only persistence for minimal session history and tool activity.
+/// Append-only persistence for tree-structured session history.
 #[derive(Debug)]
 pub struct SessionStore {
     path: PathBuf,
-    sessions: HashMap<String, SessionSnapshot>,
+    sessions: HashMap<String, SessionTree>,
 }
 
 impl SessionStore {
@@ -996,78 +1089,108 @@ impl SessionStore {
         Ok(Self { path, sessions })
     }
 
-    /// Appends one user message to a session, creating the session if needed.
+    /// Appends an entry at the current head, returns the new node ID.
+    pub fn append(
+        &mut self,
+        session_id: &str,
+        entry: SessionEntry,
+    ) -> Result<NodeId, SessionStoreError> {
+        let tree = self
+            .sessions
+            .entry(session_id.to_owned())
+            .or_insert_with(|| SessionTree {
+                session_id: session_id.to_owned(),
+                nodes: Vec::new(),
+                head: None,
+            });
+        let parent_id = tree.head;
+        let id = tree.append_node(entry.clone());
+        let record = PersistedSessionRecord {
+            session_id: session_id.to_owned(),
+            kind: RecordKind::Node {
+                id,
+                parent_id,
+                entry,
+            },
+        };
+        append_record(&self.path, &record)?;
+        Ok(id)
+    }
+
+    /// Moves the head pointer to an existing node (branch switch).
+    pub fn set_head(
+        &mut self,
+        session_id: &str,
+        node_id: NodeId,
+    ) -> Result<(), SessionStoreError> {
+        let tree = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or_else(|| SessionStoreError::Open {
+                path: self.path.clone(),
+                source: io::Error::new(io::ErrorKind::NotFound, "session not found"),
+            })?;
+        tree.head = Some(node_id);
+        let record = PersistedSessionRecord {
+            session_id: session_id.to_owned(),
+            kind: RecordKind::SetHead { node_id },
+        };
+        append_record(&self.path, &record)
+    }
+
+    /// Appends one user message to a session.
     pub fn append_user_message(
         &mut self,
         session_id: impl Into<String>,
         text: impl Into<String>,
-    ) -> Result<(), SessionStoreError> {
-        self.append_entry(
-            session_id.into(),
+    ) -> Result<NodeId, SessionStoreError> {
+        self.append(
+            &session_id.into(),
             SessionEntry::UserMessage { text: text.into() },
         )
     }
 
-    /// Appends one agent message to a session, creating the session if needed.
+    /// Appends one agent message to a session.
     pub fn append_agent_message(
         &mut self,
         session_id: impl Into<String>,
         text: impl Into<String>,
-    ) -> Result<(), SessionStoreError> {
-        self.append_entry(
-            session_id.into(),
+    ) -> Result<NodeId, SessionStoreError> {
+        self.append(
+            &session_id.into(),
             SessionEntry::AgentMessage { text: text.into() },
         )
     }
 
-    /// Appends one tool activity record to a session, creating the session if
-    /// needed.
+    /// Appends one tool activity record to a session.
     pub fn append_tool_activity(
         &mut self,
         session_id: impl Into<String>,
         activity: ToolActivityRecord,
-    ) -> Result<(), SessionStoreError> {
-        self.append_entry(session_id.into(), SessionEntry::ToolActivity(activity))
+    ) -> Result<NodeId, SessionStoreError> {
+        self.append(
+            &session_id.into(),
+            SessionEntry::ToolActivity(activity),
+        )
     }
 
-    /// Returns one session snapshot if it exists.
+    /// Returns one session tree if it exists.
     #[must_use]
-    pub fn session(&self, session_id: &str) -> Option<&SessionSnapshot> {
+    pub fn session(&self, session_id: &str) -> Option<&SessionTree> {
         self.sessions.get(session_id)
     }
 
     /// Returns all known sessions.
     #[must_use]
-    pub fn sessions(&self) -> Vec<&SessionSnapshot> {
+    pub fn sessions(&self) -> Vec<&SessionTree> {
         self.sessions.values().collect()
-    }
-
-    fn append_entry(
-        &mut self,
-        session_id: String,
-        entry: SessionEntry,
-    ) -> Result<(), SessionStoreError> {
-        let record = PersistedSessionRecord {
-            session_id: session_id.clone(),
-            entry: entry.clone(),
-        };
-        append_record(&self.path, &record)?;
-        self.sessions
-            .entry(session_id.clone())
-            .or_insert_with(|| SessionSnapshot {
-                session_id,
-                entries: Vec::new(),
-            })
-            .entries
-            .push(entry);
-        Ok(())
     }
 }
 
 fn load_records(
     path: &Path,
     reader: &mut File,
-    sessions: &mut HashMap<String, SessionSnapshot>,
+    sessions: &mut HashMap<String, SessionTree>,
 ) -> Result<(), SessionStoreError> {
     loop {
         let mut length_bytes = [0_u8; 8];
@@ -1096,14 +1219,33 @@ fn load_records(
                 path: path.to_path_buf(),
                 source,
             })?;
-        sessions
+
+        let tree = sessions
             .entry(record.session_id.clone())
-            .or_insert_with(|| SessionSnapshot {
+            .or_insert_with(|| SessionTree {
                 session_id: record.session_id.clone(),
-                entries: Vec::new(),
-            })
-            .entries
-            .push(record.entry);
+                nodes: Vec::new(),
+                head: None,
+            });
+
+        match record.kind {
+            RecordKind::Node {
+                id,
+                parent_id,
+                entry,
+            } => {
+                debug_assert!(id.0 == tree.nodes.len() as u64);
+                tree.nodes.push(SessionNode {
+                    id,
+                    parent_id,
+                    entry,
+                });
+                tree.head = Some(id);
+            }
+            RecordKind::SetHead { node_id } => {
+                tree.head = Some(node_id);
+            }
+        }
     }
 }
 
@@ -1540,37 +1682,85 @@ mod tests {
     }
 
     #[test]
-    fn session_store_persists_message_history_across_reopen() {
+    fn session_tree_persists_across_reopen() {
         let tempdir = TempDir::new().expect("tempdir should exist");
         let store_path = tempdir.path().join("session-store.bin");
 
         let mut store = SessionStore::open(&store_path).expect("store should open");
-        store
+        let id0 = store
             .append_user_message("session-1", "hello")
             .expect("user message should persist");
-        store
+        let id1 = store
             .append_agent_message("session-1", "hi there")
             .expect("agent message should persist");
 
+        assert_eq!(id0, NodeId(0));
+        assert_eq!(id1, NodeId(1));
+
         let reopened = SessionStore::open(&store_path).expect("store should reopen");
-        let session = reopened
+        let tree = reopened
             .session("session-1")
             .expect("session should reload");
+        assert_eq!(tree.head(), Some(NodeId(1)));
         assert_eq!(
-            session.entries,
+            tree.current_branch(),
             vec![
-                SessionEntry::UserMessage {
+                &SessionEntry::UserMessage {
                     text: "hello".to_owned(),
                 },
-                SessionEntry::AgentMessage {
+                &SessionEntry::AgentMessage {
                     text: "hi there".to_owned(),
                 },
             ]
         );
+        // Verify tree structure.
+        assert!(tree.node(NodeId(0)).expect("node 0").parent_id.is_none());
+        assert_eq!(
+            tree.node(NodeId(1)).expect("node 1").parent_id,
+            Some(NodeId(0))
+        );
     }
 
     #[test]
-    fn session_store_associates_tool_activity_with_a_session() {
+    fn session_tree_supports_branching() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let store_path = tempdir.path().join("session-store.bin");
+
+        let mut store = SessionStore::open(&store_path).expect("store should open");
+        let _ = store.append_user_message("s1", "hello").expect("ok");
+        let _ = store.append_agent_message("s1", "hi").expect("ok");
+        // Branch: go back to node 0 and append a different message.
+        store.set_head("s1", NodeId(0)).expect("set_head should work");
+        let _ = store.append_user_message("s1", "goodbye").expect("ok");
+
+        let tree = store.session("s1").expect("session should exist");
+        assert_eq!(tree.head(), Some(NodeId(2)));
+        // Current branch: hello → goodbye (skipping "hi").
+        assert_eq!(
+            tree.current_branch(),
+            vec![
+                &SessionEntry::UserMessage {
+                    text: "hello".to_owned(),
+                },
+                &SessionEntry::UserMessage {
+                    text: "goodbye".to_owned(),
+                },
+            ]
+        );
+        // Node 0 has two children (branching point).
+        let mut children = tree.children(NodeId(0));
+        children.sort_by_key(|id| id.0);
+        assert_eq!(children, vec![NodeId(1), NodeId(2)]);
+
+        // Verify persistence across reopen.
+        let reopened = SessionStore::open(&store_path).expect("reopen");
+        let tree2 = reopened.session("s1").expect("session");
+        assert_eq!(tree2.head(), Some(NodeId(2)));
+        assert_eq!(tree2.current_branch().len(), 2);
+    }
+
+    #[test]
+    fn session_tree_associates_tool_activity() {
         let tempdir = TempDir::new().expect("tempdir should exist");
         let store_path = tempdir.path().join("session-store.bin");
 
@@ -1592,12 +1782,13 @@ mod tests {
             .expect("tool activity should persist");
 
         let reopened = SessionStore::open(&store_path).expect("store should reopen");
-        let session = reopened
+        let tree = reopened
             .session("session-1")
             .expect("session should reload");
-        assert_eq!(session.entries.len(), 2);
+        let branch = tree.current_branch();
+        assert_eq!(branch.len(), 2);
         assert_eq!(
-            session.entries[1],
+            *branch[1],
             SessionEntry::ToolActivity(ToolActivityRecord {
                 call_id: "call-1".to_owned(),
                 tool_name: "fs.read".to_owned(),
@@ -1833,7 +2024,7 @@ mod tests {
         let session = reopened
             .session("session-1")
             .expect("session should reload");
-        assert_eq!(session.entries.len(), 4);
+        assert_eq!(session.current_branch().len(), 4);
 
         bus.send_to(
             &agent_id,
