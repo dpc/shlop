@@ -9,6 +9,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+config.workspace = true
 dirs.workspace = true
 serde.workspace = true
 toml.workspace = true

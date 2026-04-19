@@ -9,6 +9,8 @@
 //! Project config layering is additive for `[[extensions]]`: project entries
 //! are appended on top of user entries and never remove them.
 
+pub mod settings;
+
 use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::{fmt, fs, io};

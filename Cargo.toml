@@ -51,6 +51,7 @@ tau-test-support = { path = "crates/tau-test-support" }
 
 # External crates
 ciborium = "0.2.2"
+config = { version = "0.15", default-features = false, features = ["json5"] }
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.28"
 dirs = "6"
