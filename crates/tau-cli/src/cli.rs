@@ -10,7 +10,7 @@ use crate::{
 #[command(name = "tau", about = "Unix-native LLM agent harness")]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 #[derive(Subcommand)]

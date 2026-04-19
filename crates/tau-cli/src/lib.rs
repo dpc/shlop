@@ -1008,9 +1008,7 @@ fn interactive_loop(harness: &mut Harness, session_id: &str) -> Result<(), CliEr
                         r: 40,
                         g: 40,
                         b: 55,
-                    })
-                    .margin_left(1)
-                    .margin_right(1),
+                    }),
                 );
 
                 match harness.send_user_message(session_id, text, None) {
@@ -1041,9 +1039,7 @@ fn interactive_loop(harness: &mut Harness, session_id: &str) -> Result<(), CliEr
                                 r: 25,
                                 g: 35,
                                 b: 45,
-                            })
-                            .margin_left(1)
-                            .margin_right(1),
+                            }),
                         );
                     }
                     Err(CliError::ResponseTimeout) => {
@@ -1486,7 +1482,13 @@ pub fn main_with_args() -> std::process::ExitCode {
     fn run() -> Result<(), CliError> {
         let parsed = cli::Cli::parse();
 
-        match parsed.command {
+        let command = parsed.command.unwrap_or(cli::Command::Chat {
+            session_id: default_session_id().to_owned(),
+            session_store: default_session_store_path(),
+            config: None,
+        });
+
+        match command {
             cli::Command::Chat {
                 session_id,
                 session_store,
