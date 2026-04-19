@@ -874,7 +874,7 @@ impl Harness {
             Event::AgentPromptRequest(AgentPromptRequest {
                 turn_id,
                 session_id: session_id.to_owned(),
-                system_prompt: "You are a helpful coding assistant.".to_owned(),
+                system_prompt: build_system_prompt(&tools),
                 messages,
                 tools,
             }),
@@ -1171,6 +1171,96 @@ fn spawn_supervised(
     Ok(conn_id)
 }
 
+/// Builds the system prompt from available tools and environment.
+fn build_system_prompt(tools: &[ToolDefinition]) -> String {
+    let mut prompt = String::from(
+        "You are an expert coding assistant operating inside tau, \
+         a coding agent harness. You help users by reading files, \
+         executing commands, editing code, and writing new files.\n\n",
+    );
+
+    // Available tools section.
+    if !tools.is_empty() {
+        prompt.push_str("Available tools:\n");
+        for tool in tools {
+            let desc = tool
+                .description
+                .as_deref()
+                .unwrap_or("(no description)");
+            prompt.push_str(&format!("- {}: {desc}\n", tool.name));
+        }
+        prompt.push('\n');
+    }
+
+    // Guidelines.
+    prompt.push_str(
+        "Guidelines:\n\
+         - Be concise in your responses.\n\
+         - Show file paths clearly when working with files.\n\
+         - When asked to read a file, use the fs.read tool.\n\
+         - When asked to run a command, use the shell.exec tool.\n",
+    );
+
+    // Date and CWD.
+    let now = chrono_free_date();
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "(unknown)".to_owned());
+    prompt.push_str(&format!("\nCurrent date: {now}\n"));
+    prompt.push_str(&format!("Current working directory: {cwd}\n"));
+
+    prompt
+}
+
+/// Returns the current date as YYYY-MM-DD without chrono.
+fn chrono_free_date() -> String {
+    // Use UNIX timestamp to derive date.
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let days = secs / 86400;
+    // Simple days-since-epoch to Y-M-D (good enough, no leap second edge cases).
+    let mut y = 1970_i64;
+    let mut remaining = days as i64;
+    loop {
+        let days_in_year = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
+            366
+        } else {
+            365
+        };
+        if remaining < days_in_year {
+            break;
+        }
+        remaining -= days_in_year;
+        y += 1;
+    }
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let month_days = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let mut m = 0;
+    for md in &month_days {
+        if remaining < *md {
+            break;
+        }
+        remaining -= md;
+        m += 1;
+    }
+    format!("{y}-{:02}-{:02}", m + 1, remaining + 1)
+}
+
 /// Converts a session tree's current branch into LLM conversation
 /// messages.
 fn assemble_conversation(tree: &tau_core::SessionTree) -> Vec<ConversationMessage> {
@@ -1216,12 +1306,11 @@ fn assemble_conversation(tree: &tau_core::SessionTree) -> Vec<ConversationMessag
                     }
                 }
                 ToolActivityOutcome::Result { result } => {
-                    let content_text = format!("{result:?}");
                     messages.push(ConversationMessage {
                         role: ConversationRole::User,
                         content: vec![ContentBlock::ToolResult {
                             tool_use_id: activity.call_id.clone(),
-                            content: content_text,
+                            content: cbor_to_text(result),
                             is_error: false,
                         }],
                     });
@@ -1241,6 +1330,42 @@ fn assemble_conversation(tree: &tau_core::SessionTree) -> Vec<ConversationMessag
     }
 
     messages
+}
+
+/// Converts a CBOR value to human-readable text for tool results.
+fn cbor_to_text(v: &tau_proto::CborValue) -> String {
+    use tau_proto::CborValue;
+    match v {
+        CborValue::Null => String::new(),
+        CborValue::Bool(b) => b.to_string(),
+        CborValue::Integer(i) => {
+            let n: i128 = (*i).into();
+            n.to_string()
+        }
+        CborValue::Float(f) => f.to_string(),
+        CborValue::Text(s) => s.clone(),
+        CborValue::Bytes(b) => format!("<{} bytes>", b.len()),
+        CborValue::Array(arr) => arr.iter().map(cbor_to_text).collect::<Vec<_>>().join("\n"),
+        CborValue::Map(entries) => {
+            // For maps, extract text values cleanly.
+            let mut parts = Vec::new();
+            for (k, val) in entries {
+                let key = match k {
+                    CborValue::Text(s) => s.clone(),
+                    other => cbor_to_text(other),
+                };
+                let value = cbor_to_text(val);
+                if value.contains('\n') {
+                    parts.push(format!("{key}:\n{value}"));
+                } else {
+                    parts.push(format!("{key}: {value}"));
+                }
+            }
+            parts.join("\n")
+        }
+        CborValue::Tag(_, inner) => cbor_to_text(inner),
+        _ => String::new(),
+    }
 }
 
 fn wants_extension_events(selectors: &[EventSelector]) -> bool {
@@ -1303,7 +1428,13 @@ fn format_session_entry(entry: &SessionEntry) -> String {
                 format!("tool.request {} ({})", a.tool_name, a.call_id)
             }
             ToolActivityOutcome::Result { result } => {
-                format!("tool.result {} ({}) -> {result:?}", a.tool_name, a.call_id)
+                let text = cbor_to_text(result);
+                let preview = if text.len() > 80 {
+                    format!("{}...", &text[..80])
+                } else {
+                    text
+                };
+                format!("tool.result {} ({}) -> {preview}", a.tool_name, a.call_id)
             }
             ToolActivityOutcome::Error { message, .. } => {
                 format!("tool.error {} ({}) -> {message}", a.tool_name, a.call_id)

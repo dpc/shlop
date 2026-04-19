@@ -41,7 +41,12 @@ where
     writer.write_event(&Event::ToolRegister(ToolRegister {
         tool: ToolSpec {
             name: SHELL_EXEC_TOOL_NAME.to_owned(),
-            description: Some("Run one shell command with captured output".to_owned()),
+            description: Some(
+                "Execute a bash command in the current working directory. \
+                 Returns stdout, stderr, and exit status. \
+                 Use this for running builds, tests, git commands, and other shell operations."
+                    .to_owned(),
+            ),
         },
     }))?;
     writer.write_event(&Event::LifecycleReady(LifecycleReady {

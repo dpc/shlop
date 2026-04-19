@@ -47,11 +47,15 @@ where
     for tool in [
         ToolSpec {
             name: DEMO_ECHO_TOOL_NAME.to_owned(),
-            description: Some("Echo the provided payload".to_owned()),
+            description: Some("Echo the provided payload unchanged".to_owned()),
         },
         ToolSpec {
             name: FS_READ_TOOL_NAME.to_owned(),
-            description: Some("Read one UTF-8 file from disk".to_owned()),
+            description: Some(
+                "Read the contents of a file. Returns the file path and text content. \
+                 Use this instead of shell commands like cat or head."
+                    .to_owned(),
+            ),
         },
     ] {
         writer.write_event(&Event::ToolRegister(ToolRegister { tool }))?;
