@@ -1719,29 +1719,34 @@ mod tests {
 
         let agent_hello = agent_reader
             .read_event()
+            .expect("read")
             .expect("agent hello should arrive");
         assert!(matches!(agent_hello, Event::LifecycleHello(_)));
         let _ = bus.publish_from(Some(&agent_id), agent_hello);
         let agent_subscribe = agent_reader
             .read_event()
+            .expect("read")
             .expect("agent subscribe should arrive");
         let _ = bus.publish_from(Some(&agent_id), agent_subscribe);
         let agent_ready = agent_reader
             .read_event()
+            .expect("read")
             .expect("agent ready should arrive");
         assert!(matches!(agent_ready, Event::LifecycleReady(_)));
 
-        let tool_hello = tool_reader.read_event().expect("tool hello should arrive");
+        let tool_hello = tool_reader.read_event().expect("read").expect("tool hello should arrive");
         assert!(matches!(tool_hello, Event::LifecycleHello(_)));
         let _ = bus.publish_from(Some(&tool_id), tool_hello);
         let tool_subscribe = tool_reader
             .read_event()
+            .expect("read")
             .expect("tool subscribe should arrive");
         let _ = bus.publish_from(Some(&tool_id), tool_subscribe);
         let mut registered_tool_names = Vec::new();
         loop {
             let startup_event = tool_reader
                 .read_event()
+                .expect("read")
                 .expect("tool startup event should arrive");
             match startup_event {
                 Event::ToolRegister(tool_register) => {
@@ -1770,6 +1775,7 @@ mod tests {
 
         let request = agent_reader
             .read_event()
+            .expect("read")
             .expect("tool request should arrive");
         let Event::ToolRequest(request) = request else {
             panic!("expected tool request from agent");
@@ -1791,7 +1797,7 @@ mod tests {
             .expect("tool request should route");
         assert_eq!(routed.provider_connection_id, tool_id.clone());
 
-        let result = tool_reader.read_event().expect("tool result should arrive");
+        let result = tool_reader.read_event().expect("read").expect("tool result should arrive");
         let Event::ToolResult(result) = result else {
             panic!("expected tool result from tool extension");
         };
@@ -1811,6 +1817,7 @@ mod tests {
 
         let response = agent_reader
             .read_event()
+            .expect("read")
             .expect("agent response should arrive");
         let Event::MessageAgent(response_message) = response else {
             panic!("expected agent message");

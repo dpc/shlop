@@ -192,7 +192,7 @@ fn spawn_reader_thread(
         let mut reader = EventReader::new(BufReader::new(stream));
         loop {
             match reader.read_event() {
-                Ok(event) => {
+                Ok(Some(event)) => {
                     if tx
                         .send(HarnessEvent::FromConnection {
                             connection_id: connection_id.clone(),
@@ -202,6 +202,12 @@ fn spawn_reader_thread(
                     {
                         return;
                     }
+                }
+                Ok(None) => {
+                    let _ = tx.send(HarnessEvent::Disconnected {
+                        connection_id: connection_id.clone(),
+                    });
+                    return;
                 }
                 Err(_) => {
                     let _ = tx.send(HarnessEvent::Disconnected {
@@ -260,7 +266,7 @@ impl Harness {
         let store = SessionStore::open(store_path)?;
 
         let mut extensions = Vec::new();
-        let mut agent_connection_id;
+        let agent_connection_id;
 
         // Agent
         let (conn_id, thread) = spawn_in_process(
@@ -603,16 +609,33 @@ impl Harness {
                 Ok(true)
             }
             Event::LifecycleSubscribe(subscribe) => {
-                self.bus
-                    .set_subscriptions(client_id, subscribe.selectors.clone())?;
-                let replay = wants_extension_events(&subscribe.selectors);
-                let _ = self
+                match self
                     .bus
-                    .publish_from(Some(client_id), Event::LifecycleSubscribe(subscribe));
-                if replay {
-                    self.replay_extension_statuses(client_id)?;
+                    .set_subscriptions(client_id, subscribe.selectors.clone())
+                {
+                    Ok(()) => {
+                        let replay = wants_extension_events(&subscribe.selectors);
+                        let _ = self.bus.publish_from(
+                            Some(client_id),
+                            Event::LifecycleSubscribe(subscribe),
+                        );
+                        if replay {
+                            self.replay_extension_statuses(client_id)?;
+                        }
+                        Ok(true)
+                    }
+                    Err(RouteError::SubscriptionDenied { reason, .. }) => {
+                        let _ = self.bus.send_to(
+                            client_id,
+                            None,
+                            Event::LifecycleDisconnect(LifecycleDisconnect {
+                                reason: Some(format!("subscription denied: {reason}")),
+                            }),
+                        );
+                        Ok(false)
+                    }
+                    Err(other) => Err(HarnessError::Route(other)),
                 }
-                Ok(true)
             }
             Event::MessageUser(message) => {
                 let session_id = message

@@ -20,7 +20,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     writer.flush()?;
 
     loop {
-        match reader.read_event()? {
+        let Some(event) = reader.read_event()? else {
+            return Ok(());
+        };
+        match event {
             Event::LifecycleHello(_) => {
                 writer.write_event(&Event::LifecycleReady(LifecycleReady {
                     message: Some("ready".to_owned()),

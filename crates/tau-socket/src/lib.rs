@@ -181,11 +181,12 @@ fn spawn_reader(stream: UnixStream) -> Receiver<Result<Event, DecodeError>> {
         let mut reader = EventReader::new(BufReader::new(stream));
         loop {
             match reader.read_event() {
-                Ok(event) => {
+                Ok(Some(event)) => {
                     if sender.send(Ok(event)).is_err() {
                         return;
                     }
                 }
+                Ok(None) => return,
                 Err(error) => {
                     let _ = sender.send(Err(error));
                     return;

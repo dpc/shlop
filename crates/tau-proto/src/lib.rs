@@ -509,8 +509,23 @@ where
     R: Read,
 {
     /// Reads one protocol event from the stream.
-    pub fn read_event(&mut self) -> Result<Event, DecodeError> {
-        decode_event(&mut self.inner)
+    ///
+    /// Returns `Ok(None)` on clean end-of-stream (EOF at a message
+    /// boundary). Returns `Err` only for actual corruption or
+    /// truncated data.
+    pub fn read_event(&mut self) -> Result<Option<Event>, DecodeError> {
+        // Peek at the first byte to distinguish clean EOF from
+        // truncated data. If the very first read hits EOF, the peer
+        // closed cleanly between messages.
+        let mut first = [0_u8; 1];
+        match self.inner.read_exact(&mut first) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+            Err(e) => return Err(DecodeError::Io(e)),
+        }
+        // Got a byte — a complete CBOR item must follow.
+        let chained = std::io::Cursor::new(first).chain(&mut self.inner);
+        ciborium::from_reader(chained).map(Some)
     }
 }
 
@@ -642,7 +657,12 @@ mod tests {
         let mut reader = EventReader::new(Cursor::new(bytes));
         let mut decoded = Vec::new();
         for _ in 0..events.len() {
-            decoded.push(reader.read_event().expect("event should decode"));
+            decoded.push(
+                reader
+                    .read_event()
+                    .expect("read should succeed")
+                    .expect("event should arrive"),
+            );
         }
 
         assert_eq!(decoded, events);

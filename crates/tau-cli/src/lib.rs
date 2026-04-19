@@ -158,12 +158,12 @@ fn run_chat(session_id: &str) -> Result<(), CliError> {
         let mut reader = EventReader::new(BufReader::new(read_stream));
         loop {
             match reader.read_event() {
-                Ok(event) => {
+                Ok(Some(event)) => {
                     if event_tx.send(event).is_err() {
                         return;
                     }
                 }
-                Err(_) => return,
+                Ok(None) | Err(_) => return,
             }
         }
     });

@@ -251,11 +251,12 @@ fn spawn_stdout_reader(stdout: std::process::ChildStdout) -> Receiver<Result<Eve
         let mut reader = EventReader::new(BufReader::new(stdout));
         loop {
             match reader.read_event() {
-                Ok(event) => {
+                Ok(Some(event)) => {
                     if sender.send(Ok(event)).is_err() {
                         return;
                     }
                 }
+                Ok(None) => return,
                 Err(error) => {
                     let _ = sender.send(Err(error));
                     return;

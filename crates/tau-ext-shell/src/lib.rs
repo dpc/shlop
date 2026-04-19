@@ -50,7 +50,10 @@ where
     writer.flush()?;
 
     loop {
-        match reader.read_event()? {
+        let Some(event) = reader.read_event()? else {
+            return Ok(());
+        };
+        match event {
             Event::ToolInvoke(invoke) if invoke.tool_name == SHELL_EXEC_TOOL_NAME => {
                 writer.write_event(&Event::ToolProgress(ToolProgress {
                     call_id: invoke.call_id.clone(),
@@ -221,7 +224,7 @@ mod tests {
     fn shell_tool_reports_progress_and_success() {
         let (mut reader, mut writer) = spawn_extension();
         for _ in 0..4 {
-            let _ = reader.read_event().expect("startup event should arrive");
+            let _ = reader.read_event().expect("read").expect("startup event should arrive");
         }
 
         writer
@@ -236,9 +239,9 @@ mod tests {
             .expect("invoke should send");
         writer.flush().expect("writer should flush");
 
-        let progress = reader.read_event().expect("progress should arrive");
+        let progress = reader.read_event().expect("read").expect("progress should arrive");
         assert!(matches!(progress, Event::ToolProgress(_)));
-        let result = reader.read_event().expect("result should arrive");
+        let result = reader.read_event().expect("read").expect("result should arrive");
         let Event::ToolResult(result) = result else {
             panic!("expected tool result");
         };
@@ -260,7 +263,7 @@ mod tests {
     fn shell_tool_reports_failures_with_details() {
         let (mut reader, mut writer) = spawn_extension();
         for _ in 0..4 {
-            let _ = reader.read_event().expect("startup event should arrive");
+            let _ = reader.read_event().expect("read").expect("startup event should arrive");
         }
 
         writer
@@ -275,8 +278,8 @@ mod tests {
             .expect("invoke should send");
         writer.flush().expect("writer should flush");
 
-        let _progress = reader.read_event().expect("progress should arrive");
-        let error = reader.read_event().expect("error should arrive");
+        let _progress = reader.read_event().expect("read").expect("progress should arrive");
+        let error = reader.read_event().expect("read").expect("error should arrive");
         let Event::ToolError(error) = error else {
             panic!("expected tool error");
         };

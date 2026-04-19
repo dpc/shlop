@@ -62,7 +62,10 @@ where
     writer.flush()?;
 
     loop {
-        match reader.read_event()? {
+        let Some(event) = reader.read_event()? else {
+            return Ok(());
+        };
+        match event {
             Event::ToolInvoke(invoke) if invoke.tool_name == DEMO_ECHO_TOOL_NAME => {
                 writer.write_event(&Event::ToolResult(ToolResult {
                     call_id: invoke.call_id,
@@ -177,15 +180,15 @@ mod tests {
 
         let (mut reader, mut writer) = spawn_extension();
         assert!(matches!(
-            reader.read_event().expect("hello should arrive"),
+            reader.read_event().expect("read").expect("hello should arrive"),
             Event::LifecycleHello(_)
         ));
         assert!(matches!(
-            reader.read_event().expect("subscribe should arrive"),
+            reader.read_event().expect("read").expect("subscribe should arrive"),
             Event::LifecycleSubscribe(_)
         ));
-        let first_register = reader.read_event().expect("first register should arrive");
-        let second_register = reader.read_event().expect("second register should arrive");
+        let first_register = reader.read_event().expect("read").expect("first register should arrive");
+        let second_register = reader.read_event().expect("read").expect("second register should arrive");
         let registered_names = [first_register, second_register]
             .into_iter()
             .filter_map(|event| match event {
@@ -204,7 +207,7 @@ mod tests {
                 .any(|name| name == FS_READ_TOOL_NAME)
         );
         assert!(matches!(
-            reader.read_event().expect("ready should arrive"),
+            reader.read_event().expect("read").expect("ready should arrive"),
             Event::LifecycleReady(_)
         ));
 
@@ -220,7 +223,7 @@ mod tests {
             .expect("invoke should send");
         writer.flush().expect("writer should flush");
 
-        let result = reader.read_event().expect("result should arrive");
+        let result = reader.read_event().expect("read").expect("result should arrive");
         let Event::ToolResult(result) = result else {
             panic!("expected tool result");
         };
@@ -249,6 +252,7 @@ mod tests {
             assert_eq!(
                 reader
                     .read_event()
+                    .expect("read")
                     .expect("startup event should arrive")
                     .name(),
                 expected_name
@@ -267,7 +271,7 @@ mod tests {
             .expect("invoke should send");
         writer.flush().expect("writer should flush");
 
-        let error = reader.read_event().expect("error should arrive");
+        let error = reader.read_event().expect("read").expect("error should arrive");
         let Event::ToolError(error) = error else {
             panic!("expected tool error");
         };

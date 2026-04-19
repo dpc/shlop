@@ -51,7 +51,10 @@ where
     writer.flush()?;
 
     loop {
-        match reader.read_event()? {
+        let Some(event) = reader.read_event()? else {
+            return Ok(());
+        };
+        match event {
             Event::MessageUser(message) => {
                 let call_id = format!("call-{next_call_number}");
                 next_call_number += 1;
