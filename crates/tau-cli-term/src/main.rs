@@ -2,7 +2,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crossterm::terminal;
-use tau_cli_term::{OutputSender, Prompt, PromptResult};
+use tau_cli_term::{Color, OutputSender, Prompt, PromptResult, Span, Style, StyledText};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (mut prompt, output_tx) = Prompt::new("> ")?;
@@ -18,7 +18,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if line == "quit" {
                     break;
                 }
-                prompt.print_output(&format!("you said: {line}"))?;
+                prompt.print_output(format!("you said: {line}"))?;
             }
             PromptResult::Eof => break,
         }
@@ -35,6 +35,8 @@ fn spawn_animator(tx: OutputSender) {
         let mut ball_dx: isize = 1;
         let mut ball_dy: isize = 1;
 
+        let ball_style = Style::default().fg(Color::Blue).bold();
+
         loop {
             thread::sleep(Duration::from_millis(200));
             tick += 1;
@@ -44,17 +46,25 @@ fn spawn_animator(tx: OutputSender) {
                 .map(|(w, _)| w as usize)
                 .unwrap_or(80)
                 .max(2);
-            let mut above = String::new();
+
+            let mut above = StyledText::new();
             for row in 0..3_usize {
+                let mut plain_run = String::new();
                 for col in 0..ball_width {
                     if row == ball_y && col == ball_x {
-                        above.push('o');
+                        if !plain_run.is_empty() {
+                            above.push(Span::plain(std::mem::take(&mut plain_run)));
+                        }
+                        above.push(Span::new("o", ball_style));
                     } else {
-                        above.push(' ');
+                        plain_run.push(' ');
                     }
                 }
+                if !plain_run.is_empty() {
+                    above.push(Span::plain(plain_run));
+                }
                 if row < 2 {
-                    above.push('\n');
+                    above.push(Span::plain("\n"));
                 }
             }
 
@@ -86,6 +96,20 @@ fn spawn_animator(tx: OutputSender) {
             let mins = (secs / 60) % 60;
             let s = secs % 60;
             let _ = tx.set_right_prompt(format!("{hours:02}:{mins:02}:{s:02}"));
+
+            // Below-prompt: busy indicator that fills and clears.
+            let bar_width = ball_width.saturating_sub(2); // minus the [ ] brackets
+            let cycle = (tick as usize) % (bar_width + 1);
+            let filled: String = "=".repeat(cycle);
+            let empty: String = " ".repeat(bar_width - cycle);
+            let busy_style = Style::default().fg(Color::DarkYellow);
+            let below = StyledText::from(vec![
+                Span::new("[", busy_style),
+                Span::new(filled, busy_style),
+                Span::new(empty, Style::default()),
+                Span::new("]", busy_style),
+            ]);
+            let _ = tx.set_below_prompt(below);
 
             // Log a tick message every second (every 5th iteration).
             if tick % 5 == 0 {

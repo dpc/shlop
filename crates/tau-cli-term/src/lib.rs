@@ -6,7 +6,7 @@
 //!
 //! # Prompt zones
 //!
-//! The prompt display is composed of three configurable zones:
+//! The prompt display is composed of configurable zones (top to bottom):
 //!
 //! - **Above-prompt**: Optional multi-line text displayed above the input line
 //!   (e.g. status information, context). Updated via
@@ -16,9 +16,13 @@
 //! - **Right-prompt**: Right-justified text on the first physical line of the
 //!   input area. Hidden when the user input would overlap it. Updated via
 //!   [`Prompt::set_right_prompt`].
+//! - **Below-prompt**: Optional multi-line text displayed below the input line
+//!   (e.g. completions, status). Updated via [`Prompt::set_below_prompt`].
 //!
-//! All zones are part of the diff-rendered screen area, so changes are
-//! applied with minimal terminal I/O.
+//! All zones accept [`StyledText`] (or anything that converts to it,
+//! including plain `&str` and `String`), so content can carry colors,
+//! bold, underline, etc. Display-width calculations use character
+//! counts — no ANSI escape codes are stored in the data model.
 //!
 //! # Rendering
 //!
@@ -31,6 +35,7 @@
 //! - fish shell screen rendering: <https://github.com/fish-shell/fish-shell/blob/master/src/screen.rs>
 
 pub mod screen;
+pub mod style;
 
 use std::io::{self, Stdout, Write};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -39,7 +44,8 @@ use std::thread::{self, JoinHandle};
 use crossterm::event::{self, Event as CtEvent, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::style::Print;
 use crossterm::{QueueableCommand, terminal};
-use screen::{Screen, layout_lines};
+use screen::{Screen, emit_styled_cells, layout_lines};
+pub use style::{Cell, Color, Span, Style, StyledText};
 
 /// Events flowing into the UI loop from any producer.
 pub enum UiEvent {
@@ -48,13 +54,15 @@ pub enum UiEvent {
     /// The terminal was resized.
     Resize(u16, u16),
     /// Async output that should be printed above the prompt.
-    Output(String),
-    /// Update a prompt zone and re-render.
-    SetAbovePrompt(String),
+    Output(StyledText),
+    /// Update the above-prompt zone and re-render.
+    SetAbovePrompt(StyledText),
     /// Update the left prompt and re-render.
-    SetLeftPrompt(String),
+    SetLeftPrompt(StyledText),
     /// Update the right prompt and re-render.
-    SetRightPrompt(String),
+    SetRightPrompt(StyledText),
+    /// Update the below-prompt zone and re-render.
+    SetBelowPrompt(StyledText),
     /// A request to shut down the UI loop.
     Quit,
 }
@@ -75,23 +83,40 @@ pub struct OutputSender {
 
 impl OutputSender {
     /// Sends an output line to be printed above the prompt.
-    pub fn send(&self, text: String) -> Result<(), mpsc::SendError<UiEvent>> {
-        self.tx.send(UiEvent::Output(text))
+    pub fn send(&self, text: impl Into<StyledText>) -> Result<(), mpsc::SendError<UiEvent>> {
+        self.tx.send(UiEvent::Output(text.into()))
     }
 
     /// Updates the above-prompt text and triggers a re-render.
-    pub fn set_above_prompt(&self, text: String) -> Result<(), mpsc::SendError<UiEvent>> {
-        self.tx.send(UiEvent::SetAbovePrompt(text))
+    pub fn set_above_prompt(
+        &self,
+        text: impl Into<StyledText>,
+    ) -> Result<(), mpsc::SendError<UiEvent>> {
+        self.tx.send(UiEvent::SetAbovePrompt(text.into()))
     }
 
     /// Updates the left prompt and triggers a re-render.
-    pub fn set_left_prompt(&self, text: String) -> Result<(), mpsc::SendError<UiEvent>> {
-        self.tx.send(UiEvent::SetLeftPrompt(text))
+    pub fn set_left_prompt(
+        &self,
+        text: impl Into<StyledText>,
+    ) -> Result<(), mpsc::SendError<UiEvent>> {
+        self.tx.send(UiEvent::SetLeftPrompt(text.into()))
     }
 
     /// Updates the right prompt and triggers a re-render.
-    pub fn set_right_prompt(&self, text: String) -> Result<(), mpsc::SendError<UiEvent>> {
-        self.tx.send(UiEvent::SetRightPrompt(text))
+    pub fn set_right_prompt(
+        &self,
+        text: impl Into<StyledText>,
+    ) -> Result<(), mpsc::SendError<UiEvent>> {
+        self.tx.send(UiEvent::SetRightPrompt(text.into()))
+    }
+
+    /// Updates the below-prompt zone and triggers a re-render.
+    pub fn set_below_prompt(
+        &self,
+        text: impl Into<StyledText>,
+    ) -> Result<(), mpsc::SendError<UiEvent>> {
+        self.tx.send(UiEvent::SetBelowPrompt(text.into()))
     }
 
     /// Requests the UI loop to shut down.
@@ -107,9 +132,10 @@ pub struct Prompt {
     stdout: Stdout,
     screen: Screen,
     input_handle: Option<JoinHandle<()>>,
-    above_prompt: String,
-    left_prompt: String,
-    right_prompt: String,
+    above_prompt: StyledText,
+    left_prompt: StyledText,
+    right_prompt: StyledText,
+    below_prompt: StyledText,
     buffer: String,
     cursor: usize,
 }
@@ -120,7 +146,7 @@ impl Prompt {
     ///
     /// Returns the prompt and an [`OutputSender`] that async producers can
     /// use to inject output.
-    pub fn new(left_prompt: &str) -> io::Result<(Self, OutputSender)> {
+    pub fn new(left_prompt: impl Into<StyledText>) -> io::Result<(Self, OutputSender)> {
         let (tx, rx) = mpsc::channel();
         let output_sender = OutputSender { tx: tx.clone() };
         let width = term_width();
@@ -131,9 +157,10 @@ impl Prompt {
                 stdout: io::stdout(),
                 screen: Screen::new(width),
                 input_handle: None,
-                above_prompt: String::new(),
-                left_prompt: left_prompt.to_owned(),
-                right_prompt: String::new(),
+                above_prompt: StyledText::new(),
+                left_prompt: left_prompt.into(),
+                right_prompt: StyledText::new(),
+                below_prompt: StyledText::new(),
                 buffer: String::new(),
                 cursor: 0,
             },
@@ -143,19 +170,25 @@ impl Prompt {
 
     /// Sets the text displayed above the input line. Can contain
     /// newlines for multiple lines. Set to empty to hide.
-    pub fn set_above_prompt(&mut self, text: &str) {
-        self.above_prompt = text.to_owned();
+    pub fn set_above_prompt(&mut self, text: impl Into<StyledText>) {
+        self.above_prompt = text.into();
     }
 
     /// Sets the left prompt prefix (e.g. `"> "`, `"$ "`).
-    pub fn set_left_prompt(&mut self, text: &str) {
-        self.left_prompt = text.to_owned();
+    pub fn set_left_prompt(&mut self, text: impl Into<StyledText>) {
+        self.left_prompt = text.into();
     }
 
     /// Sets the right-justified text on the first prompt line. Hidden
     /// when the user input would overlap. Set to empty to hide.
-    pub fn set_right_prompt(&mut self, text: &str) {
-        self.right_prompt = text.to_owned();
+    pub fn set_right_prompt(&mut self, text: impl Into<StyledText>) {
+        self.right_prompt = text.into();
+    }
+
+    /// Sets the text displayed below the input line. Can contain
+    /// newlines for multiple lines. Set to empty to hide.
+    pub fn set_below_prompt(&mut self, text: impl Into<StyledText>) {
+        self.below_prompt = text.into();
     }
 
     /// Enters raw mode and starts the input reader thread.
@@ -223,6 +256,10 @@ impl Prompt {
                 }
                 UiEvent::SetRightPrompt(text) => {
                     self.right_prompt = text;
+                    self.render()?;
+                }
+                UiEvent::SetBelowPrompt(text) => {
+                    self.below_prompt = text;
                     self.render()?;
                 }
                 UiEvent::Quit => {
@@ -358,7 +395,7 @@ impl Prompt {
     /// is outside the input area.
     fn move_cursor_vertical(&self, delta: isize) -> Option<usize> {
         let width = term_width();
-        let left_chars = self.left_prompt.chars().count();
+        let left_chars = self.left_prompt.char_count();
         let cursor_chars = left_chars + char_count_for_bytes(&self.buffer, self.cursor);
         let current_row = cursor_chars / width;
         let current_col = cursor_chars % width;
@@ -390,15 +427,19 @@ impl Prompt {
         Some(new_cursor)
     }
 
-    /// Prints text above the prompt, then redraws the prompt.
-    pub fn print_output(&mut self, text: &str) -> io::Result<()> {
-        self.print_above(text)
+    /// Prints styled text above the prompt, then redraws the prompt.
+    pub fn print_output(&mut self, text: impl Into<StyledText>) -> io::Result<()> {
+        let styled = text.into();
+        self.print_above(&styled)
     }
 
-    fn print_above(&mut self, text: &str) -> io::Result<()> {
+    fn print_above(&mut self, text: &StyledText) -> io::Result<()> {
         self.screen.erase_all(&mut self.stdout)?;
-        for line in text.lines() {
-            self.stdout.queue(Print(line))?.queue(Print("\r\n"))?;
+        let width = self.screen.width();
+        let lines = layout_lines(text, width);
+        for line in &lines {
+            emit_styled_cells(&mut self.stdout, line)?;
+            self.stdout.queue(Print("\r\n"))?;
         }
         self.stdout.flush()?;
         self.screen.invalidate();
@@ -416,35 +457,33 @@ impl Prompt {
         self.screen.set_width(term_width());
         let width = self.screen.width();
 
-        let mut desired: Vec<Vec<char>> = Vec::new();
+        let mut desired: Vec<Vec<Cell>> = Vec::new();
 
         // 1. Above-prompt lines.
         let above_row_count = if self.above_prompt.is_empty() {
             0
         } else {
-            for line in self.above_prompt.lines() {
-                let laid_out = layout_lines(line, width);
-                desired.extend(laid_out);
-            }
+            desired.extend(layout_lines(&self.above_prompt, width));
             desired.len()
         };
 
         // 2. Input area: left_prompt + buffer.
-        let input_content = format!("{}{}", self.left_prompt, self.buffer);
+        let mut input_content = self.left_prompt.clone();
+        input_content.push(Span::plain(&self.buffer));
         let mut input_lines = layout_lines(&input_content, width);
 
         // 3. Right-prompt on the first input line, if it fits.
         if !self.right_prompt.is_empty() && !input_lines.is_empty() {
             let first_line = &input_lines[0];
-            let right_chars: Vec<char> = self.right_prompt.chars().collect();
+            let right_cells = self.right_prompt.to_cells();
             // Need at least 1 space gap between content and right prompt.
-            let needed = first_line.len() + 1 + right_chars.len();
+            let needed = first_line.len() + 1 + right_cells.len();
             if needed <= width && input_lines.len() == 1 {
                 // Pad with spaces and append right prompt.
-                let padding = width - first_line.len() - right_chars.len();
+                let padding = width - first_line.len() - right_cells.len();
                 let mut padded = first_line.clone();
-                padded.extend(std::iter::repeat(' ').take(padding));
-                padded.extend(right_chars);
+                padded.extend(std::iter::repeat(Cell::plain(' ')).take(padding));
+                padded.extend(right_cells);
                 input_lines[0] = padded;
             }
         }
@@ -452,10 +491,15 @@ impl Prompt {
         desired.extend(input_lines);
 
         // Cursor position: offset by above-prompt rows.
-        let left_chars = self.left_prompt.chars().count();
+        let left_chars = self.left_prompt.char_count();
         let cursor_chars = left_chars + char_count_for_bytes(&self.buffer, self.cursor);
         let cursor_row = above_row_count + cursor_chars / width;
         let cursor_col = cursor_chars % width;
+
+        // 4. Below-prompt lines.
+        if !self.below_prompt.is_empty() {
+            desired.extend(layout_lines(&self.below_prompt, width));
+        }
 
         self.screen
             .update(&mut self.stdout, &desired, (cursor_row, cursor_col))

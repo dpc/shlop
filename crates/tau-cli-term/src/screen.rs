@@ -9,9 +9,8 @@
 //! <https://github.com/fish-shell/fish-shell/blob/master/src/screen.rs>
 //!
 //! Key differences from fish:
-//! - We don't track styling/attributes (yet), just character content.
-//! - We use a simpler line model (Vec<Vec<char>>) instead of fish's Line struct
-//!   with soft-wrap tracking.
+//! - We use a simpler line model (`Vec<Vec<Cell>>`) instead of fish's Line
+//!   struct with soft-wrap tracking.
 //! - We always use relative cursor movement (MoveUp, `\r`, `\n`, MoveToColumn)
 //!   — never absolute positioning.
 //!
@@ -23,13 +22,15 @@ use std::io::{self, Write};
 
 use crossterm::QueueableCommand;
 use crossterm::cursor::{MoveToColumn, MoveUp};
-use crossterm::style::Print;
+use crossterm::style::{Attribute, Print, SetAttribute, SetBackgroundColor, SetForegroundColor};
 use crossterm::terminal::{self, ClearType};
+
+use crate::style::{Cell, Style, StyledText};
 
 /// Virtual screen state with diff-based updates.
 pub struct Screen {
     /// What we believe is currently displayed on the terminal.
-    lines: Vec<Vec<char>>,
+    lines: Vec<Vec<Cell>>,
     /// Current terminal cursor row (relative to prompt start).
     cursor_row: usize,
     /// Current terminal cursor column.
@@ -66,7 +67,7 @@ impl Screen {
     pub fn update(
         &mut self,
         w: &mut impl Write,
-        desired_lines: &[Vec<char>],
+        desired_lines: &[Vec<Cell>],
         desired_cursor: (usize, usize),
     ) -> io::Result<()> {
         // Handle empty desired.
@@ -114,8 +115,7 @@ impl Screen {
 
             // Print the new content from the first difference onward.
             if common_prefix < desired_slice.len() {
-                let new_content: String = desired_slice[common_prefix..].iter().collect();
-                w.queue(Print(new_content))?;
+                emit_styled_cells(w, &desired_slice[common_prefix..])?;
                 // layout_lines guarantees each line is at most `width`
                 // chars. At exactly `width`, the terminal enters a
                 // "pending wrap" state — the cursor is still on the
@@ -205,21 +205,109 @@ impl Screen {
     }
 }
 
-/// Splits content into physical terminal lines based on width.
+/// Emits a sequence of styled cells to the writer.
 ///
-/// Always returns at least one (possibly empty) line.
-pub fn layout_lines(content: &str, width: usize) -> Vec<Vec<char>> {
-    let width = width.max(1);
-    let chars: Vec<char> = content.chars().collect();
-    if chars.is_empty() {
-        return vec![Vec::new()];
+/// Tracks style changes and only emits escape codes when the style
+/// differs from the previous cell. Resets to default style at the end
+/// if any non-default style was active.
+///
+/// The caller must ensure the terminal is in default style state before
+/// calling this function.
+pub fn emit_styled_cells(w: &mut impl Write, cells: &[Cell]) -> io::Result<()> {
+    let mut current = Style::default();
+
+    for cell in cells {
+        if cell.style != current {
+            // Reset to clean slate, then apply new style.
+            if current != Style::default() {
+                w.queue(SetAttribute(Attribute::Reset))?;
+            }
+            if cell.style != Style::default() {
+                apply_style(w, &cell.style)?;
+            }
+            current = cell.style;
+        }
+        w.queue(Print(cell.ch))?;
     }
-    chars.chunks(width).map(|chunk| chunk.to_vec()).collect()
+
+    // Restore default state.
+    if current != Style::default() {
+        w.queue(SetAttribute(Attribute::Reset))?;
+    }
+    Ok(())
+}
+
+/// Applies non-default style attributes (without resetting first).
+fn apply_style(w: &mut impl Write, style: &Style) -> io::Result<()> {
+    if let Some(fg) = style.fg {
+        w.queue(SetForegroundColor(fg))?;
+    }
+    if let Some(bg) = style.bg {
+        w.queue(SetBackgroundColor(bg))?;
+    }
+    if style.bold {
+        w.queue(SetAttribute(Attribute::Bold))?;
+    }
+    if style.underline {
+        w.queue(SetAttribute(Attribute::Underlined))?;
+    }
+    if style.italic {
+        w.queue(SetAttribute(Attribute::Italic))?;
+    }
+    Ok(())
+}
+
+/// Splits styled content into physical terminal lines based on width.
+///
+/// Handles newlines within spans (each newline starts a new logical
+/// line) and wraps at the terminal width. Always returns at least one
+/// (possibly empty) line.
+pub fn layout_lines(content: &StyledText, width: usize) -> Vec<Vec<Cell>> {
+    let width = width.max(1);
+
+    // Split into logical lines at newlines.
+    let mut logical_lines: Vec<Vec<Cell>> = vec![Vec::new()];
+    for span in content.spans() {
+        for ch in span.text.chars() {
+            if ch == '\n' {
+                logical_lines.push(Vec::new());
+            } else {
+                logical_lines
+                    .last_mut()
+                    .unwrap()
+                    .push(Cell::new(ch, span.style));
+            }
+        }
+    }
+
+    // Match str::lines() behaviour: drop a single trailing empty line.
+    if logical_lines.len() > 1 && logical_lines.last().is_some_and(|l| l.is_empty()) {
+        logical_lines.pop();
+    }
+
+    // Wrap each logical line at width.
+    let mut result: Vec<Vec<Cell>> = Vec::new();
+    for line in logical_lines {
+        if line.is_empty() {
+            result.push(Vec::new());
+        } else {
+            for chunk in line.chunks(width) {
+                result.push(chunk.to_vec());
+            }
+        }
+    }
+
+    if result.is_empty() {
+        result.push(Vec::new());
+    }
+
+    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::style::{Color, Span};
 
     /// Test harness: pairs our `Screen` with a `vt100::Parser` acting as
     /// a headless terminal emulator. We feed our escape-sequence output
@@ -237,11 +325,12 @@ mod tests {
             }
         }
 
-        /// Builds desired layout from content, feeds the diff output into
-        /// the terminal emulator.
+        /// Builds desired layout from plain content, feeds the diff output
+        /// into the terminal emulator.
         fn render(&mut self, content: &str, cursor_char_offset: usize) {
             let width = self.screen.width();
-            let desired = layout_lines(content, width);
+            let styled: StyledText = content.into();
+            let desired = layout_lines(&styled, width);
             let cursor = (cursor_char_offset / width, cursor_char_offset % width);
             let mut buf = Vec::new();
             self.screen
@@ -277,27 +366,63 @@ mod tests {
         }
     }
 
+    /// Extracts character-only strings from cell lines (for assertions).
+    fn line_chars(lines: &[Vec<Cell>]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|line| line.iter().map(|c| c.ch).collect())
+            .collect()
+    }
+
     // --- layout tests ---
 
     #[test]
     fn layout_empty_produces_one_empty_line() {
-        assert_eq!(layout_lines("", 80), vec![Vec::<char>::new()]);
+        let lines = layout_lines(&StyledText::new(), 80);
+        assert_eq!(line_chars(&lines), vec![""]);
     }
 
     #[test]
     fn layout_short_produces_one_line() {
-        assert_eq!(layout_lines("abc", 80), vec![vec!['a', 'b', 'c']]);
+        let lines = layout_lines(&StyledText::from("abc"), 80);
+        assert_eq!(line_chars(&lines), vec!["abc"]);
     }
 
     #[test]
     fn layout_wraps_at_width() {
-        let result = layout_lines("abcde", 3);
-        assert_eq!(result, vec![vec!['a', 'b', 'c'], vec!['d', 'e']]);
+        let lines = layout_lines(&StyledText::from("abcde"), 3);
+        assert_eq!(line_chars(&lines), vec!["abc", "de"]);
     }
 
     #[test]
     fn layout_exact_width_is_one_line() {
-        assert_eq!(layout_lines("abc", 3), vec![vec!['a', 'b', 'c']]);
+        let lines = layout_lines(&StyledText::from("abc"), 3);
+        assert_eq!(line_chars(&lines), vec!["abc"]);
+    }
+
+    #[test]
+    fn layout_preserves_styles() {
+        let style = Style::default().fg(Color::Red);
+        let styled = StyledText::from(vec![Span::plain("ab"), Span::new("cd", style)]);
+        let lines = layout_lines(&styled, 80);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].len(), 4);
+        assert_eq!(lines[0][0], Cell::plain('a'));
+        assert_eq!(lines[0][1], Cell::plain('b'));
+        assert_eq!(lines[0][2], Cell::new('c', style));
+        assert_eq!(lines[0][3], Cell::new('d', style));
+    }
+
+    #[test]
+    fn layout_handles_newlines() {
+        let lines = layout_lines(&StyledText::from("abc\ndef"), 80);
+        assert_eq!(line_chars(&lines), vec!["abc", "def"]);
+    }
+
+    #[test]
+    fn layout_newline_and_wrap() {
+        let lines = layout_lines(&StyledText::from("abc\ndef"), 3);
+        assert_eq!(line_chars(&lines), vec!["abc", "def"]);
     }
 
     // --- screen rendering tests (using vt100 as a headless terminal) ---
@@ -407,6 +532,51 @@ mod tests {
         assert_eq!(t.cursor(), (0, 5));
     }
 
+    // --- styled rendering tests ---
+
+    #[test]
+    fn styled_content_renders_with_color() {
+        let mut t = TestTerm::new(24, 80);
+        let style = Style::default().fg(Color::Blue);
+        let styled = StyledText::from(vec![Span::plain("hi "), Span::new("world", style)]);
+        let desired = layout_lines(&styled, 80);
+        let mut buf = Vec::new();
+        t.screen.update(&mut buf, &desired, (0, 8)).expect("ok");
+        t.term.process(&buf);
+
+        assert_eq!(t.row_text(0), "hi world");
+
+        // "hi " should be default style.
+        let cell_h = t.term.screen().cell(0, 0).unwrap();
+        assert!(!cell_h.bold());
+        assert_eq!(cell_h.fgcolor(), vt100::Color::Default);
+
+        // "world" should be blue (crossterm Blue = bright blue = Idx(12)).
+        let cell_w = t.term.screen().cell(0, 3).unwrap();
+        assert_eq!(cell_w.fgcolor(), vt100::Color::Idx(12));
+    }
+
+    #[test]
+    fn styled_diff_only_rerenders_changed_styles() {
+        let mut t = TestTerm::new(24, 80);
+        let bold = Style::default().bold();
+
+        // First render: plain text.
+        t.render("hello", 5);
+        assert_eq!(t.row_text(0), "hello");
+
+        // Second render: same text but bold.
+        let styled = StyledText::from(Span::new("hello", bold));
+        let desired = layout_lines(&styled, 80);
+        let mut buf = Vec::new();
+        t.screen.update(&mut buf, &desired, (0, 5)).expect("ok");
+        t.term.process(&buf);
+
+        assert_eq!(t.row_text(0), "hello");
+        let cell = t.term.screen().cell(0, 0).unwrap();
+        assert!(cell.bold());
+    }
+
     // --- multi-zone prompt tests ---
 
     /// Helper to build a multi-zone layout: above-prompt lines, then
@@ -417,32 +587,33 @@ mod tests {
         input: &str,
         right: &str,
         width: usize,
-    ) -> (Vec<Vec<char>>, (usize, usize)) {
-        let mut desired: Vec<Vec<char>> = Vec::new();
+    ) -> (Vec<Vec<Cell>>, (usize, usize)) {
+        let mut desired: Vec<Vec<Cell>> = Vec::new();
         let above_row_count;
 
         if above.is_empty() {
             above_row_count = 0;
         } else {
-            for line in above.lines() {
-                desired.extend(layout_lines(line, width));
-            }
+            let above_styled: StyledText = above.into();
+            desired.extend(layout_lines(&above_styled, width));
             above_row_count = desired.len();
         }
 
         let content = format!("{left}{input}");
-        let mut input_lines = layout_lines(&content, width);
+        let content_styled: StyledText = content.into();
+        let mut input_lines = layout_lines(&content_styled, width);
 
         // Right prompt on first input line if it fits and input is single-line.
         if !right.is_empty() && !input_lines.is_empty() {
             let first = &input_lines[0];
-            let right_chars: Vec<char> = right.chars().collect();
-            let needed = first.len() + 1 + right_chars.len();
+            let right_styled: StyledText = right.into();
+            let right_cells = right_styled.to_cells();
+            let needed = first.len() + 1 + right_cells.len();
             if needed <= width && input_lines.len() == 1 {
-                let padding = width - first.len() - right_chars.len();
+                let padding = width - first.len() - right_cells.len();
                 let mut padded = first.clone();
-                padded.extend(std::iter::repeat(' ').take(padding));
-                padded.extend(right_chars);
+                padded.extend(std::iter::repeat(Cell::plain(' ')).take(padding));
+                padded.extend(right_cells);
                 input_lines[0] = padded;
             }
         }
