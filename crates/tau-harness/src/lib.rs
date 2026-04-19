@@ -313,6 +313,9 @@ struct Harness {
     /// Pending agent turn: session_id + remaining tool call IDs.
     /// When all calls resolve, the harness sends a new prompt.
     pending_agent_turn: Option<PendingAgentTurn>,
+    /// True when the current turn used streaming (AgentResponseStart
+    /// was received). Suppresses duplicate MessageAgent publish.
+    turn_was_streamed: bool,
 }
 
 impl Harness {
@@ -387,6 +390,7 @@ impl Harness {
             extensions,
             next_turn_id: 0,
             pending_agent_turn: None,
+            turn_was_streamed: false,
         };
 
         let n = harness.extensions.len();
@@ -448,6 +452,7 @@ impl Harness {
             extensions,
             next_turn_id: 0,
             pending_agent_turn: None,
+            turn_was_streamed: false,
         };
 
         let n = harness.extensions.len();
@@ -661,10 +666,11 @@ impl Harness {
             Event::AgentPromptResponse(response) => {
                 self.handle_agent_prompt_response(response)?;
             }
-            Event::AgentResponseStart(_)
-            | Event::AgentResponseUpdate(_)
-            | Event::AgentResponseEnd(_) => {
-                // Forward streaming events to all subscribers (UI clients).
+            Event::AgentResponseStart(_) => {
+                self.turn_was_streamed = true;
+                let _ = self.bus.publish_from(Some(source_id), event);
+            }
+            Event::AgentResponseUpdate(_) | Event::AgentResponseEnd(_) => {
                 let _ = self.bus.publish_from(Some(source_id), event);
             }
             other => {
@@ -908,11 +914,16 @@ impl Harness {
         if let Some(ref text) = response.text {
             self.store
                 .append_agent_message(&session_id, text.clone())?;
-            let _ = self.bus.publish(Event::MessageAgent(ChatMessage {
-                session_id: Some(session_id.clone()),
-                text: text.clone(),
-            }));
+            // Only publish MessageAgent if the turn wasn't streamed —
+            // streaming events already delivered the text to the UI.
+            if !self.turn_was_streamed {
+                let _ = self.bus.publish(Event::MessageAgent(ChatMessage {
+                    session_id: Some(session_id.clone()),
+                    text: text.clone(),
+                }));
+            }
         }
+        self.turn_was_streamed = false;
 
         // Execute tool calls if any.
         if !response.tool_calls.is_empty() {

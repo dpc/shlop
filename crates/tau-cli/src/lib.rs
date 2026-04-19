@@ -247,6 +247,8 @@ struct EventRenderer {
     handle: tau_cli_term::TermHandle,
     /// Block ID for the in-progress streaming response (updated in-place).
     streaming_block: Option<tau_cli_term::BlockId>,
+    /// Suppress the next MessageAgent (streaming already delivered it).
+    suppress_next_message_agent: bool,
 }
 
 impl EventRenderer {
@@ -254,6 +256,7 @@ impl EventRenderer {
         Self {
             handle,
             streaming_block: None,
+            suppress_next_message_agent: false,
         }
     }
 
@@ -263,10 +266,10 @@ impl EventRenderer {
         match event {
             Event::MessageUser(msg) => {
                 self.handle.print_output(
-                    StyledBlock::new(StyledText::from(vec![
-                        Span::new("> ", Style::default().fg(Color::White)),
-                        Span::new(&msg.text, Style::default().fg(Color::White)),
-                    ]))
+                    StyledBlock::new(StyledText::from(Span::new(
+                        format!("> {}", msg.text),
+                        Style::default().fg(Color::White),
+                    )))
                     .bg(Color::Rgb {
                         r: 40,
                         g: 40,
@@ -275,9 +278,11 @@ impl EventRenderer {
                 );
             }
             Event::AgentResponseStart(_) => {
-                // Create a block for the streaming response.
+                // Create a block in the live area (above_active) so
+                // it gets re-rendered on every redraw. History blocks
+                // are only painted once.
                 let block = StyledBlock::new(StyledText::from(Span::new(
-                    "  ...",
+                    "...",
                     Style::default().fg(Color::DarkGrey),
                 )))
                 .bg(Color::Rgb {
@@ -285,16 +290,17 @@ impl EventRenderer {
                     g: 35,
                     b: 45,
                 });
-                let id = self.handle.print_output(block);
+                let id = self.handle.new_block(block);
+                self.handle.push_above_active(id);
+                self.handle.redraw();
                 self.streaming_block = Some(id);
             }
             Event::AgentResponseUpdate(update) => {
                 if let Some(id) = self.streaming_block {
-                    let block = StyledBlock::new(StyledText::from(vec![
-                        Span::new("  ", Style::default().fg(Color::White)),
-                        Span::new(&update.text, Style::default().fg(Color::White)),
-                        Span::new("  ", Style::default().fg(Color::White)),
-                    ]))
+                    let block = StyledBlock::new(StyledText::from(Span::new(
+                        &update.text,
+                        Style::default().fg(Color::White),
+                    )))
                     .bg(Color::Rgb {
                         r: 25,
                         g: 35,
@@ -306,31 +312,33 @@ impl EventRenderer {
             }
             Event::AgentResponseEnd(end) => {
                 if let Some(id) = self.streaming_block.take() {
-                    // Finalize the block with the complete text.
+                    // Move from live area to history for permanence.
+                    self.handle.remove_above_active(id);
                     let text = end.text.as_deref().unwrap_or("");
-                    let block = StyledBlock::new(StyledText::from(vec![
-                        Span::new("  ", Style::default().fg(Color::White)),
-                        Span::new(text, Style::default().fg(Color::White)),
-                        Span::new("  ", Style::default().fg(Color::White)),
-                    ]))
+                    let block = StyledBlock::new(StyledText::from(Span::new(
+                        text,
+                        Style::default().fg(Color::White),
+                    )))
                     .bg(Color::Rgb {
                         r: 25,
                         g: 35,
                         b: 45,
                     });
                     self.handle.set_block(id, block);
+                    self.handle.push_history(id);
                     self.handle.redraw();
+                    self.suppress_next_message_agent = true;
                 }
             }
             Event::MessageAgent(msg) => {
-                // Only render if not already handled by streaming.
-                if self.streaming_block.is_none() {
+                if self.suppress_next_message_agent {
+                    self.suppress_next_message_agent = false;
+                } else if self.streaming_block.is_none() {
                     self.handle.print_output(
-                        StyledBlock::new(StyledText::from(vec![
-                            Span::new("  ", Style::default().fg(Color::White)),
-                            Span::new(&msg.text, Style::default().fg(Color::White)),
-                            Span::new("  ", Style::default().fg(Color::White)),
-                        ]))
+                        StyledBlock::new(StyledText::from(Span::new(
+                            &msg.text,
+                            Style::default().fg(Color::White),
+                        )))
                         .bg(Color::Rgb {
                             r: 25,
                             g: 35,
