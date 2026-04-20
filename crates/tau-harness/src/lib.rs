@@ -417,30 +417,16 @@ impl Harness {
             in_process_thread: Some(thread),
         });
 
-        // Filesystem tool
+        // Filesystem and shell tools
         let (conn_id, thread) = spawn_in_process(
-            "filesystem-tool",
+            "tools",
             ClientKind::Tool,
             |r, w| tau_ext_fs::run(r, w).map_err(|e| e.to_string()),
             &mut bus,
             &tx,
         )?;
         extensions.push(ExtensionEntry {
-            name: "filesystem-tool".to_owned(),
-            connection_id: conn_id,
-            in_process_thread: Some(thread),
-        });
-
-        // Shell tool
-        let (conn_id, thread) = spawn_in_process(
-            "shell-tool",
-            ClientKind::Tool,
-            |r, w| tau_ext_shell::run(r, w).map_err(|e| e.to_string()),
-            &mut bus,
-            &tx,
-        )?;
-        extensions.push(ExtensionEntry {
-            name: "shell-tool".to_owned(),
+            name: "tools".to_owned(),
             connection_id: conn_id,
             in_process_thread: Some(thread),
         });
@@ -1603,15 +1589,9 @@ pub fn default_config() -> Config {
                 role: Some("agent".to_owned()),
             },
             ExtensionConfig {
-                name: "filesystem-tool".to_owned(),
-                command: tau_binary.clone(),
-                args: vec!["component".to_owned(), "ext-fs".to_owned()],
-                role: Some("tool".to_owned()),
-            },
-            ExtensionConfig {
-                name: "shell-tool".to_owned(),
+                name: "tools".to_owned(),
                 command: tau_binary,
-                args: vec!["component".to_owned(), "ext-shell".to_owned()],
+                args: vec!["component".to_owned(), "ext-fs".to_owned()],
                 role: Some("tool".to_owned()),
             },
         ],
@@ -2075,8 +2055,8 @@ mod tests {
         let mut h = Harness::new(&sp, &pp).expect("start");
 
         let conn_id = h
-            .extension_connection_id("shell-tool")
-            .expect("shell-tool")
+            .extension_connection_id("tools")
+            .expect("tools")
             .to_owned();
         let removed = h.registry.unregister_connection(&conn_id);
         assert!(removed.iter().any(|t| t == "shell.exec"));
@@ -2096,8 +2076,8 @@ mod tests {
         let mut h = Harness::new(&sp, &pp).expect("start");
 
         let conn_id = h
-            .extension_connection_id("shell-tool")
-            .expect("shell-tool")
+            .extension_connection_id("tools")
+            .expect("tools")
             .to_owned();
 
         // Send disconnect to the extension via the bus (through the
@@ -2139,7 +2119,7 @@ mod tests {
         assert!(
             h.lifecycle_messages
                 .iter()
-                .any(|m| m == "extension shell-tool exited")
+                .any(|m| m == "extension tools exited")
         );
 
         let outcome = h

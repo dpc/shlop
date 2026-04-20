@@ -15,7 +15,6 @@ tau-agent.workspace = true
 tau-config.workspace = true
 tau-core.workspace = true
 tau-ext-fs.workspace = true
-tau-ext-shell.workspace = true
 tau-proto.workspace = true
 tau-socket.workspace = true
 tau-supervisor.workspace = true

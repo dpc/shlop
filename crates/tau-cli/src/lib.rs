@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use tau_harness::runtime_dir;
 use tau_proto::{
-    ClientKind, Event, EventReader, EventSelector, EventWriter, LifecycleDisconnect,
+    CborValue, ClientKind, Event, EventReader, EventSelector, EventWriter, LifecycleDisconnect,
     LifecycleHello, LifecycleSubscribe, PROTOCOL_VERSION, UiPromptSubmitted,
 };
 
@@ -244,6 +244,138 @@ fn terminal_input_loop(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Tool display helpers
+// ---------------------------------------------------------------------------
+
+fn cbor_text_field(value: &CborValue, key: &str) -> Option<String> {
+    if let CborValue::Map(entries) = value {
+        for (k, v) in entries {
+            if let (CborValue::Text(k), CborValue::Text(v)) = (k, v) {
+                if k == key {
+                    return Some(v.clone());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn cbor_int_field(value: &CborValue, key: &str) -> Option<i128> {
+    if let CborValue::Map(entries) = value {
+        for (k, v) in entries {
+            if let (CborValue::Text(k), CborValue::Integer(n)) = (k, v) {
+                if k == key {
+                    return Some((*n).into());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Formats a tool call for display while it is running.
+fn format_tool_call(tool_name: &str, arguments: &CborValue) -> String {
+    match tool_name {
+        "shell.exec" => {
+            let cmd = cbor_text_field(arguments, "command").unwrap_or_default();
+            format!("$ {cmd}")
+        }
+        "fs.read" => {
+            let path = cbor_text_field(arguments, "path").unwrap_or_default();
+            format!("read {path}")
+        }
+        "fs.write" => {
+            let path = cbor_text_field(arguments, "path").unwrap_or_default();
+            format!("write {path}")
+        }
+        _ => tool_name.to_owned(),
+    }
+}
+
+/// Formats a completed tool call (result or error) for display.
+fn format_tool_completion(
+    tool_name: &str,
+    details: &CborValue,
+    error_message: Option<&str>,
+) -> String {
+    match tool_name {
+        "shell.exec" => format_shell_completion(details),
+        "fs.read" => {
+            let path = cbor_text_field(details, "path");
+            if let Some(msg) = error_message {
+                match path {
+                    Some(p) => format!("read {p}: {msg}"),
+                    None => format!("read: {msg}"),
+                }
+            } else {
+                let path = path.unwrap_or_default();
+                let content = cbor_text_field(details, "content").unwrap_or_default();
+                let line_count = content.lines().count();
+                let byte_count = content.len();
+                format!("read {path} ({line_count} lines, {byte_count} bytes)")
+            }
+        }
+        "fs.write" => {
+            let path = cbor_text_field(details, "path");
+            if let Some(msg) = error_message {
+                match path {
+                    Some(p) => format!("write {p}: {msg}"),
+                    None => format!("write: {msg}"),
+                }
+            } else {
+                let path = path.unwrap_or_default();
+                let bytes = cbor_int_field(details, "bytes_written").unwrap_or(0);
+                format!("write {path} ({bytes} bytes)")
+            }
+        }
+        _ => {
+            if let Some(msg) = error_message {
+                format!("{tool_name}: {msg}")
+            } else {
+                format!("{tool_name}: done")
+            }
+        }
+    }
+}
+
+fn format_shell_completion(details: &CborValue) -> String {
+    let cmd = cbor_text_field(details, "command").unwrap_or_default();
+    let status = cbor_int_field(details, "status");
+    let stdout = cbor_text_field(details, "stdout").unwrap_or_default();
+    let stderr = cbor_text_field(details, "stderr").unwrap_or_default();
+
+    let mut text = format!("$ {cmd}");
+    if let Some(code) = status {
+        text.push_str(&format!(" [{code}]"));
+    }
+
+    let output = if !stderr.trim().is_empty() {
+        stderr
+    } else {
+        stdout
+    };
+    let trimmed = output.trim();
+    if !trimmed.is_empty() {
+        text.push('\n');
+        let mut chars = 0;
+        let mut lines = 0;
+        for line in trimmed.lines() {
+            if lines >= 5 || chars + line.len() > 500 {
+                text.push_str("...");
+                break;
+            }
+            if lines > 0 {
+                text.push('\n');
+            }
+            text.push_str(line);
+            chars += line.len();
+            lines += 1;
+        }
+    }
+    text
+}
+
 /// Event renderer. Maps session_prompt_id → block_id for in-place
 /// updates. No flags, no suppression — just ID-based lookups.
 struct EventRenderer {
@@ -255,6 +387,9 @@ struct EventRenderer {
     /// When `SessionPromptCreated` fires for a dequeued prompt,
     /// the first entry is popped and moved back to history.
     queued_user_blocks: VecDeque<(tau_cli_term::BlockId, String)>,
+    /// Live tool-call blocks keyed by call_id. Shown in
+    /// above_active while running, moved to history on completion.
+    tool_blocks: HashMap<String, tau_cli_term::BlockId>,
 }
 
 impl EventRenderer {
@@ -264,6 +399,7 @@ impl EventRenderer {
             prompt_blocks: HashMap::new(),
             last_user_block: None,
             queued_user_blocks: VecDeque::new(),
+            tool_blocks: HashMap::new(),
         }
     }
 
@@ -359,35 +495,97 @@ impl EventRenderer {
             }
             Event::AgentResponseFinished(finished) => {
                 if let Some(bid) = self.prompt_blocks.remove(&finished.session_prompt_id) {
-                    // Remove the live block (from all zones + storage),
-                    // then print the final text to history.
                     self.handle.remove_block(bid);
 
                     let text = finished.text.as_deref().unwrap_or("");
+                    if !text.is_empty() {
+                        self.handle.print_output(
+                            StyledBlock::new(StyledText::from(Span::new(
+                                text,
+                                Style::default().fg(Color::White),
+                            )))
+                            .bg(Color::Rgb {
+                                r: 25,
+                                g: 35,
+                                b: 45,
+                            }),
+                        );
+                    }
+                }
+
+                // Show each tool call in the live area.
+                for call in &finished.tool_calls {
+                    let label = format_tool_call(&call.name, &call.arguments);
+                    let block = StyledBlock::new(StyledText::from(Span::new(
+                        &label,
+                        Style::default().fg(Color::DarkCyan),
+                    )))
+                    .bg(Color::Rgb {
+                        r: 30,
+                        g: 35,
+                        b: 40,
+                    });
+                    let id = self.handle.new_block(block);
+                    self.handle.push_above_active(id);
+                    self.tool_blocks.insert(call.id.clone(), id);
+                }
+                if !finished.tool_calls.is_empty() {
+                    self.handle.redraw();
+                }
+            }
+            Event::ToolProgress(progress) => {
+                if self.tool_blocks.contains_key(&progress.call_id) {
+                    // Already tracking this call via a live block;
+                    // skip the redundant progress line.
+                } else {
+                    let text = tau_harness::format_tool_progress(progress);
                     self.handle.print_output(
                         StyledBlock::new(StyledText::from(Span::new(
                             text,
-                            Style::default().fg(Color::White),
+                            Style::default().fg(Color::DarkYellow),
                         )))
                         .bg(Color::Rgb {
-                            r: 25,
-                            g: 35,
-                            b: 45,
+                            r: 50,
+                            g: 45,
+                            b: 20,
                         }),
                     );
                 }
             }
-            Event::ToolProgress(progress) => {
-                let text = tau_harness::format_tool_progress(progress);
+            Event::ToolResult(result) => {
+                if let Some(bid) = self.tool_blocks.remove(&result.call_id) {
+                    self.handle.remove_block(bid);
+                }
+                let label =
+                    format_tool_completion(&result.tool_name, &result.result, None);
                 self.handle.print_output(
                     StyledBlock::new(StyledText::from(Span::new(
-                        format!("  {text}  "),
-                        Style::default().fg(Color::DarkYellow),
+                        &label,
+                        Style::default().fg(Color::DarkGreen),
                     )))
                     .bg(Color::Rgb {
-                        r: 50,
-                        g: 45,
-                        b: 20,
+                        r: 25,
+                        g: 35,
+                        b: 30,
+                    }),
+                );
+            }
+            Event::ToolError(error) => {
+                if let Some(bid) = self.tool_blocks.remove(&error.call_id) {
+                    self.handle.remove_block(bid);
+                }
+                let cbor = error.details.as_ref();
+                let label =
+                    format_tool_completion(&error.tool_name, cbor.unwrap_or(&CborValue::Null), Some(&error.message));
+                self.handle.print_output(
+                    StyledBlock::new(StyledText::from(Span::new(
+                        &label,
+                        Style::default().fg(Color::DarkRed),
+                    )))
+                    .bg(Color::Rgb {
+                        r: 45,
+                        g: 25,
+                        b: 25,
                     }),
                 );
             }
@@ -398,7 +596,7 @@ impl EventRenderer {
                 let text = tau_harness::format_extension_event(event);
                 self.handle.print_output(
                     StyledBlock::new(StyledText::from(Span::new(
-                        format!("  {text}  "),
+                        text,
                         Style::default().fg(Color::DarkGrey),
                     )))
                     .bg(Color::Rgb {
@@ -412,7 +610,7 @@ impl EventRenderer {
                 let reason = disconnect.reason.as_deref().unwrap_or("disconnected");
                 self.handle.print_output(
                     StyledBlock::new(StyledText::from(Span::new(
-                        format!("  {reason}  "),
+                        reason,
                         Style::default().fg(Color::White),
                     )))
                     .bg(Color::DarkRed),
@@ -491,11 +689,10 @@ pub fn main_with_args() -> std::process::ExitCode {
                 let runner: fn() -> Result<(), Box<dyn std::error::Error>> = match name.as_str() {
                     "agent" => tau_agent::run_stdio,
                     "ext-fs" => tau_ext_fs::run_stdio,
-                    "ext-shell" => tau_ext_shell::run_stdio,
                     "harness" => tau_harness::run_component,
                     _ => {
                         return Err(CliError::Participant(format!(
-                            "unknown component: {name}\navailable: agent, ext-fs, ext-shell, harness"
+                            "unknown component: {name}\navailable: agent, ext-fs, harness"
                         )));
                     }
                 };
