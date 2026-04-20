@@ -407,6 +407,9 @@ struct EventRenderer {
     /// Live tool-call blocks keyed by call_id. Shown in
     /// above_active while running, moved to history on completion.
     tool_blocks: HashMap<String, tau_cli_term::BlockId>,
+    /// Live extension blocks keyed by extension_name. Shown in
+    /// above_active while starting, moved to history when ready.
+    extension_blocks: HashMap<String, tau_cli_term::BlockId>,
 }
 
 impl EventRenderer {
@@ -417,6 +420,7 @@ impl EventRenderer {
             last_user_block: None,
             queued_user_blocks: VecDeque::new(),
             tool_blocks: HashMap::new(),
+            extension_blocks: HashMap::new(),
         }
     }
 
@@ -607,6 +611,37 @@ impl EventRenderer {
                         b: 25,
                     }),
                 );
+            }
+            Event::ExtensionStarting(starting) => {
+                let block = StyledBlock::new(StyledText::from(Span::new(
+                    format!("extension {} starting", starting.extension_name),
+                    Style::default().fg(Color::DarkGrey),
+                )));
+                let id = self.handle.new_block(block);
+                self.handle.push_above_active(id);
+                self.handle.redraw();
+                self.extension_blocks
+                    .insert(starting.extension_name.clone(), id);
+            }
+            Event::ExtensionReady(ready) => {
+                if let Some(bid) = self.extension_blocks.remove(&ready.extension_name) {
+                    self.handle.remove_block(bid);
+                }
+                self.handle
+                    .print_output(StyledBlock::new(StyledText::from(Span::new(
+                        format!("extension {} ready", ready.extension_name),
+                        Style::default().fg(Color::DarkGrey),
+                    ))));
+            }
+            Event::ExtensionExited(exited) => {
+                if let Some(bid) = self.extension_blocks.remove(&exited.extension_name) {
+                    self.handle.remove_block(bid);
+                }
+                self.handle
+                    .print_output(StyledBlock::new(StyledText::from(Span::new(
+                        format!("extension {} exited", exited.extension_name),
+                        Style::default().fg(Color::DarkGrey),
+                    ))));
             }
             Event::HarnessInfo(info) => {
                 self.handle

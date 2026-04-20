@@ -909,24 +909,43 @@ impl Harness {
     // -----------------------------------------------------------------------
 
     fn emit_extension_starting(&mut self, extension_name: &str) {
-        let msg = format!("extension {extension_name} starting");
-        self.lifecycle_messages.push(msg.clone());
-        self.emit_info(&msg);
+        self.lifecycle_messages
+            .push(format!("extension {extension_name} starting"));
+        self.publish_event(
+            Some("harness"),
+            Event::ExtensionStarting(tau_proto::ExtensionStarting {
+                extension_name: extension_name.to_owned(),
+                argv: Vec::new(),
+            }),
+        );
     }
 
     fn emit_extension_ready(&mut self, connection_id: &str) {
         let Some(connection) = self.bus.connection(connection_id).cloned() else {
             return;
         };
-        let msg = format!("extension {} ready", connection.name);
-        self.lifecycle_messages.push(msg.clone());
-        self.emit_info(&msg);
+        self.lifecycle_messages
+            .push(format!("extension {} ready", connection.name));
+        self.publish_event(
+            Some("harness"),
+            Event::ExtensionReady(tau_proto::ExtensionReady {
+                extension_name: connection.name.clone(),
+                connection_id: Some(connection.id),
+            }),
+        );
     }
 
     fn emit_extension_exited(&mut self, extension_name: &str) {
-        let msg = format!("extension {extension_name} exited");
-        self.lifecycle_messages.push(msg.clone());
-        self.emit_info(&msg);
+        self.lifecycle_messages
+            .push(format!("extension {extension_name} exited"));
+        self.publish_event(
+            Some("harness"),
+            Event::ExtensionExited(tau_proto::ExtensionExited {
+                extension_name: extension_name.to_owned(),
+                exit_code: None,
+                signal: None,
+            }),
+        );
     }
 
     fn check_config_exists(&mut self) {
@@ -946,14 +965,20 @@ impl Harness {
         );
     }
 
-    /// Replays HarnessInfo events from the log to a late-joining client.
+    /// Replays harness info and extension lifecycle events from the log
+    /// to a late-joining client.
     fn replay_harness_info(&mut self, client_id: &str, selectors: &[EventSelector]) {
         let mut cursor = 0;
         while let Some(entry) = self.event_log.get_next_from(cursor) {
             cursor = entry.seq + 1;
-            if matches!(entry.event, Event::HarnessInfo(_))
-                && selector_matches_event(selectors, &entry.event)
-            {
+            let dominated = matches!(
+                entry.event,
+                Event::HarnessInfo(_)
+                    | Event::ExtensionStarting(_)
+                    | Event::ExtensionReady(_)
+                    | Event::ExtensionExited(_)
+            );
+            if dominated && selector_matches_event(selectors, &entry.event) {
                 let _ = self
                     .bus
                     .send_to(client_id, entry.source.as_deref(), entry.event);
