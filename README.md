@@ -7,6 +7,17 @@
 
 # Tau coding agent
 
+## Radicle note
+
+This project uses [Radicle][radicle] as a primary distributed code collaboration
+platform. The GitHub repository is only a read-only mirror.
+
+Head to [the project's Radicle site][project-radicle] for an up-to-date version
+and more information.
+
+[radicle]: https://radicle.xyz
+[project-radicle]: https://app.radicle.xyz/nodes/radicle.dpc.pw/rad:z3ToHcxKefTYxZEoCoDXmddUkK3a4
+
 > Tau is like [Pi][pi], but twice as much.
 
 [Pi agent][pi] is truly a breath of fresh air in the AI coding space,
@@ -41,9 +52,10 @@ This architecture has important benefits:
 [pi]: https://shittycodingagent.ai/
 
 
-## Contact
+## Contributing & Contact
 
-* [I don't want your PRs anymore](https://dpc.pw/posts/i-dont-want-your-prs-anymore/)
+* [GitHub Discussions](https://github.com/dpc/tau/discussions) — questions, ideas, general conversation
+* [I don't want your PRs anymore](https://dpc.pw/posts/i-dont-want-your-prs-anymore/) — we don't accept Pull Requests
 * [`#support:dpc.pw` Matrix channel](https://matrix.to/#/#support:dpc.pw)
 * [Rostra p2p social network profile](https://rostra.me/profile/rse1okfyp4yj75i6riwbz86mpmbgna3f7qr66aj1njceqoigjabegy)
 
