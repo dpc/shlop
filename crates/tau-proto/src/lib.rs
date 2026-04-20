@@ -183,6 +183,7 @@ mod tests {
                 tool: ToolSpec {
                     name: "demo.echo".to_owned(),
                     description: Some("Echo a payload".to_owned()),
+                    parameters: None,
                 },
             }),
             Event::ToolRequest(ToolRequest {
@@ -232,6 +233,7 @@ mod tests {
                 tools: vec![ToolDefinition {
                     name: "fs.read".to_owned(),
                     description: Some("Read a file".to_owned()),
+                    parameters: None,
                 }],
             }),
             Event::AgentResponseFinished(AgentResponseFinished {

@@ -233,6 +233,8 @@ struct ApiToolFunction {
     name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parameters: Option<serde_json::Value>,
 }
 
 fn build_request(
@@ -360,6 +362,7 @@ fn convert_tool_definition(tool: &ToolDefinition) -> ApiTool {
         function: ApiToolFunction {
             name: tool.name.clone(),
             description: tool.description.clone(),
+            parameters: tool.parameters.clone(),
         },
     }
 }

@@ -32,6 +32,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     tool: ToolSpec {
                         name: "demo.echo".to_owned(),
                         description: Some("Echo test payloads".to_owned()),
+                        parameters: None,
                     },
                 }))?;
                 writer.flush()?;

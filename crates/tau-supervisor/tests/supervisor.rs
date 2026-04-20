@@ -79,6 +79,7 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
             tool: tau_proto::ToolSpec {
                 name: "demo.echo".to_owned(),
                 description: Some("Echo test payloads".to_owned()),
+                parameters: None,
             },
         })
     );

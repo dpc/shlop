@@ -47,6 +47,7 @@ where
                  Use this for running builds, tests, git commands, and other shell operations."
                     .to_owned(),
             ),
+            parameters: None,
         },
     }))?;
     writer.write_event(&Event::LifecycleReady(LifecycleReady {

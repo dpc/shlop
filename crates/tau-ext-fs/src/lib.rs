@@ -49,6 +49,7 @@ where
         ToolSpec {
             name: DEMO_ECHO_TOOL_NAME.to_owned(),
             description: Some("Echo the provided payload unchanged".to_owned()),
+            parameters: None,
         },
         ToolSpec {
             name: FS_READ_TOOL_NAME.to_owned(),
@@ -57,14 +58,38 @@ where
                  Use this instead of shell commands like cat or head."
                     .to_owned(),
             ),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Absolute or relative path to the file to read"
+                    }
+                },
+                "required": ["path"]
+            })),
         },
         ToolSpec {
             name: FS_WRITE_TOOL_NAME.to_owned(),
             description: Some(
                 "Write content to a file, creating it if it does not exist. \
-                 Takes a path and content string. Returns the path and bytes written."
+                 Returns the path and bytes written."
                     .to_owned(),
             ),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Absolute or relative path to the file to write"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "The text content to write to the file"
+                    }
+                },
+                "required": ["path", "content"]
+            })),
         },
         ToolSpec {
             name: SHELL_EXEC_TOOL_NAME.to_owned(),
@@ -74,6 +99,16 @@ where
                  Use this for running builds, tests, git commands, and other shell operations."
                     .to_owned(),
             ),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The shell command to execute"
+                    }
+                },
+                "required": ["command"]
+            })),
         },
     ] {
         writer.write_event(&Event::ToolRegister(ToolRegister { tool }))?;
@@ -489,7 +524,10 @@ mod tests {
             panic!("expected tool result");
         };
         assert_eq!(result.tool_name, FS_WRITE_TOOL_NAME);
-        assert_eq!(fs::read_to_string(&file_path).expect("read back"), "written content");
+        assert_eq!(
+            fs::read_to_string(&file_path).expect("read back"),
+            "written content"
+        );
 
         writer
             .write_event(&Event::LifecycleDisconnect(
@@ -527,7 +565,10 @@ mod tests {
 
         let result = reader.read_event().expect("read").expect("result");
         assert!(matches!(result, Event::ToolResult(_)));
-        assert_eq!(fs::read_to_string(&file_path).expect("read back"), "deep content");
+        assert_eq!(
+            fs::read_to_string(&file_path).expect("read back"),
+            "deep content"
+        );
 
         writer
             .write_event(&Event::LifecycleDisconnect(

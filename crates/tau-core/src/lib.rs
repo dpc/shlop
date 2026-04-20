@@ -631,7 +631,7 @@ impl EventBus {
 }
 
 /// One live provider registered for a tool name.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ToolProvider {
     pub connection_id: ConnectionId,
     pub tool: ToolSpec,
@@ -685,7 +685,7 @@ pub struct ToolRouteReport {
 }
 
 /// Live tool registration state keyed by connection and tool name.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ToolRegistry {
     providers_by_tool: HashMap<ToolName, Vec<ToolProvider>>,
     tools_by_connection: HashMap<ConnectionId, Vec<ToolName>>,
@@ -1546,6 +1546,7 @@ mod tests {
             ToolSpec {
                 name: "demo.echo".to_owned(),
                 description: Some("Echo a payload".to_owned()),
+                parameters: None,
             },
         );
         assert!(register_report.warnings.is_empty());
@@ -1591,6 +1592,7 @@ mod tests {
             ToolSpec {
                 name: "demo.echo".to_owned(),
                 description: Some("Echo".to_owned()),
+                parameters: None,
             },
         );
         assert!(first_report.warnings.is_empty());
@@ -1600,6 +1602,7 @@ mod tests {
             ToolSpec {
                 name: "demo.echo".to_owned(),
                 description: Some("Echo from another provider".to_owned()),
+                parameters: None,
             },
         );
         assert_eq!(second_report.warnings.len(), 1);
@@ -1632,6 +1635,7 @@ mod tests {
             ToolSpec {
                 name: "demo.echo".to_owned(),
                 description: None,
+                parameters: None,
             },
         );
         registry.register(
@@ -1639,6 +1643,7 @@ mod tests {
             ToolSpec {
                 name: "demo.echo".to_owned(),
                 description: None,
+                parameters: None,
             },
         );
         registry.register(
@@ -1646,6 +1651,7 @@ mod tests {
             ToolSpec {
                 name: "demo.upper".to_owned(),
                 description: None,
+                parameters: None,
             },
         );
 
@@ -1680,6 +1686,7 @@ mod tests {
                 tool: ToolSpec {
                     name: "demo.echo".to_owned(),
                     description: Some("Echo".to_owned()),
+                    parameters: None,
                 },
             }
             .tool,
@@ -1985,6 +1992,7 @@ mod tests {
             tools: vec![ToolDefinition {
                 name: "demo.echo".to_owned(),
                 description: None,
+                parameters: None,
             }],
         };
         let _ = bus.send_to(&agent_id, None, Event::SessionPromptCreated(prompt));
@@ -2059,6 +2067,7 @@ mod tests {
             tools: vec![ToolDefinition {
                 name: "demo.echo".to_owned(),
                 description: None,
+                parameters: None,
             }],
         };
         let _ = bus.send_to(&agent_id, None, Event::SessionPromptCreated(prompt2));

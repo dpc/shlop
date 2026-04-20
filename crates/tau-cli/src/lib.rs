@@ -556,8 +556,7 @@ impl EventRenderer {
                 if let Some(bid) = self.tool_blocks.remove(&result.call_id) {
                     self.handle.remove_block(bid);
                 }
-                let label =
-                    format_tool_completion(&result.tool_name, &result.result, None);
+                let label = format_tool_completion(&result.tool_name, &result.result, None);
                 self.handle.print_output(
                     StyledBlock::new(StyledText::from(Span::new(
                         &label,
@@ -575,8 +574,11 @@ impl EventRenderer {
                     self.handle.remove_block(bid);
                 }
                 let cbor = error.details.as_ref();
-                let label =
-                    format_tool_completion(&error.tool_name, cbor.unwrap_or(&CborValue::Null), Some(&error.message));
+                let label = format_tool_completion(
+                    &error.tool_name,
+                    cbor.unwrap_or(&CborValue::Null),
+                    Some(&error.message),
+                );
                 self.handle.print_output(
                     StyledBlock::new(StyledText::from(Span::new(
                         &label,

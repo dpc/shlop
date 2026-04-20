@@ -988,6 +988,7 @@ impl Harness {
             .map(|spec| ToolDefinition {
                 name: spec.name.clone(),
                 description: spec.description.clone(),
+                parameters: spec.parameters.clone(),
             })
             .collect()
     }
@@ -2177,12 +2178,7 @@ mod tests {
         assert!(
             o.lifecycle_messages
                 .iter()
-                .any(|m| m == "extension filesystem-tool ready")
-        );
-        assert!(
-            o.lifecycle_messages
-                .iter()
-                .any(|m| m == "extension shell-tool ready")
+                .any(|m| m == "extension tools ready")
         );
         assert_eq!(
             o.progress_messages,

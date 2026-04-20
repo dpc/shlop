@@ -1025,6 +1025,7 @@ dependencies = [
 name = "tau-ext-fs"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "tau-proto",
  "tempfile",
 ]
@@ -1058,6 +1059,7 @@ version = "0.1.0"
 dependencies = [
  "ciborium",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
