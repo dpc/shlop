@@ -1136,11 +1136,7 @@ impl SessionStore {
     }
 
     /// Moves the head pointer to an existing node (branch switch).
-    pub fn set_head(
-        &mut self,
-        session_id: &str,
-        node_id: NodeId,
-    ) -> Result<(), SessionStoreError> {
+    pub fn set_head(&mut self, session_id: &str, node_id: NodeId) -> Result<(), SessionStoreError> {
         let tree = self
             .sessions
             .get_mut(session_id)
@@ -1186,10 +1182,7 @@ impl SessionStore {
         session_id: impl Into<String>,
         activity: ToolActivityRecord,
     ) -> Result<NodeId, SessionStoreError> {
-        self.append(
-            &session_id.into(),
-            SessionEntry::ToolActivity(activity),
-        )
+        self.append(&session_id.into(), SessionEntry::ToolActivity(activity))
     }
 
     /// Returns one session tree if it exists.
@@ -1357,8 +1350,8 @@ mod tests {
     use std::thread;
 
     use tau_proto::{
-        AgentResponseFinished, CborValue, EventName, EventReader, EventWriter,
-        LifecycleSubscribe, SessionPromptCreated, ToolRegister, UiPromptSubmitted,
+        AgentResponseFinished, CborValue, EventName, EventReader, EventWriter, LifecycleSubscribe,
+        SessionPromptCreated, ToolRegister, UiPromptSubmitted,
     };
     use tempfile::TempDir;
 
@@ -1515,11 +1508,8 @@ mod tests {
         let agent_id = bus.connect(agent_connection);
         let tool_id = bus.connect(tool_connection);
 
-        bus.set_subscriptions(
-            &agent_id,
-            vec![EventSelector::Prefix("agent.".to_owned())],
-        )
-        .expect("agent subscriptions should be stored");
+        bus.set_subscriptions(&agent_id, vec![EventSelector::Prefix("agent.".to_owned())])
+            .expect("agent subscriptions should be stored");
         bus.set_subscriptions(&tool_id, vec![EventSelector::Prefix("tool.".to_owned())])
             .expect("tool subscriptions should be stored");
 
@@ -1750,7 +1740,9 @@ mod tests {
         let _ = store.append_user_message("s1", "hello").expect("ok");
         let _ = store.append_agent_message("s1", "hi").expect("ok");
         // Branch: go back to node 0 and append a different message.
-        store.set_head("s1", NodeId(0)).expect("set_head should work");
+        store
+            .set_head("s1", NodeId(0))
+            .expect("set_head should work");
         let _ = store.append_user_message("s1", "goodbye").expect("ok");
 
         let tree = store.session("s1").expect("session should exist");
@@ -1844,8 +1836,7 @@ mod tests {
             error,
             RouteError::SubscriptionDenied {
                 connection_id,
-                reason: "socket clients may only subscribe to allowed event families"
-                    .to_owned(),
+                reason: "socket clients may only subscribe to allowed event families".to_owned(),
             }
         );
     }
@@ -1948,7 +1939,10 @@ mod tests {
             .expect("agent ready should arrive");
         assert!(matches!(agent_ready, Event::LifecycleReady(_)));
 
-        let tool_hello = tool_reader.read_event().expect("read").expect("tool hello should arrive");
+        let tool_hello = tool_reader
+            .read_event()
+            .expect("read")
+            .expect("tool hello should arrive");
         assert!(matches!(tool_hello, Event::LifecycleHello(_)));
         let _ = bus.publish_from(Some(&tool_id), tool_hello);
         let tool_subscribe = tool_reader

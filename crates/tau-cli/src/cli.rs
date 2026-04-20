@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-
 use tau_harness::{default_policy_store_path, default_session_id, default_session_store_path};
 
 #[derive(Parser)]

@@ -30,10 +30,9 @@ use tau_core::{
 use tau_proto::{
     AgentResponseFinished, AgentToolCall, ClientKind, ContentBlock, ConversationMessage,
     ConversationRole, DecodeError, Event, EventReader, EventSelector, EventWriter,
-    SessionPromptQueued,
     LifecycleDisconnect, LifecycleHello, LifecycleSubscribe, PROTOCOL_VERSION, ProgressUpdate,
-    SessionPromptCreated, ToolDefinition, ToolError, ToolProgress, ToolRegister, ToolRequest,
-    ToolResult, UiPromptSubmitted,
+    SessionPromptCreated, SessionPromptQueued, ToolDefinition, ToolError, ToolProgress,
+    ToolRegister, ToolRequest, ToolResult, UiPromptSubmitted,
 };
 use tau_socket::{SocketPeer, SocketTransportError};
 
@@ -507,8 +506,7 @@ impl Harness {
             });
         }
 
-        let agent_connection_id =
-            agent_connection_id.ok_or(HarnessError::NoAgentConfigured)?;
+        let agent_connection_id = agent_connection_id.ok_or(HarnessError::NoAgentConfigured)?;
 
         let mut harness = Self {
             tx,
@@ -639,9 +637,7 @@ impl Harness {
                         served_clients += 1;
                     }
                     if is_agent {
-                        return Err(HarnessError::Participant(
-                            "agent disconnected".to_owned(),
-                        ));
+                        return Err(HarnessError::Participant("agent disconnected".to_owned()));
                     }
                 }
                 HarnessEvent::NewClient(stream) => {
@@ -744,14 +740,15 @@ impl Harness {
                     .bus
                     .publish_from(Some(source_id), Event::ToolProgress(progress));
             }
-            Event::AgentPromptSubmitted(_)
-            | Event::AgentResponseUpdated(_) => {
+            Event::AgentPromptSubmitted(_) | Event::AgentResponseUpdated(_) => {
                 // Forward agent events to all subscribers (UI).
                 let _ = self.bus.publish_from(Some(source_id), event);
             }
             Event::AgentResponseFinished(response) => {
                 // Forward to subscribers first, then handle internally.
-                let _ = self.bus.publish(Event::AgentResponseFinished(response.clone()));
+                let _ = self
+                    .bus
+                    .publish(Event::AgentResponseFinished(response.clone()));
                 self.handle_agent_response_finished(response)?;
             }
             other => {
@@ -761,11 +758,7 @@ impl Harness {
         Ok(())
     }
 
-    fn handle_client_event(
-        &mut self,
-        client_id: &str,
-        event: Event,
-    ) -> Result<bool, HarnessError> {
+    fn handle_client_event(&mut self, client_id: &str, event: Event) -> Result<bool, HarnessError> {
         match event {
             Event::LifecycleHello(hello) => {
                 let _ = self
@@ -780,10 +773,9 @@ impl Harness {
                 {
                     Ok(()) => {
                         let replay = wants_extension_events(&subscribe.selectors);
-                        let _ = self.bus.publish_from(
-                            Some(client_id),
-                            Event::LifecycleSubscribe(subscribe),
-                        );
+                        let _ = self
+                            .bus
+                            .publish_from(Some(client_id), Event::LifecycleSubscribe(subscribe));
                         if replay {
                             self.replay_extension_statuses(client_id)?;
                         }
@@ -820,14 +812,13 @@ impl Harness {
                     // message is injected mid-turn (after the current
                     // tool calls finish but before the next LLM call)
                     // rather than waiting for the full turn to end.
-                    self.pending_prompts
-                        .push_back(prompt.session_id.clone());
-                    let _ = self.bus.publish(Event::SessionPromptQueued(
-                        SessionPromptQueued {
+                    self.pending_prompts.push_back(prompt.session_id.clone());
+                    let _ = self
+                        .bus
+                        .publish(Event::SessionPromptQueued(SessionPromptQueued {
                             session_id: prompt.session_id.clone(),
                             text: prompt.text.clone(),
-                        },
-                    ));
+                        }));
                 } else {
                     self.agent_busy = true;
                     self.send_prompt_to_agent(&prompt.session_id);
@@ -846,8 +837,7 @@ impl Harness {
         let Some(meta) = self.bus.disconnect(connection_id) else {
             return;
         };
-        if meta.origin == ConnectionOrigin::Supervised
-            || meta.origin == ConnectionOrigin::InMemory
+        if meta.origin == ConnectionOrigin::Supervised || meta.origin == ConnectionOrigin::InMemory
         {
             let _ = self.registry.unregister_connection(connection_id);
             self.emit_extension_exited(&meta.name);
@@ -981,13 +971,22 @@ impl Harness {
             .insert(session_prompt_id.clone(), session_id.to_owned());
 
         // Publish SessionPromptCreated — both the agent and UI see it.
-        let _ = self.bus.publish(Event::SessionPromptCreated(SessionPromptCreated {
+        let event = Event::SessionPromptCreated(SessionPromptCreated {
             session_prompt_id: session_prompt_id.clone(),
             session_id: session_id.to_owned(),
             system_prompt: build_system_prompt(&tools),
             messages,
             tools,
-        }));
+        });
+        // Log this event since it's published via the bus, not the
+        // harness channel (so log_event in the event loop misses it).
+        if let Some(log) = &mut self.event_log {
+            log.log_harness_event(&HarnessEvent::FromConnection {
+                connection_id: "harness".to_owned(),
+                event: event.clone(),
+            });
+        }
+        let _ = self.bus.publish(event);
 
         session_prompt_id
     }
@@ -1014,8 +1013,7 @@ impl Harness {
 
         // Persist agent text if present.
         if let Some(ref text) = response.text {
-            self.store
-                .append_agent_message(&session_id, text.clone())?;
+            self.store.append_agent_message(&session_id, text.clone())?;
         }
 
         if !response.tool_calls.is_empty() {
@@ -1027,8 +1025,7 @@ impl Harness {
             // steering messages into the next prompt alongside the
             // tool results, allowing the user to redirect the agent
             // mid-turn.
-            let call_ids: Vec<String> =
-                response.tool_calls.iter().map(|c| c.id.clone()).collect();
+            let call_ids: Vec<String> = response.tool_calls.iter().map(|c| c.id.clone()).collect();
             self.pending_agent_turn = Some(PendingAgentTurn {
                 session_id: session_id.clone(),
                 remaining_calls: call_ids,
@@ -1180,9 +1177,7 @@ impl Harness {
                     let is_agent = connection_id == self.agent_connection_id;
                     self.handle_disconnect(&connection_id);
                     if is_agent {
-                        return Err(HarnessError::Participant(
-                            "agent disconnected".to_owned(),
-                        ));
+                        return Err(HarnessError::Participant("agent disconnected".to_owned()));
                     }
                 }
                 HarnessEvent::NewClient(_) => {}
@@ -1312,10 +1307,7 @@ fn build_system_prompt(tools: &[ToolDefinition]) -> String {
     if !tools.is_empty() {
         prompt.push_str("Available tools:\n");
         for tool in tools {
-            let desc = tool
-                .description
-                .as_deref()
-                .unwrap_or("(no description)");
+            let desc = tool.description.as_deref().unwrap_or("(no description)");
             prompt.push_str(&format!("- {}: {desc}\n", tool.name));
         }
         prompt.push('\n');
@@ -1400,17 +1392,13 @@ fn assemble_conversation(tree: &tau_core::SessionTree) -> Vec<ConversationMessag
             SessionEntry::UserMessage { text } => {
                 messages.push(ConversationMessage {
                     role: ConversationRole::User,
-                    content: vec![ContentBlock::Text {
-                        text: text.clone(),
-                    }],
+                    content: vec![ContentBlock::Text { text: text.clone() }],
                 });
             }
             SessionEntry::AgentMessage { text } => {
                 messages.push(ConversationMessage {
                     role: ConversationRole::Assistant,
-                    content: vec![ContentBlock::Text {
-                        text: text.clone(),
-                    }],
+                    content: vec![ContentBlock::Text { text: text.clone() }],
                 });
             }
             SessionEntry::ToolActivity(activity) => match &activity.outcome {
@@ -1573,10 +1561,14 @@ fn format_session_entry(entry: &SessionEntry) -> String {
 }
 
 fn latest_agent_preview(session: &tau_core::SessionTree) -> Option<String> {
-    session.current_branch().into_iter().rev().find_map(|e| match e {
-        SessionEntry::AgentMessage { text } => Some(text.clone()),
-        _ => None,
-    })
+    session
+        .current_branch()
+        .into_iter()
+        .rev()
+        .find_map(|e| match e {
+            SessionEntry::AgentMessage { text } => Some(text.clone()),
+            _ => None,
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -1947,7 +1939,10 @@ pub fn policy_lines(path: impl AsRef<Path>) -> Result<Vec<String>, HarnessError>
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("{} [{:?}] -> {sels}", a.connection_name, a.connection_origin)
+            format!(
+                "{} [{:?}] -> {sels}",
+                a.connection_name, a.connection_origin
+            )
         })
         .collect())
 }
@@ -1956,9 +1951,7 @@ pub fn policy_lines(path: impl AsRef<Path>) -> Result<Vec<String>, HarnessError>
 // Config resolution
 // ---------------------------------------------------------------------------
 
-fn resolve_config(
-    explicit_path: Option<&Path>,
-) -> Result<Config, Box<dyn std::error::Error>> {
+fn resolve_config(explicit_path: Option<&Path>) -> Result<Config, Box<dyn std::error::Error>> {
     use tau_config::LoadOptions;
 
     let options = match explicit_path {
@@ -2001,7 +1994,11 @@ mod tests {
         assert!(!r.is_empty(), "response should not be empty: {r:?}");
         let store = open_session_store(&sp).expect("reopen");
         let branch = store.session("s1").expect("session").current_branch();
-        assert!(branch.len() >= 2, "should have user msg + agent response, got {}", branch.len());
+        assert!(
+            branch.len() >= 2,
+            "should have user msg + agent response, got {}",
+            branch.len()
+        );
     }
 
     #[test]
@@ -2038,7 +2035,10 @@ mod tests {
 
         server.join().expect("join").expect("daemon clean exit");
         let store = open_session_store(&sp).expect("reopen");
-        assert_eq!(store.session("s1").expect("session").current_branch().len(), 8);
+        assert_eq!(
+            store.session("s1").expect("session").current_branch().len(),
+            8
+        );
     }
 
     #[test]
@@ -2107,10 +2107,9 @@ mod tests {
         // Drive event loop until the disconnect arrives.
         let started = Instant::now();
         loop {
-            let event = h
-                .rx
-                .recv_timeout(Duration::from_secs(2))
-                .expect("should get disconnect");
+            let event =
+                h.rx.recv_timeout(Duration::from_secs(2))
+                    .expect("should get disconnect");
             match event {
                 HarnessEvent::Disconnected {
                     ref connection_id, ..
@@ -2131,10 +2130,11 @@ mod tests {
 
         assert!(h.bus.connection(&conn_id).is_none());
         assert!(h.registry.providers_for("shell.exec").is_empty());
-        assert!(h
-            .lifecycle_messages
-            .iter()
-            .any(|m| m == "extension shell-tool exited"));
+        assert!(
+            h.lifecycle_messages
+                .iter()
+                .any(|m| m == "extension shell-tool exited")
+        );
 
         let outcome = h
             .send_user_message("s1", "shell printf hi", None)
@@ -2148,7 +2148,10 @@ mod tests {
         let td = TempDir::new().expect("tempdir");
         let sp = td.path().join("sessions.cbor");
         let o = run_embedded_message_with_trace(&sp, "s1", "shell printf hi").expect("ok");
-        assert_eq!(o.progress_messages, vec!["shell.exec: running shell command"]);
+        assert_eq!(
+            o.progress_messages,
+            vec!["shell.exec: running shell command"]
+        );
         assert!(!o.response.is_empty(), "shell response should not be empty");
     }
 
@@ -2180,16 +2183,25 @@ mod tests {
         }
 
         let o = send_daemon_message_with_trace(&sock, "s1", "shell printf hi").expect("ok");
-        assert!(o.lifecycle_messages.iter().any(|m| m == "extension agent ready"));
-        assert!(o
-            .lifecycle_messages
-            .iter()
-            .any(|m| m == "extension filesystem-tool ready"));
-        assert!(o
-            .lifecycle_messages
-            .iter()
-            .any(|m| m == "extension shell-tool ready"));
-        assert_eq!(o.progress_messages, vec!["shell.exec: running shell command"]);
+        assert!(
+            o.lifecycle_messages
+                .iter()
+                .any(|m| m == "extension agent ready")
+        );
+        assert!(
+            o.lifecycle_messages
+                .iter()
+                .any(|m| m == "extension filesystem-tool ready")
+        );
+        assert!(
+            o.lifecycle_messages
+                .iter()
+                .any(|m| m == "extension shell-tool ready")
+        );
+        assert_eq!(
+            o.progress_messages,
+            vec!["shell.exec: running shell command"]
+        );
         assert!(!o.response.is_empty(), "shell response should not be empty");
         server.join().expect("join").expect("clean exit");
     }
@@ -2199,9 +2211,21 @@ mod tests {
         let td = TempDir::new().expect("tempdir");
         let sp = td.path().join("sessions.cbor");
         let o = run_embedded_message_with_trace(&sp, "s1", "hello").expect("ok");
-        assert!(o.lifecycle_messages.iter().any(|m| m == "extension agent starting"));
-        assert!(o.lifecycle_messages.iter().any(|m| m == "extension agent ready"));
-        assert!(o.lifecycle_messages.iter().any(|m| m == "extension agent exited"));
+        assert!(
+            o.lifecycle_messages
+                .iter()
+                .any(|m| m == "extension agent starting")
+        );
+        assert!(
+            o.lifecycle_messages
+                .iter()
+                .any(|m| m == "extension agent ready")
+        );
+        assert!(
+            o.lifecycle_messages
+                .iter()
+                .any(|m| m == "extension agent exited")
+        );
     }
 
     #[test]
@@ -2282,9 +2306,7 @@ mod tests {
 
         let err = send_daemon_message_with_trace(&sock, "s1", "hello")
             .expect_err("should get disconnect");
-        assert!(
-            matches!(&err, HarnessError::Participant(r) if r == "test disconnect")
-        );
+        assert!(matches!(&err, HarnessError::Participant(r) if r == "test disconnect"));
         server.join().expect("join");
     }
 }

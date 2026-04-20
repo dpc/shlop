@@ -78,6 +78,9 @@ struct SharedState {
     height: usize,
     /// Set by Term::drop to signal the redraw thread to exit.
     shutdown: bool,
+    /// One-shot senders waiting for the next render to complete.
+    /// The redraw thread drains these after each render.
+    sync_waiters: Vec<std::sync::mpsc::SyncSender<()>>,
 }
 
 impl SharedState {
@@ -106,6 +109,9 @@ pub enum Event {
     Escape,
 }
 
+// (RenderSync removed — sync is handled via one-shot channels
+// in SharedState.sync_waiters, drained by the redraw thread.)
+
 /// A cloneable handle for mutating prompt zones from any thread.
 ///
 /// Setters update the shared state but do **not** trigger a redraw.
@@ -127,6 +133,19 @@ impl TermHandle {
     /// calls coalesce into a single repaint.
     pub fn redraw(&self) {
         self.redraw.notify();
+    }
+
+    /// Triggers a redraw and blocks until the redraw thread finishes
+    /// processing it. Useful in tests to avoid sleep-based waits.
+    pub fn redraw_sync(&self) {
+        let (tx, rx) = std::sync::mpsc::sync_channel(0);
+        {
+            let mut st = self.lock();
+            st.sync_waiters.push(tx);
+        }
+        self.redraw.notify();
+        // Block until the redraw thread signals completion.
+        let _ = rx.recv();
     }
 
     // --- Block management ---
@@ -257,7 +276,7 @@ impl TermHandle {
 }
 
 /// Raw terminal events from the crossterm reader thread.
-enum RawEvent {
+pub enum RawEvent {
     Key(KeyEvent),
     Resize(u16, u16),
 }
@@ -277,6 +296,8 @@ pub struct Term {
     _term_input_thread: JoinHandle<()>,
     /// Redraw thread handle — taken and joined on drop.
     redraw_thread: Option<JoinHandle<()>>,
+    /// Whether to disable raw mode on drop (false for virtual terms).
+    owns_raw_mode: bool,
 }
 
 impl Term {
@@ -301,6 +322,7 @@ impl Term {
             width,
             height,
             shutdown: false,
+            sync_waiters: Vec::new(),
         }));
 
         let (redraw_tx, redraw_rx) = tau_blocking_notify_channel::channel();
@@ -308,8 +330,9 @@ impl Term {
         terminal::enable_raw_mode()?;
 
         let redraw_state = Arc::clone(&state);
+        let redraw_writer: Box<dyn Write + Send> = Box::new(io::stdout());
         let redraw_thread = thread::spawn(move || {
-            redraw_loop(redraw_state, redraw_rx);
+            redraw_loop(redraw_state, redraw_rx, redraw_writer);
         });
 
         let (term_input_tx, term_input_rx) = std::sync::mpsc::channel();
@@ -331,9 +354,67 @@ impl Term {
                 term_input_rx,
                 _term_input_thread: term_input_thread,
                 redraw_thread: Some(redraw_thread),
+                owns_raw_mode: true,
             },
             handle,
         ))
+    }
+
+    /// Creates a virtual terminal for testing.
+    ///
+    /// No raw mode, no crossterm input reader. Output goes to the
+    /// provided writer (e.g. a pipe). Input is injected via the
+    /// returned `Sender<RawEvent>`.
+    pub fn new_virtual(
+        width: usize,
+        height: usize,
+        left_prompt: impl Into<StyledText>,
+        output: Box<dyn Write + Send>,
+    ) -> (Self, TermHandle, std::sync::mpsc::Sender<RawEvent>) {
+        let state = Arc::new(Mutex::new(SharedState {
+            blocks: HashMap::new(),
+            next_id: 0,
+            history: Vec::new(),
+            above_active: Vec::new(),
+            above_sticky: Vec::new(),
+            suggestions: Vec::new(),
+            below: Vec::new(),
+            left_prompt: left_prompt.into(),
+            right_prompt: StyledText::new(),
+            buffer: String::new(),
+            cursor: 0,
+            width,
+            height,
+            shutdown: false,
+            sync_waiters: Vec::new(),
+        }));
+
+        let (redraw_tx, redraw_rx) = tau_blocking_notify_channel::channel();
+
+        let redraw_state = Arc::clone(&state);
+        let redraw_thread = thread::spawn(move || {
+            redraw_loop(redraw_state, redraw_rx, output);
+        });
+
+        let (term_input_tx, term_input_rx) = std::sync::mpsc::channel();
+
+        let handle = TermHandle {
+            state: Arc::clone(&state),
+            redraw: redraw_tx.clone(),
+        };
+
+        redraw_tx.notify();
+
+        let term = Self {
+            state,
+            redraw: redraw_tx,
+            term_input_rx,
+            _term_input_thread: thread::spawn(|| {}),
+            redraw_thread: Some(redraw_thread),
+            owns_raw_mode: false,
+        };
+
+        (term, handle, term_input_tx)
     }
 
     /// Triggers a redraw of the terminal.
@@ -591,7 +672,9 @@ impl Term {
 impl Drop for Term {
     fn drop(&mut self) {
         self.shutdown();
-        let _ = terminal::disable_raw_mode();
+        if self.owns_raw_mode {
+            let _ = terminal::disable_raw_mode();
+        }
     }
 }
 
@@ -671,8 +754,11 @@ fn layout_all(st: &SharedState) -> LayoutAll {
 
 // --- Redraw thread ---
 
-fn redraw_loop(state: Arc<Mutex<SharedState>>, notify_rx: tau_blocking_notify_channel::Receiver) {
-    let mut stdout = io::stdout();
+fn redraw_loop(
+    state: Arc<Mutex<SharedState>>,
+    notify_rx: tau_blocking_notify_channel::Receiver,
+    mut writer: Box<dyn Write + Send>,
+) {
     let (w, h) = {
         let st = state.lock().expect("term state mutex poisoned");
         (st.width, st.height)
@@ -695,12 +781,18 @@ fn redraw_loop(state: Arc<Mutex<SharedState>>, notify_rx: tau_blocking_notify_ch
                 drop(st);
 
                 screen.set_width(prev_width);
-                let _ = screen.update(&mut stdout, visible, (cursor_in_visible, layout.cursor_col));
+                let _ = screen.update(&mut writer, visible, (cursor_in_visible, layout.cursor_col));
                 let below = total.saturating_sub(layout.cursor_row + 1);
                 for _ in 0..=below {
-                    let _ = stdout.queue(crossterm::style::Print("\r\n"));
+                    let _ = writer.queue(crossterm::style::Print("\r\n"));
                 }
-                let _ = stdout.flush();
+                let _ = writer.flush();
+                {
+                    let mut st = state.lock().expect("term state mutex poisoned");
+                    for waiter in st.sync_waiters.drain(..) {
+                        let _ = waiter.send(());
+                    }
+                }
                 break;
             }
         }
@@ -718,7 +810,7 @@ fn redraw_loop(state: Arc<Mutex<SharedState>>, notify_rx: tau_blocking_notify_ch
         drop(st);
 
         if size_changed {
-            if let Err(e) = full_render(&mut stdout, &mut screen, &layout, width, height) {
+            if let Err(e) = full_render(&mut writer, &mut screen, &layout, width, height) {
                 eprintln!("redraw: full render error: {e}");
             }
         } else {
@@ -728,13 +820,21 @@ fn redraw_loop(state: Arc<Mutex<SharedState>>, notify_rx: tau_blocking_notify_ch
             let cursor_in_visible = layout.cursor_row.saturating_sub(visible_start);
 
             screen.set_width(width);
-            if let Err(e) = screen.update(&mut stdout, visible, (cursor_in_visible, layout.cursor_col)) {
+            if let Err(e) =
+                screen.update(&mut writer, visible, (cursor_in_visible, layout.cursor_col))
+            {
                 eprintln!("redraw: update error: {e}");
             }
         }
 
         prev_width = width;
         prev_height = height;
+        {
+            let mut st = state.lock().expect("term state mutex poisoned");
+            for waiter in st.sync_waiters.drain(..) {
+                let _ = waiter.send(());
+            }
+        }
     }
 }
 
@@ -1093,5 +1193,190 @@ mod tests {
         screen.update(&mut buf2, &visible2, (3, 5)).expect("ok");
 
         assert!(!buf2.is_empty());
+    }
+
+    // --- Virtual terminal E2E tests ---
+
+    /// Shared buffer that implements Write for the redraw thread
+    /// and can be drained into a vt100 parser by the test.
+    #[derive(Clone)]
+    struct SharedBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl SharedBuffer {
+        fn new() -> Self {
+            Self(Arc::new(Mutex::new(Vec::new())))
+        }
+
+        /// Drain accumulated bytes into a vt100 parser.
+        fn drain_into(&self, parser: &mut vt100::Parser) {
+            let mut buf = self.0.lock().expect("shared buffer poisoned");
+            if !buf.is_empty() {
+                parser.process(&buf);
+                buf.clear();
+            }
+        }
+    }
+
+    impl io::Write for SharedBuffer {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("shared buffer poisoned")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Helper: get visible rows from a vt100 parser as trimmed strings.
+    fn vt100_rows(parser: &vt100::Parser, cols: u16) -> Vec<String> {
+        parser.screen().rows(0, cols).collect()
+    }
+
+    /// Helper: check if any visible row contains the given text.
+    fn screen_contains(parser: &vt100::Parser, cols: u16, text: &str) -> bool {
+        vt100_rows(parser, cols).iter().any(|r| r.contains(text))
+    }
+
+    /// Helper: trigger a sync redraw and drain output into the parser.
+    fn flush_redraws(handle: &TermHandle, buf: &SharedBuffer, parser: &mut vt100::Parser) {
+        handle.redraw_sync();
+        buf.drain_into(parser);
+    }
+
+    #[test]
+    fn virtual_term_shows_prompt() {
+        let buf = SharedBuffer::new();
+        let mut parser = vt100::Parser::new(24, 80, 0);
+
+        let (term, handle, _input_tx) = Term::new_virtual(80, 24, "> ", Box::new(buf.clone()));
+
+        flush_redraws(&handle, &buf, &mut parser);
+
+        assert!(screen_contains(&parser, 80, "> "));
+
+        drop(term);
+    }
+
+    #[test]
+    fn virtual_term_renders_typed_input() {
+        let buf = SharedBuffer::new();
+        let mut parser = vt100::Parser::new(24, 80, 0);
+
+        let (_term, handle, _input_tx) = Term::new_virtual(80, 24, "> ", Box::new(buf.clone()));
+
+        // Simulate typing by setting the buffer directly (avoids
+        // needing to drive the input event loop).
+        handle.set_buffer("hello".to_owned(), 5);
+        flush_redraws(&handle, &buf, &mut parser);
+
+        assert!(
+            screen_contains(&parser, 80, "> hello"),
+            "expected '> hello' on screen, got: {:?}",
+            vt100_rows(&parser, 80)
+        );
+    }
+
+    #[test]
+    fn virtual_term_renders_print_output() {
+        let buf = SharedBuffer::new();
+        let mut parser = vt100::Parser::new(24, 80, 0);
+
+        let (_term, handle, _input_tx) = Term::new_virtual(80, 24, "> ", Box::new(buf.clone()));
+
+        handle.print_output(StyledBlock::new(StyledText::from(Span::plain(
+            "Hello from output",
+        ))));
+
+        flush_redraws(&handle, &buf, &mut parser);
+
+        assert!(
+            screen_contains(&parser, 80, "Hello from output"),
+            "expected output on screen, got: {:?}",
+            vt100_rows(&parser, 80)
+        );
+    }
+
+    #[test]
+    fn virtual_term_updates_block_in_place() {
+        let buf = SharedBuffer::new();
+        let mut parser = vt100::Parser::new(24, 80, 0);
+
+        let (_term, handle, _input_tx) = Term::new_virtual(80, 24, "> ", Box::new(buf.clone()));
+
+        // Create a block in above_active (live area).
+        let block_id = handle.new_block(StyledBlock::new(StyledText::from(Span::plain(
+            "loading...",
+        ))));
+        handle.push_above_active(block_id);
+        handle.redraw();
+
+        flush_redraws(&handle, &buf, &mut parser);
+        assert!(screen_contains(&parser, 80, "loading..."));
+
+        // Update it in place.
+        handle.set_block(
+            block_id,
+            StyledBlock::new(StyledText::from(Span::plain("done!"))),
+        );
+        handle.redraw();
+
+        flush_redraws(&handle, &buf, &mut parser);
+        assert!(
+            screen_contains(&parser, 80, "done!"),
+            "expected 'done!' on screen, got: {:?}",
+            vt100_rows(&parser, 80)
+        );
+        assert!(
+            !screen_contains(&parser, 80, "loading..."),
+            "old content should be gone"
+        );
+    }
+
+    #[test]
+    fn virtual_term_block_removed_from_active_then_printed_to_history() {
+        let buf = SharedBuffer::new();
+        let mut parser = vt100::Parser::new(24, 80, 0);
+
+        let (_term, handle, _input_tx) = Term::new_virtual(80, 24, "> ", Box::new(buf.clone()));
+
+        // Simulate streaming: create live block, update, finalize.
+        let block_id = handle.new_block(StyledBlock::new(StyledText::from(Span::plain(
+            "streaming...",
+        ))));
+        handle.push_above_active(block_id);
+        handle.redraw();
+        flush_redraws(&handle, &buf, &mut parser);
+
+        // Update with partial text.
+        handle.set_block(
+            block_id,
+            StyledBlock::new(StyledText::from(Span::plain("partial response"))),
+        );
+        handle.redraw();
+        flush_redraws(&handle, &buf, &mut parser);
+        assert!(screen_contains(&parser, 80, "partial response"));
+
+        // Finalize: remove live block, print to history.
+        handle.remove_block(block_id);
+        handle.print_output(StyledBlock::new(StyledText::from(Span::plain(
+            "final response",
+        ))));
+        flush_redraws(&handle, &buf, &mut parser);
+
+        assert!(
+            screen_contains(&parser, 80, "final response"),
+            "final should be visible, got: {:?}",
+            vt100_rows(&parser, 80)
+        );
+        // The old "partial response" should be gone — only "final response" remains.
+        assert!(
+            !screen_contains(&parser, 80, "partial response"),
+            "partial should be gone, got: {:?}",
+            vt100_rows(&parser, 80)
+        );
     }
 }

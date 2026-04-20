@@ -33,11 +33,7 @@ impl TestRuntime {
     }
 
     /// Runs one embedded interaction and returns the agent response.
-    pub fn run_embedded(
-        &self,
-        session_id: &str,
-        message: &str,
-    ) -> Result<String, HarnessError> {
+    pub fn run_embedded(&self, session_id: &str, message: &str) -> Result<String, HarnessError> {
         run_embedded_message(&self.session_store_path, session_id, message)
     }
 

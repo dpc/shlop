@@ -74,8 +74,8 @@ impl StreamState {
         self.tool_calls
             .into_iter()
             .map(|tc| {
-                let args: serde_json::Value = serde_json::from_str(&tc.arguments_json)
-                    .unwrap_or(serde_json::Value::Null);
+                let args: serde_json::Value =
+                    serde_json::from_str(&tc.arguments_json).unwrap_or(serde_json::Value::Null);
                 AgentToolCall {
                     id: tc.id,
                     name: tc.name,
@@ -94,10 +94,7 @@ pub fn chat_completion_stream(
     request: &PromptPayload<'_>,
     mut on_update: impl FnMut(&str),
 ) -> Result<StreamState, OpenAiError> {
-    let url = format!(
-        "{}/chat/completions",
-        config.base_url.trim_end_matches('/')
-    );
+    let url = format!("{}/chat/completions", config.base_url.trim_end_matches('/'));
 
     let body = build_request(config, request, true);
     let body_str = serde_json::to_string(&body).map_err(OpenAiError::Json)?;
@@ -407,9 +404,7 @@ fn cbor_to_json(v: &CborValue) -> serde_json::Value {
         CborValue::Float(f) => serde_json::json!(f),
         CborValue::Text(s) => serde_json::Value::String(s.clone()),
         CborValue::Bytes(_) => serde_json::Value::Null,
-        CborValue::Array(arr) => {
-            serde_json::Value::Array(arr.iter().map(cbor_to_json).collect())
-        }
+        CborValue::Array(arr) => serde_json::Value::Array(arr.iter().map(cbor_to_json).collect()),
         CborValue::Map(entries) => {
             let mut map = serde_json::Map::new();
             for (k, v) in entries {
@@ -440,9 +435,7 @@ fn json_to_cbor(v: &serde_json::Value) -> CborValue {
             }
         }
         serde_json::Value::String(s) => CborValue::Text(s.clone()),
-        serde_json::Value::Array(arr) => {
-            CborValue::Array(arr.iter().map(json_to_cbor).collect())
-        }
+        serde_json::Value::Array(arr) => CborValue::Array(arr.iter().map(json_to_cbor).collect()),
         serde_json::Value::Object(map) => CborValue::Map(
             map.iter()
                 .map(|(k, v)| (CborValue::Text(k.clone()), json_to_cbor(v)))

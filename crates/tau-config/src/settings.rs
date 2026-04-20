@@ -20,7 +20,8 @@ use serde::Deserialize;
 pub struct Settings {
     /// Show a greeting message on startup.
     pub greeting: bool,
-    /// Default model provider/model to use (e.g. "anthropic/claude-sonnet-4-20250514").
+    /// Default model provider/model to use (e.g.
+    /// "anthropic/claude-sonnet-4-20250514").
     pub default_model: Option<String>,
 }
 
@@ -232,7 +233,10 @@ mod tests {
 
         let s: Settings = load_json5_layered(dir, "settings").expect("load");
         assert!(!s.greeting);
-        assert_eq!(s.default_model.as_deref(), Some("anthropic/claude-sonnet-4-20250514"));
+        assert_eq!(
+            s.default_model.as_deref(),
+            Some("anthropic/claude-sonnet-4-20250514")
+        );
     }
 
     #[test]

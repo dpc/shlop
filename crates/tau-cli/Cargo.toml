@@ -22,4 +22,6 @@ tau-ext-fs.workspace = true
 tau-ext-shell.workspace = true
 
 [dev-dependencies]
+tau-cli-term-raw = { workspace = true }
 tempfile.workspace = true
+vt100.workspace = true
