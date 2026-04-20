@@ -5,13 +5,14 @@
 //! small [`ConnectionSink`] interface.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::{Arc, Condvar, Mutex};
 
 use serde::{Deserialize, Serialize};
 use tau_proto::{
@@ -1077,6 +1078,112 @@ impl Error for SessionStoreError {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Event log
+// ---------------------------------------------------------------------------
+
+/// Monotonically increasing sequence number for log entries.
+pub type EventSeq = u64;
+
+/// One entry in the event log.
+#[derive(Clone, Debug)]
+pub struct LogEntry {
+    pub seq: EventSeq,
+    pub source: Option<ConnectionId>,
+    pub event: Event,
+}
+
+struct EventLogInner {
+    entries: BTreeMap<EventSeq, LogEntry>,
+    next_seq: EventSeq,
+}
+
+/// Thread-safe append-only event log.
+///
+/// Consumers track their own position and call [`get_next_from`] or
+/// [`wait_next_from`] in a loop. The log does not track subscribers.
+pub struct EventLog {
+    inner: Mutex<EventLogInner>,
+    condvar: Condvar,
+}
+
+impl EventLog {
+    /// Creates an empty event log.
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: Mutex::new(EventLogInner {
+                entries: BTreeMap::new(),
+                next_seq: 0,
+            }),
+            condvar: Condvar::new(),
+        })
+    }
+
+    /// Appends an event and wakes any threads blocked in
+    /// [`wait_next_from`].
+    pub fn append(&self, source: Option<ConnectionId>, event: Event) -> EventSeq {
+        let mut inner = self.inner.lock().expect("event log mutex poisoned");
+        let seq = inner.next_seq;
+        inner.next_seq += 1;
+        inner.entries.insert(seq, LogEntry { seq, source, event });
+        self.condvar.notify_all();
+        seq
+    }
+
+    /// Returns the first entry with seq >= `from`, or `None` if no such
+    /// entry exists yet.
+    pub fn get_next_from(&self, from: EventSeq) -> Option<LogEntry> {
+        let inner = self.inner.lock().expect("event log mutex poisoned");
+        inner
+            .entries
+            .range(from..)
+            .next()
+            .map(|(_, entry)| entry.clone())
+    }
+
+    /// Blocks until an entry with seq >= `from` exists, then returns it.
+    pub fn wait_next_from(&self, from: EventSeq) -> LogEntry {
+        let mut inner = self.inner.lock().expect("event log mutex poisoned");
+        loop {
+            if let Some((_, entry)) = inner.entries.range(from..).next() {
+                return entry.clone();
+            }
+            inner = self.condvar.wait(inner).expect("event log mutex poisoned");
+        }
+    }
+
+    /// Returns the sequence number that the next appended entry will
+    /// receive.
+    pub fn next_seq(&self) -> EventSeq {
+        self.inner
+            .lock()
+            .expect("event log mutex poisoned")
+            .next_seq
+    }
+
+    /// Removes all entries with seq < `min_seq`.
+    pub fn prune_below(&self, min_seq: EventSeq) {
+        let mut inner = self.inner.lock().expect("event log mutex poisoned");
+        inner.entries = inner.entries.split_off(&min_seq);
+    }
+}
+
+impl Default for EventLog {
+    fn default() -> Self {
+        Self {
+            inner: Mutex::new(EventLogInner {
+                entries: BTreeMap::new(),
+                next_seq: 0,
+            }),
+            condvar: Condvar::new(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Session store
+// ---------------------------------------------------------------------------
+
 /// Append-only persistence for tree-structured session history.
 #[derive(Debug)]
 pub struct SessionStore {
@@ -2105,5 +2212,141 @@ mod tests {
 
         agent_thread.join().expect("agent thread should finish");
         tool_thread.join().expect("tool thread should finish");
+    }
+
+    // -----------------------------------------------------------------------
+    // EventLog tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn event_log_append_and_get() {
+        let log = EventLog::new();
+        let seq = log.append(
+            Some("conn-1".to_owned()),
+            Event::HarnessInfo(tau_proto::HarnessInfo {
+                message: "hello".to_owned(),
+            }),
+        );
+        assert_eq!(seq, 0);
+        assert_eq!(log.next_seq(), 1);
+
+        let entry = log.get_next_from(0).expect("entry should exist");
+        assert_eq!(entry.seq, 0);
+        assert_eq!(entry.source, Some("conn-1".to_owned()));
+
+        assert!(log.get_next_from(1).is_none());
+    }
+
+    #[test]
+    fn event_log_get_next_from_skips_earlier() {
+        let log = EventLog::new();
+        log.append(
+            None,
+            Event::HarnessInfo(tau_proto::HarnessInfo {
+                message: "a".to_owned(),
+            }),
+        );
+        log.append(
+            None,
+            Event::HarnessInfo(tau_proto::HarnessInfo {
+                message: "b".to_owned(),
+            }),
+        );
+        log.append(
+            None,
+            Event::HarnessInfo(tau_proto::HarnessInfo {
+                message: "c".to_owned(),
+            }),
+        );
+
+        let entry = log.get_next_from(1).expect("entry should exist");
+        assert_eq!(entry.seq, 1);
+        let Event::HarnessInfo(info) = &entry.event else {
+            panic!("expected HarnessInfo");
+        };
+        assert_eq!(info.message, "b");
+    }
+
+    #[test]
+    fn event_log_wait_next_from_blocks_then_returns() {
+        let log = EventLog::new();
+        let log2 = Arc::clone(&log);
+
+        let handle = thread::spawn(move || {
+            thread::sleep(std::time::Duration::from_millis(20));
+            log2.append(
+                None,
+                Event::HarnessInfo(tau_proto::HarnessInfo {
+                    message: "delayed".to_owned(),
+                }),
+            );
+        });
+
+        let entry = log.wait_next_from(0);
+        assert_eq!(entry.seq, 0);
+        handle.join().expect("append thread");
+    }
+
+    #[test]
+    fn event_log_wait_next_from_returns_immediately_if_available() {
+        let log = EventLog::new();
+        log.append(
+            None,
+            Event::HarnessInfo(tau_proto::HarnessInfo {
+                message: "already here".to_owned(),
+            }),
+        );
+
+        let entry = log.wait_next_from(0);
+        assert_eq!(entry.seq, 0);
+    }
+
+    #[test]
+    fn event_log_prune_below_removes_old_entries() {
+        let log = EventLog::new();
+        for i in 0..5 {
+            log.append(
+                None,
+                Event::HarnessInfo(tau_proto::HarnessInfo {
+                    message: format!("msg-{i}"),
+                }),
+            );
+        }
+        assert_eq!(log.next_seq(), 5);
+
+        log.prune_below(3);
+
+        assert!(log.get_next_from(0).is_some());
+        // The first available entry should be seq 3.
+        let entry = log.get_next_from(0).expect("entry after prune");
+        assert_eq!(entry.seq, 3);
+
+        // Entries 0, 1, 2 are gone.
+        assert!(log.get_next_from(2).map(|e| e.seq) == Some(3));
+    }
+
+    #[test]
+    fn event_log_multiple_waiters_wake_on_append() {
+        let log = EventLog::new();
+        let mut handles = Vec::new();
+        for _ in 0..3 {
+            let log = Arc::clone(&log);
+            handles.push(thread::spawn(move || {
+                let entry = log.wait_next_from(0);
+                entry.seq
+            }));
+        }
+
+        thread::sleep(std::time::Duration::from_millis(20));
+        log.append(
+            None,
+            Event::HarnessInfo(tau_proto::HarnessInfo {
+                message: "wake all".to_owned(),
+            }),
+        );
+
+        for h in handles {
+            assert_eq!(h.join().expect("waiter thread"), 0);
+        }
     }
 }

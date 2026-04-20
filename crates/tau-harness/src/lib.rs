@@ -363,6 +363,8 @@ struct Harness {
     pending_tool_sessions: std::collections::HashMap<String, String>,
     extension_statuses: std::collections::HashMap<String, Event>,
     lifecycle_messages: Vec<String>,
+    /// HarnessInfo messages accumulated for replay to late-connecting clients.
+    info_messages: Vec<String>,
     extensions: Vec<ExtensionEntry>,
     agent_connection_id: String,
     next_session_prompt_id: u64,
@@ -441,6 +443,7 @@ impl Harness {
             pending_tool_sessions: std::collections::HashMap::new(),
             extension_statuses: std::collections::HashMap::new(),
             lifecycle_messages: Vec::new(),
+            info_messages: Vec::new(),
             agent_connection_id,
             extensions,
             next_session_prompt_id: 0,
@@ -505,6 +508,7 @@ impl Harness {
             pending_tool_sessions: std::collections::HashMap::new(),
             extension_statuses: std::collections::HashMap::new(),
             lifecycle_messages: Vec::new(),
+            info_messages: Vec::new(),
             agent_connection_id,
             extensions,
             next_session_prompt_id: 0,
@@ -759,12 +763,12 @@ impl Harness {
                     .set_subscriptions(client_id, subscribe.selectors.clone())
                 {
                     Ok(()) => {
-                        let replay = wants_extension_events(&subscribe.selectors);
+                        let replay = wants_harness_events(&subscribe.selectors);
                         let _ = self
                             .bus
                             .publish_from(Some(client_id), Event::LifecycleSubscribe(subscribe));
                         if replay {
-                            self.replay_extension_statuses(client_id)?;
+                            self.replay_info_messages(client_id)?;
                         }
                         Ok(true)
                     }
@@ -943,18 +947,19 @@ impl Harness {
     }
 
     fn emit_info(&mut self, message: &str) {
+        self.info_messages.push(message.to_owned());
         let _ = self.bus.publish(Event::HarnessInfo(tau_proto::HarnessInfo {
             message: message.to_owned(),
         }));
     }
 
-    fn replay_extension_statuses(&mut self, client_id: &str) -> Result<(), HarnessError> {
-        let mut names = self.extension_statuses.keys().cloned().collect::<Vec<_>>();
-        names.sort();
-        for name in names {
-            if let Some(event) = self.extension_statuses.get(&name).cloned() {
-                let _ = self.bus.send_to(client_id, None, event)?;
-            }
+    fn replay_info_messages(&mut self, client_id: &str) -> Result<(), HarnessError> {
+        for message in self.info_messages.clone() {
+            let _ = self.bus.send_to(
+                client_id,
+                None,
+                Event::HarnessInfo(tau_proto::HarnessInfo { message }),
+            )?;
         }
         Ok(())
     }
@@ -1490,10 +1495,15 @@ fn cbor_to_text(v: &tau_proto::CborValue) -> String {
     }
 }
 
-fn wants_extension_events(selectors: &[EventSelector]) -> bool {
+fn wants_harness_events(selectors: &[EventSelector]) -> bool {
     selectors.iter().any(|selector| match selector {
-        EventSelector::Exact(name) => name.as_str().starts_with("extension."),
-        EventSelector::Prefix(prefix) => prefix.starts_with("extension."),
+        EventSelector::Exact(name) => {
+            let s = name.as_str();
+            s.starts_with("extension.") || s.starts_with("harness.")
+        }
+        EventSelector::Prefix(prefix) => {
+            prefix.starts_with("extension.") || prefix.starts_with("harness.")
+        }
     })
 }
 
@@ -1726,6 +1736,7 @@ pub fn send_daemon_message_with_trace(
             EventSelector::Prefix("session.".to_owned()),
             EventSelector::Prefix("tool.".to_owned()),
             EventSelector::Prefix("extension.".to_owned()),
+            EventSelector::Prefix("harness.".to_owned()),
         ],
     }))?;
     peer.send(&Event::UiPromptSubmitted(UiPromptSubmitted {
@@ -1743,6 +1754,9 @@ pub fn send_daemon_message_with_trace(
         if let Some(event) = peer.recv_timeout(RESPONSE_TIMEOUT)? {
             match event {
                 Event::ToolProgress(p) => progress_messages.push(format_tool_progress(&p)),
+                Event::HarnessInfo(ref info) => {
+                    lifecycle_messages.push(info.message.clone());
+                }
                 Event::ExtensionStarting(_)
                 | Event::ExtensionReady(_)
                 | Event::ExtensionExited(_)
