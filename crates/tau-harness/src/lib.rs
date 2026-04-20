@@ -328,7 +328,7 @@ impl EventLog {
                 let event_json = serde_json::to_value(event).unwrap_or_default();
                 serde_json::json!({
                     "type": "from_connection",
-                    "connection_id": connection_id,
+                    "source": connection_id,
                     "event_name": event.name().as_str(),
                     "event": event_json,
                 })
@@ -336,7 +336,7 @@ impl EventLog {
             HarnessEvent::Disconnected { connection_id } => {
                 serde_json::json!({
                     "type": "disconnected",
-                    "connection_id": connection_id,
+                    "source": connection_id,
                 })
             }
             HarnessEvent::NewClient(_) => {
