@@ -6,9 +6,8 @@
 
 > Tau is like [Pi][pi], but twice as much.
 
-Tau is a Unix-native AI coding agent. Instead of being built on top of
-a Typescript (JS) runtime, Tau builds on top the most venerable, powerful
-and ubiquitous runtime there is: Unix itself.
+Tau is a Unix-native AI coding agent built on top the most venerable,
+powerful and ubiquitous runtime there is: Unix itself.
 
 [pi]: https://shittycodingagent.ai/
 

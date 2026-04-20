@@ -24,8 +24,8 @@ and more information.
 but it doesn't go far enough. Tau is twice as Unix-like,
 which makes it just right for command line nerds and Linux hackers.
 
-Instead of being built on top of a Typescript (JS) runtime, Tau builds on top
-the most venerable, powerful and ubiquitous runtime there is: Unix itself.
+Tau builds on top the most venerable, powerful and ubiquitous runtime
+there is: Unix itself.
 
 Tau runs all its components as standalone Posix processes, communicating
 over stdio/RPC.
