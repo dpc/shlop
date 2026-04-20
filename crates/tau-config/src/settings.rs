@@ -20,6 +20,8 @@ use serde::Deserialize;
 pub struct Settings {
     /// Show a greeting message on startup.
     pub greeting: bool,
+    /// Show the tau ASCII logo on startup.
+    pub show_logo: bool,
     /// Default model provider/model to use (e.g.
     /// "anthropic/claude-sonnet-4-20250514").
     pub default_model: Option<String>,
@@ -29,6 +31,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             greeting: true,
+            show_logo: true,
             default_model: None,
         }
     }

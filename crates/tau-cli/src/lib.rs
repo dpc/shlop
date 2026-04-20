@@ -175,6 +175,22 @@ fn run_chat(session_id: &str) -> Result<(), CliError> {
     // Terminal setup.
     let commands = vec![SlashCommand::new("/quit", "Exit the chat session")];
     let (mut term, handle) = HighTerm::new("> ", commands)?;
+
+    // Show logo if enabled.
+    let settings = tau_config::settings::load_settings().unwrap_or_default();
+    if settings.show_logo {
+        use tau_cli_term::{Color, Span, Style, StyledBlock, StyledText};
+        let now = chrono::Local::now();
+        let banner = StyledText::from(vec![
+            Span::new("▀█▀▀ ", Style::default().fg(Color::Yellow)),
+            Span::plain(format!("tau {}", env!("CARGO_PKG_VERSION"))),
+            Span::new("\n", Style::default()),
+            Span::new(" █▄  ", Style::default().fg(Color::Yellow)),
+            Span::plain(now.format("%Y-%m-%d %H:%M").to_string()),
+        ]);
+        handle.print_output(StyledBlock::new(banner));
+    }
+
     handle.redraw();
 
     // Event renderer thread — drains the channel and renders via

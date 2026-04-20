@@ -50,6 +50,7 @@ tau-supervisor = { path = "crates/tau-supervisor" }
 tau-test-support = { path = "crates/tau-test-support" }
 
 # External crates
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 ciborium = "0.2.2"
 config = { version = "0.15", default-features = false, features = ["json5"] }
 serde_json = "1"

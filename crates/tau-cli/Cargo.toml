@@ -9,6 +9,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+chrono.workspace = true
 clap.workspace = true
 dirs.workspace = true
 tau-cli-term.workspace = true
