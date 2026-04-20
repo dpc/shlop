@@ -1,0 +1,5 @@
+{
+  // Default model to use, in "provider/model-id" format.
+  // The provider must be defined in models.json5.
+  // default_model: "local/llama-3",
+}

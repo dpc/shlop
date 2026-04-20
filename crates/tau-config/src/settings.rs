@@ -340,4 +340,36 @@ mod tests {
         let m: ModelRegistry = load_json5_layered(td.path(), "models").expect("load");
         assert!(m.providers.is_empty());
     }
+
+    #[test]
+    fn sample_configs_deserialize() {
+        let td = TempDir::new().expect("tempdir");
+        let dir = td.path();
+
+        std::fs::write(
+            dir.join("cli.json5"),
+            include_str!("../../../config/cli.json5"),
+        )
+        .expect("write cli");
+        std::fs::write(
+            dir.join("harness.json5"),
+            include_str!("../../../config/harness.json5"),
+        )
+        .expect("write harness");
+        std::fs::write(
+            dir.join("models.json5"),
+            include_str!("../../../config/models.json5"),
+        )
+        .expect("write models");
+
+        let _cli: CliSettings = load_json5_layered(dir, "cli").expect("cli sample should parse");
+        let _harness: HarnessSettings =
+            load_json5_layered(dir, "harness").expect("harness sample should parse");
+        let models: ModelRegistry =
+            load_json5_layered(dir, "models").expect("models sample should parse");
+        assert!(
+            models.providers.contains_key("local"),
+            "sample models should contain 'local' provider"
+        );
+    }
 }

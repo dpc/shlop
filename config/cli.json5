@@ -1,0 +1,7 @@
+{
+  // Show the tau logo banner on startup.
+  show_logo: true,
+
+  // Show a greeting message on startup.
+  greeting: true,
+}

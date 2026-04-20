@@ -48,11 +48,18 @@ pub enum Command {
         policy_store: PathBuf,
     },
 
+    /// Copy sample config files to ~/.config/tau/
+    Init {
+        /// Overwrite existing config files
+        #[arg(long)]
+        force: bool,
+    },
+
     /// Run an internal component as a standalone process (used by the
     /// harness to spawn extensions from the unified binary).
     #[command(hide = true)]
     Component {
-        /// Component name (agent, ext-fs, ext-shell, harness)
+        /// Component name (agent, ext-fs, harness)
         name: String,
     },
 }

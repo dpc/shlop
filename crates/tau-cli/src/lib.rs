@@ -631,6 +631,45 @@ impl EventRenderer {
 }
 
 // ---------------------------------------------------------------------------
+// Init
+// ---------------------------------------------------------------------------
+
+const SAMPLE_CLI: &str = include_str!("../../../config/cli.json5");
+const SAMPLE_HARNESS: &str = include_str!("../../../config/harness.json5");
+const SAMPLE_MODELS: &str = include_str!("../../../config/models.json5");
+
+fn run_init(force: bool) -> Result<(), CliError> {
+    let Some(dir) = tau_config::settings::config_dir() else {
+        return Err(CliError::Io(io::Error::new(
+            io::ErrorKind::NotFound,
+            "could not determine config directory",
+        )));
+    };
+    std::fs::create_dir_all(&dir)?;
+
+    let files = [
+        ("cli.json5", SAMPLE_CLI),
+        ("harness.json5", SAMPLE_HARNESS),
+        ("models.json5", SAMPLE_MODELS),
+    ];
+
+    for (name, content) in &files {
+        let path = dir.join(name);
+        if path.exists() && !force {
+            eprintln!(
+                "skip: {} (exists, use --force to overwrite)",
+                path.display()
+            );
+        } else {
+            std::fs::write(&path, content)?;
+            eprintln!("wrote: {}", path.display());
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Entrypoint
 // ---------------------------------------------------------------------------
 
@@ -693,6 +732,8 @@ pub fn main_with_args() -> std::process::ExitCode {
                 }
                 Ok(())
             }
+
+            cli::Command::Init { force } => run_init(force),
 
             cli::Command::Component { name } => {
                 let runner: fn() -> Result<(), Box<dyn std::error::Error>> = match name.as_str() {

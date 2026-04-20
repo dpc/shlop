@@ -1,0 +1,12 @@
+{
+  providers: {
+    // Local llama.cpp / Ollama / vLLM instance.
+    local: {
+      baseUrl: "http://localhost:8080/v1",
+      apiKey: "none",
+      models: [
+        { id: "llama-3" },
+      ],
+    },
+  },
+}

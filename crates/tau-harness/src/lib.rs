@@ -487,6 +487,7 @@ impl Harness {
             harness.emit_extension_starting(&name);
         }
         harness.wait_for_startup(n)?;
+        harness.check_config_exists();
         Ok(harness)
     }
 
@@ -552,6 +553,7 @@ impl Harness {
             harness.emit_extension_starting(&name);
         }
         harness.wait_for_startup(n)?;
+        harness.check_config_exists();
         Ok(harness)
     }
 
@@ -925,6 +927,14 @@ impl Harness {
         let msg = format!("extension {extension_name} exited");
         self.lifecycle_messages.push(msg.clone());
         self.emit_info(&msg);
+    }
+
+    fn check_config_exists(&mut self) {
+        if let Some(dir) = tau_config::settings::config_dir() {
+            if !dir.join("harness.json5").exists() {
+                self.emit_info("no config found; run `tau init` to create sample config files");
+            }
+        }
     }
 
     fn emit_info(&mut self, message: &str) {

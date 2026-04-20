@@ -31,6 +31,7 @@
         buildPaths = [
           "Cargo.toml"
           "Cargo.lock"
+          "config"
           "crates"
         ];
 
