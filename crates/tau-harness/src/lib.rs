@@ -24,8 +24,9 @@ use std::time::{Duration, Instant};
 use tau_config::{Config, ExtensionConfig};
 use tau_core::{
     Connection, ConnectionMetadata, ConnectionOrigin, ConnectionSendError, ConnectionSink,
-    DefaultSubscriptionPolicy, EventBus, PolicyStore, RouteError, SessionEntry, SessionStore,
-    SessionStoreError, ToolActivityOutcome, ToolActivityRecord, ToolRegistry, ToolRouteError,
+    DefaultSubscriptionPolicy, EventBus, EventLog, PolicyStore, RouteError, SessionEntry,
+    SessionStore, SessionStoreError, ToolActivityOutcome, ToolActivityRecord, ToolRegistry,
+    ToolRouteError,
 };
 use tau_proto::{
     AgentResponseFinished, AgentToolCall, ClientKind, ContentBlock, ConversationMessage,
@@ -298,12 +299,12 @@ struct ExtensionEntry {
 // ---------------------------------------------------------------------------
 
 /// Append-only JSON event log for debugging.
-struct EventLog {
+struct DebugEventLog {
     path: PathBuf,
     file: std::fs::File,
 }
 
-impl EventLog {
+impl DebugEventLog {
     fn open(dir: &Path) -> Result<Self, HarnessError> {
         std::fs::create_dir_all(dir)?;
         let path = dir.join("events.jsonl");
@@ -361,10 +362,8 @@ struct Harness {
     store: SessionStore,
     pending_request_sessions: VecDeque<String>,
     pending_tool_sessions: std::collections::HashMap<String, String>,
-    extension_statuses: std::collections::HashMap<String, Event>,
+    event_log: std::sync::Arc<EventLog>,
     lifecycle_messages: Vec<String>,
-    /// HarnessInfo messages accumulated for replay to late-connecting clients.
-    info_messages: Vec<String>,
     extensions: Vec<ExtensionEntry>,
     agent_connection_id: String,
     next_session_prompt_id: u64,
@@ -388,7 +387,7 @@ struct Harness {
     /// (session_id, text) — text is persisted when dispatched.
     pending_prompts: VecDeque<(String, String)>,
     /// Append-only event debug log.
-    event_log: Option<EventLog>,
+    debug_log: Option<DebugEventLog>,
 }
 
 impl Harness {
@@ -441,9 +440,8 @@ impl Harness {
             store,
             pending_request_sessions: VecDeque::new(),
             pending_tool_sessions: std::collections::HashMap::new(),
-            extension_statuses: std::collections::HashMap::new(),
+            event_log: EventLog::new(),
             lifecycle_messages: Vec::new(),
-            info_messages: Vec::new(),
             agent_connection_id,
             extensions,
             next_session_prompt_id: 0,
@@ -451,7 +449,7 @@ impl Harness {
             pending_agent_turn: None,
             agent_busy: false,
             pending_prompts: VecDeque::new(),
-            event_log: None,
+            debug_log: None,
         };
 
         let n = harness.extensions.len();
@@ -506,9 +504,8 @@ impl Harness {
             store,
             pending_request_sessions: VecDeque::new(),
             pending_tool_sessions: std::collections::HashMap::new(),
-            extension_statuses: std::collections::HashMap::new(),
+            event_log: EventLog::new(),
             lifecycle_messages: Vec::new(),
-            info_messages: Vec::new(),
             agent_connection_id,
             extensions,
             next_session_prompt_id: 0,
@@ -516,7 +513,7 @@ impl Harness {
             pending_agent_turn: None,
             agent_busy: false,
             pending_prompts: VecDeque::new(),
-            event_log: None,
+            debug_log: None,
         };
 
         let n = harness.extensions.len();
@@ -529,15 +526,22 @@ impl Harness {
     }
 
     fn log_event(&mut self, harness_event: &HarnessEvent) {
-        if let Some(log) = &mut self.event_log {
+        if let Some(log) = &mut self.debug_log {
             log.log_harness_event(harness_event);
         }
     }
 
-    fn enable_event_log(&mut self, dir: &Path) -> Result<PathBuf, HarnessError> {
-        let log = EventLog::open(dir)?;
+    /// Publishes an event to both the event bus and the event log.
+    fn publish_event(&mut self, source: Option<&str>, event: Event) {
+        self.event_log
+            .append(source.map(ToOwned::to_owned), event.clone());
+        let _ = self.bus.publish_from(source, event);
+    }
+
+    fn enable_debug_log(&mut self, dir: &Path) -> Result<PathBuf, HarnessError> {
+        let log = DebugEventLog::open(dir)?;
         let path = log.path().to_path_buf();
-        self.event_log = Some(log);
+        self.debug_log = Some(log);
         Ok(path)
     }
 
@@ -670,22 +674,16 @@ impl Harness {
     ) -> Result<(), HarnessError> {
         match event {
             Event::LifecycleHello(hello) => {
-                let _ = self
-                    .bus
-                    .publish_from(Some(source_id), Event::LifecycleHello(hello));
+                self.publish_event(Some(source_id), Event::LifecycleHello(hello));
             }
             Event::LifecycleSubscribe(subscribe) => {
                 self.bus
                     .set_subscriptions(source_id, subscribe.selectors.clone())?;
-                let _ = self
-                    .bus
-                    .publish_from(Some(source_id), Event::LifecycleSubscribe(subscribe));
+                self.publish_event(Some(source_id), Event::LifecycleSubscribe(subscribe));
             }
             Event::LifecycleReady(ready) => {
                 self.emit_extension_ready(source_id);
-                let _ = self
-                    .bus
-                    .publish_from(Some(source_id), Event::LifecycleReady(ready));
+                self.publish_event(Some(source_id), Event::LifecycleReady(ready));
             }
             Event::ToolRegister(ToolRegister { tool }) => {
                 let _ = self.registry.register(source_id, tool);
@@ -705,7 +703,7 @@ impl Harness {
                             details: None,
                         };
                         self.persist_tool_error(&error)?;
-                        let _ = self.bus.publish(Event::ToolError(error));
+                        self.publish_event(None, Event::ToolError(error));
                     }
                     Err(error) => return Err(HarnessError::ToolRoute(error)),
                 }
@@ -713,37 +711,27 @@ impl Harness {
             Event::ToolResult(result) => {
                 self.persist_tool_result(&result)?;
                 let call_id = result.call_id.clone();
-                let _ = self
-                    .bus
-                    .publish_from(Some(source_id), Event::ToolResult(result));
+                self.publish_event(Some(source_id), Event::ToolResult(result));
                 self.maybe_complete_agent_turn(&call_id);
             }
             Event::ToolError(error) => {
                 self.persist_tool_error(&error)?;
                 let call_id = error.call_id.clone();
-                let _ = self
-                    .bus
-                    .publish_from(Some(source_id), Event::ToolError(error));
+                self.publish_event(Some(source_id), Event::ToolError(error));
                 self.maybe_complete_agent_turn(&call_id);
             }
             Event::ToolProgress(progress) => {
-                let _ = self
-                    .bus
-                    .publish_from(Some(source_id), Event::ToolProgress(progress));
+                self.publish_event(Some(source_id), Event::ToolProgress(progress));
             }
             Event::AgentPromptSubmitted(_) | Event::AgentResponseUpdated(_) => {
-                // Forward agent events to all subscribers (UI).
-                let _ = self.bus.publish_from(Some(source_id), event);
+                self.publish_event(Some(source_id), event);
             }
             Event::AgentResponseFinished(response) => {
-                // Forward to subscribers first, then handle internally.
-                let _ = self
-                    .bus
-                    .publish(Event::AgentResponseFinished(response.clone()));
+                self.publish_event(None, Event::AgentResponseFinished(response.clone()));
                 self.handle_agent_response_finished(response)?;
             }
             other => {
-                let _ = self.bus.publish_from(Some(source_id), other);
+                self.publish_event(Some(source_id), other);
             }
         }
         Ok(())
@@ -752,9 +740,7 @@ impl Harness {
     fn handle_client_event(&mut self, client_id: &str, event: Event) -> Result<bool, HarnessError> {
         match event {
             Event::LifecycleHello(hello) => {
-                let _ = self
-                    .bus
-                    .publish_from(Some(client_id), Event::LifecycleHello(hello));
+                self.publish_event(Some(client_id), Event::LifecycleHello(hello));
                 Ok(true)
             }
             Event::LifecycleSubscribe(subscribe) => {
@@ -763,13 +749,9 @@ impl Harness {
                     .set_subscriptions(client_id, subscribe.selectors.clone())
                 {
                     Ok(()) => {
-                        let replay = wants_harness_events(&subscribe.selectors);
-                        let _ = self
-                            .bus
-                            .publish_from(Some(client_id), Event::LifecycleSubscribe(subscribe));
-                        if replay {
-                            self.replay_info_messages(client_id)?;
-                        }
+                        let selectors_for_replay = subscribe.selectors.clone();
+                        self.publish_event(Some(client_id), Event::LifecycleSubscribe(subscribe));
+                        self.replay_log_to_client(client_id, &selectors_for_replay)?;
                         Ok(true)
                     }
                     Err(RouteError::SubscriptionDenied { reason, .. }) => {
@@ -786,32 +768,19 @@ impl Harness {
                 }
             }
             Event::UiPromptSubmitted(prompt) => {
-                // Publish the fact so the UI echoes the user message.
-                let _ = self
-                    .bus
-                    .publish_from(Some(client_id), Event::UiPromptSubmitted(prompt.clone()));
+                self.publish_event(Some(client_id), Event::UiPromptSubmitted(prompt.clone()));
 
                 if self.agent_busy {
-                    // Queue for later — do NOT persist yet. If we
-                    // persist now, the user message appears in the
-                    // session tree before the current response,
-                    // breaking role alternation for the LLM API.
-                    // The text is persisted when dispatched.
-                    //
-                    // Future: support "steering" mode where the
-                    // message is injected mid-turn (after the current
-                    // tool calls finish but before the next LLM call)
-                    // rather than waiting for the full turn to end.
                     self.pending_prompts
                         .push_back((prompt.session_id.clone(), prompt.text.clone()));
-                    let _ = self
-                        .bus
-                        .publish(Event::SessionPromptQueued(SessionPromptQueued {
+                    self.publish_event(
+                        None,
+                        Event::SessionPromptQueued(SessionPromptQueued {
                             session_id: prompt.session_id.clone(),
                             text: prompt.text.clone(),
-                        }));
+                        }),
+                    );
                 } else {
-                    // Persist and dispatch immediately.
                     self.store
                         .append_user_message(&prompt.session_id, prompt.text.clone())?;
                     self.agent_busy = true;
@@ -821,7 +790,7 @@ impl Harness {
             }
             Event::LifecycleDisconnect(_) => Ok(false),
             other => {
-                let _ = self.bus.publish_from(Some(client_id), other);
+                self.publish_event(Some(client_id), other);
                 Ok(true)
             }
         }
@@ -904,15 +873,8 @@ impl Harness {
     // -----------------------------------------------------------------------
 
     fn emit_extension_starting(&mut self, extension_name: &str) {
-        let event = Event::ExtensionStarting(tau_proto::ExtensionStarting {
-            extension_name: extension_name.to_owned(),
-            argv: Vec::new(),
-        });
-        self.extension_statuses
-            .insert(extension_name.to_owned(), event.clone());
-        let msg = format_extension_event(&event);
+        let msg = format!("extension {extension_name} starting");
         self.lifecycle_messages.push(msg.clone());
-        let _ = self.bus.publish(event);
         self.emit_info(&msg);
     }
 
@@ -920,46 +882,45 @@ impl Harness {
         let Some(connection) = self.bus.connection(connection_id).cloned() else {
             return;
         };
-        let event = Event::ExtensionReady(tau_proto::ExtensionReady {
-            extension_name: connection.name.clone(),
-            connection_id: Some(connection.id),
-        });
-        self.extension_statuses
-            .insert(connection.name, event.clone());
-        let msg = format_extension_event(&event);
+        let msg = format!("extension {} ready", connection.name);
         self.lifecycle_messages.push(msg.clone());
-        let _ = self.bus.publish(event);
         self.emit_info(&msg);
     }
 
     fn emit_extension_exited(&mut self, extension_name: &str) {
-        let event = Event::ExtensionExited(tau_proto::ExtensionExited {
-            extension_name: extension_name.to_owned(),
-            exit_code: None,
-            signal: None,
-        });
-        self.extension_statuses
-            .insert(extension_name.to_owned(), event.clone());
-        let msg = format_extension_event(&event);
+        let msg = format!("extension {extension_name} exited");
         self.lifecycle_messages.push(msg.clone());
-        let _ = self.bus.publish(event);
         self.emit_info(&msg);
     }
 
     fn emit_info(&mut self, message: &str) {
-        self.info_messages.push(message.to_owned());
-        let _ = self.bus.publish(Event::HarnessInfo(tau_proto::HarnessInfo {
-            message: message.to_owned(),
-        }));
+        self.publish_event(
+            Some("harness"),
+            Event::HarnessInfo(tau_proto::HarnessInfo {
+                message: message.to_owned(),
+            }),
+        );
     }
 
-    fn replay_info_messages(&mut self, client_id: &str) -> Result<(), HarnessError> {
-        for message in self.info_messages.clone() {
-            let _ = self.bus.send_to(
-                client_id,
-                None,
-                Event::HarnessInfo(tau_proto::HarnessInfo { message }),
-            )?;
+    /// Replays HarnessInfo events from the event log to a late-joining client.
+    fn replay_log_to_client(
+        &mut self,
+        client_id: &str,
+        selectors: &[EventSelector],
+    ) -> Result<(), HarnessError> {
+        let mut cursor = 0;
+        while let Some(entry) = self.event_log.get_next_from(cursor) {
+            cursor = entry.seq + 1;
+            // Only replay HarnessInfo for now — full conversation replay
+            // will come with follower threads in a later phase.
+            if !matches!(entry.event, Event::HarnessInfo(_)) {
+                continue;
+            }
+            if selector_matches_event(selectors, &entry.event) {
+                let _ = self
+                    .bus
+                    .send_to(client_id, entry.source.as_deref(), entry.event)?;
+            }
         }
         Ok(())
     }
@@ -985,15 +946,7 @@ impl Harness {
             messages,
             tools,
         });
-        // Log this event since it's published via the bus, not the
-        // harness channel (so log_event in the event loop misses it).
-        if let Some(log) = &mut self.event_log {
-            log.log_harness_event(&HarnessEvent::FromConnection {
-                connection_id: "harness".to_owned(),
-                event: event.clone(),
-            });
-        }
-        let _ = self.bus.publish(event);
+        self.publish_event(None, event);
 
         session_prompt_id
     }
@@ -1495,15 +1448,11 @@ fn cbor_to_text(v: &tau_proto::CborValue) -> String {
     }
 }
 
-fn wants_harness_events(selectors: &[EventSelector]) -> bool {
+fn selector_matches_event(selectors: &[EventSelector], event: &Event) -> bool {
+    let name = event.name().as_str();
     selectors.iter().any(|selector| match selector {
-        EventSelector::Exact(name) => {
-            let s = name.as_str();
-            s.starts_with("extension.") || s.starts_with("harness.")
-        }
-        EventSelector::Prefix(prefix) => {
-            prefix.starts_with("extension.") || prefix.starts_with("harness.")
-        }
+        EventSelector::Exact(expected) => *expected == event.name(),
+        EventSelector::Prefix(prefix) => name.starts_with(prefix),
     })
 }
 
@@ -1817,7 +1766,7 @@ pub fn run_harness_daemon(
 
     // Enable event debug log.
     let log_dir = project_root.join(".tau");
-    match harness.enable_event_log(&log_dir) {
+    match harness.enable_debug_log(&log_dir) {
         Ok(path) => harness.emit_info(&format!("event log: {}", path.display())),
         Err(e) => eprintln!("warning: could not create event log: {e}"),
     }
