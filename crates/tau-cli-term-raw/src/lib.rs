@@ -39,7 +39,7 @@ pub mod screen;
 pub mod style;
 
 use std::collections::HashMap;
-use std::io::{self, Stdout, Write};
+use std::io::{self, Write};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 
@@ -76,6 +76,8 @@ struct SharedState {
     cursor: usize,
     width: usize,
     height: usize,
+    /// Set by Term::drop to signal the redraw thread to exit.
+    shutdown: bool,
 }
 
 impl SharedState {
@@ -273,8 +275,8 @@ pub struct Term {
     term_input_rx: std::sync::mpsc::Receiver<RawEvent>,
     /// Input reader thread handle (kept alive for the lifetime of Term).
     _term_input_thread: JoinHandle<()>,
-    /// Redraw thread handle (kept alive for the lifetime of Term).
-    _redraw_thread: JoinHandle<()>,
+    /// Redraw thread handle — taken and joined on drop.
+    redraw_thread: Option<JoinHandle<()>>,
 }
 
 impl Term {
@@ -298,6 +300,7 @@ impl Term {
             cursor: 0,
             width,
             height,
+            shutdown: false,
         }));
 
         let (redraw_tx, redraw_rx) = tau_blocking_notify_channel::channel();
@@ -327,7 +330,7 @@ impl Term {
                 redraw: redraw_tx,
                 term_input_rx,
                 _term_input_thread: term_input_thread,
-                _redraw_thread: redraw_thread,
+                redraw_thread: Some(redraw_thread),
             },
             handle,
         ))
@@ -566,8 +569,28 @@ impl Term {
     }
 }
 
+impl Term {
+    /// Signals the redraw thread to do one final render, reposition
+    /// the cursor below all content, and exit. Blocks until complete.
+    fn shutdown(&mut self) {
+        // Set the flag first, then notify — the redraw thread checks
+        // the flag before blocking on recv, so it will see it on the
+        // next iteration.
+        {
+            let mut st = self.state.lock().expect("term state mutex poisoned");
+            st.shutdown = true;
+        }
+        self.redraw.notify();
+
+        if let Some(handle) = self.redraw_thread.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 impl Drop for Term {
     fn drop(&mut self) {
+        self.shutdown();
         let _ = terminal::disable_raw_mode();
     }
 }
@@ -646,45 +669,6 @@ fn layout_all(st: &SharedState) -> LayoutAll {
     }
 }
 
-/// Renders the live area (above_active + above_sticky + input + below).
-fn render_live(stdout: &mut impl Write, screen: &mut Screen, st: &SharedState) -> io::Result<()> {
-    let width = screen.width();
-    let mut desired: Vec<Vec<Cell>> = Vec::new();
-
-    layout_id_list(&st.above_active, &st.blocks, width, &mut desired);
-    layout_id_list(&st.above_sticky, &st.blocks, width, &mut desired);
-    let above_row_count = desired.len();
-
-    let mut input_content = st.left_prompt.clone();
-    input_content.push(Span::plain(&st.buffer));
-    let mut input_lines = layout_lines(&input_content, width);
-
-    if !st.right_prompt.is_empty() && !input_lines.is_empty() {
-        let first_line = &input_lines[0];
-        let right_cells = st.right_prompt.to_cells();
-        let needed = first_line.len() + 1 + right_cells.len();
-        if needed <= width && input_lines.len() == 1 {
-            let padding = width - first_line.len() - right_cells.len();
-            let mut padded = first_line.clone();
-            padded.extend(std::iter::repeat_n(Cell::plain(' '), padding));
-            padded.extend(right_cells);
-            input_lines[0] = padded;
-        }
-    }
-
-    desired.extend(input_lines);
-
-    let left_chars = st.left_prompt.char_count();
-    let cursor_chars = left_chars + char_count_for_bytes(&st.buffer, st.cursor);
-    let cursor_row = above_row_count + cursor_chars / width;
-    let cursor_col = cursor_chars % width;
-
-    layout_id_list(&st.suggestions, &st.blocks, width, &mut desired);
-    layout_id_list(&st.below, &st.blocks, width, &mut desired);
-
-    screen.update(stdout, &desired, (cursor_row, cursor_col))
-}
-
 // --- Redraw thread ---
 
 fn redraw_loop(state: Arc<Mutex<SharedState>>, notify_rx: tau_blocking_notify_channel::Receiver) {
@@ -696,9 +680,31 @@ fn redraw_loop(state: Arc<Mutex<SharedState>>, notify_rx: tau_blocking_notify_ch
     let mut screen = Screen::new(w);
     let mut prev_width = w;
     let mut prev_height = h;
-    let mut rendered_history_len: usize = 0;
 
     loop {
+        // Check shutdown before blocking on the channel.
+        {
+            let st = state.lock().expect("term state mutex poisoned");
+            if st.shutdown {
+                // Final render + move cursor below all content.
+                let layout = layout_all(&st);
+                let total = layout.all_lines.len();
+                let visible_start = total.saturating_sub(st.height.max(1));
+                let visible = &layout.all_lines[visible_start..];
+                let cursor_in_visible = layout.cursor_row.saturating_sub(visible_start);
+                drop(st);
+
+                screen.set_width(prev_width);
+                let _ = screen.update(&mut stdout, visible, (cursor_in_visible, layout.cursor_col));
+                let below = total.saturating_sub(layout.cursor_row + 1);
+                for _ in 0..=below {
+                    let _ = stdout.queue(crossterm::style::Print("\r\n"));
+                }
+                let _ = stdout.flush();
+                break;
+            }
+        }
+
         if notify_rx.recv().is_err() {
             break;
         }
@@ -706,41 +712,25 @@ fn redraw_loop(state: Arc<Mutex<SharedState>>, notify_rx: tau_blocking_notify_ch
         let st = state.lock().expect("term state mutex poisoned");
         let width = st.width;
         let height = st.height.max(1);
-        let width_changed = prev_width != width;
-        let height_changed = prev_height != height;
-        let new_history = st.history.len() > rendered_history_len;
+        let size_changed = prev_width != width || prev_height != height;
 
-        if width_changed || height_changed {
-            let layout = layout_all(&st);
-            rendered_history_len = st.history.len();
-            drop(st);
+        let layout = layout_all(&st);
+        drop(st);
+
+        if size_changed {
             if let Err(e) = full_render(&mut stdout, &mut screen, &layout, width, height) {
                 eprintln!("redraw: full render error: {e}");
             }
-        } else if new_history {
-            // Lay out only the new history blocks, print them, then
-            // re-render the live area.
-            let new_ids: Vec<BlockId> = st.history[rendered_history_len..].to_vec();
-            let mut new_lines: Vec<Vec<Cell>> = Vec::new();
-            layout_id_list(&new_ids, &st.blocks, width, &mut new_lines);
-            rendered_history_len = st.history.len();
-            drop(st);
-
-            if let Err(e) = print_new_history(&mut stdout, &mut screen, &new_lines) {
-                eprintln!("redraw: history output error: {e}");
-            }
-
-            let st = state.lock().expect("term state mutex poisoned");
-            screen.set_width(width);
-            if let Err(e) = render_live(&mut stdout, &mut screen, &st) {
-                eprintln!("redraw: render error: {e}");
-            }
         } else {
+            let total = layout.all_lines.len();
+            let visible_start = total.saturating_sub(height);
+            let visible = &layout.all_lines[visible_start..];
+            let cursor_in_visible = layout.cursor_row.saturating_sub(visible_start);
+
             screen.set_width(width);
-            if let Err(e) = render_live(&mut stdout, &mut screen, &st) {
-                eprintln!("redraw: render error: {e}");
+            if let Err(e) = screen.update(&mut stdout, visible, (cursor_in_visible, layout.cursor_col)) {
+                eprintln!("redraw: update error: {e}");
             }
-            drop(st);
         }
 
         prev_width = width;
@@ -749,11 +739,9 @@ fn redraw_loop(state: Arc<Mutex<SharedState>>, notify_rx: tau_blocking_notify_ch
 }
 
 /// Full re-render: clear screen + scrollback, output all lines,
-/// position cursor. Used on resize.
-///
-/// After rendering, Screen is set to track **only the live area**
-/// (the portion after history). This matches what `render_live`
-/// produces, so subsequent differential updates work correctly.
+/// position cursor. Used on resize and when content grows beyond
+/// the viewport. After rendering, Screen tracks the visible
+/// viewport for subsequent differential updates.
 fn full_render(
     stdout: &mut impl Write,
     screen: &mut Screen,
@@ -783,7 +771,6 @@ fn full_render(
     stdout.flush()?;
 
     // Position the cursor within the live area.
-    let live_lines = &all_lines[layout.live_start..];
     let cursor_in_live = layout.cursor_row.saturating_sub(layout.live_start);
 
     // After outputting, the cursor is at the last content line.
@@ -808,28 +795,13 @@ fn full_render(
     stdout.queue(MoveToColumn(layout.cursor_col as u16))?;
     stdout.flush()?;
 
-    // Set Screen to track only the live area. This matches what
-    // render_live produces, so the next differential update diffs
-    // correctly.
-    screen.reset_to(live_lines.to_vec(), cursor_in_live, layout.cursor_col);
+    // Track what's visible on the terminal so the next
+    // screen.update() can diff correctly.
+    let visible_start = total.saturating_sub(height);
+    let visible_lines = all_lines[visible_start..].to_vec();
+    let cursor_in_visible = layout.cursor_row.saturating_sub(visible_start);
+    screen.reset_to(visible_lines, cursor_in_visible, layout.cursor_col);
 
-    Ok(())
-}
-
-/// Prints new history lines above the live area, then invalidates
-/// the screen so the next render_live redraws from scratch.
-fn print_new_history(
-    stdout: &mut Stdout,
-    screen: &mut Screen,
-    lines: &[Vec<Cell>],
-) -> io::Result<()> {
-    screen.erase_all(stdout)?;
-    for line in lines {
-        emit_styled_cells(stdout, line)?;
-        stdout.queue(Print("\r\n"))?;
-    }
-    stdout.flush()?;
-    screen.invalidate();
     Ok(())
 }
 
@@ -1011,12 +983,11 @@ mod tests {
         assert_eq!(r, 3, "cursor row in viewport");
         assert_eq!(c, 7, "cursor col");
 
-        // Screen tracks only the live area (4 lines), not the
-        // full viewport.
+        // Screen tracks the visible viewport (5 lines).
         assert_eq!(
             screen.actual_line_count(),
-            4,
-            "screen tracks live area only"
+            5,
+            "screen tracks visible viewport"
         );
     }
 
@@ -1050,11 +1021,11 @@ mod tests {
         assert_eq!(r, 1, "cursor row");
         assert_eq!(c, 4, "cursor col");
 
-        // Screen tracks only the live area (3 lines).
+        // Screen tracks the visible viewport (3 lines).
         assert_eq!(
             screen.actual_line_count(),
             3,
-            "screen tracks live area only"
+            "screen tracks visible viewport"
         );
     }
 
@@ -1077,8 +1048,8 @@ mod tests {
         assert_eq!(r, 2, "cursor row");
         assert_eq!(c, 5, "cursor col");
 
-        // Screen tracks the live area (3 lines).
-        assert_eq!(screen.actual_line_count(), 3);
+        // Screen tracks the visible viewport (5 lines).
+        assert_eq!(screen.actual_line_count(), 5);
     }
 
     // --- full_render: Screen state allows correct subsequent diffs ---
@@ -1093,7 +1064,7 @@ mod tests {
         let lines = plain_lines(&["above", "> hello", "below"]);
         let (_term, mut screen) = run_full_render(10, 30, lines, 0, 1, 7);
 
-        // Screen should track 3 lines (the live area).
+        // Screen should track 3 lines (visible viewport).
         assert_eq!(screen.actual_line_count(), 3);
 
         // Diff update: change "> hello" to "> world".
@@ -1109,18 +1080,17 @@ mod tests {
     #[test]
     fn full_render_then_diff_with_history() {
         // 3 history + 2 live = 5, 5-row terminal.
-        // After full_render, Screen tracks only the 2 live lines.
-        // A diff update with 2 lines should work without touching
-        // the history rows.
+        // Screen tracks all 5 visible lines. A diff update that
+        // changes only the live portion should produce minimal output.
         let lines = plain_lines(&["h0", "h1", "h2", "> cmd", "status"]);
         let (_term, mut screen) = run_full_render(5, 30, lines, 3, 3, 5);
 
-        assert_eq!(screen.actual_line_count(), 2, "only live area tracked");
+        assert_eq!(screen.actual_line_count(), 5, "visible viewport tracked");
 
-        // Update live area: change "> cmd" to "> new".
-        let live2 = plain_lines(&["> new", "status"]);
+        // Update: change "> cmd" to "> new" (history unchanged).
+        let visible2 = plain_lines(&["h0", "h1", "h2", "> new", "status"]);
         let mut buf2: Vec<u8> = Vec::new();
-        screen.update(&mut buf2, &live2, (0, 5)).expect("ok");
+        screen.update(&mut buf2, &visible2, (3, 5)).expect("ok");
 
         assert!(!buf2.is_empty());
     }
