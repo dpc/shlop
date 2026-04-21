@@ -11,6 +11,7 @@
 //! - [`theme`] — [`ThemeStyle`], [`Theme`], resolution
 
 pub mod color;
+pub mod names;
 pub mod text;
 pub mod theme;
 

@@ -1261,6 +1261,7 @@ dependencies = [
  "tau-harness",
  "tau-proto",
  "tau-provider",
+ "tau-themes",
  "tempfile",
  "vt100",
 ]
@@ -1270,6 +1271,7 @@ name = "tau-cli-term"
 version = "0.1.0"
 dependencies = [
  "tau-cli-term-raw",
+ "tau-themes",
 ]
 
 [[package]]

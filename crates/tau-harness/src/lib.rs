@@ -438,13 +438,8 @@ impl Harness {
 
         let mut extensions = Vec::new();
         // Agent
-        let (conn_id, thread) = spawn_in_process(
-            "agent",
-            ClientKind::Agent,
-            agent_runner,
-            &mut bus,
-            &tx,
-        )?;
+        let (conn_id, thread) =
+            spawn_in_process("agent", ClientKind::Agent, agent_runner, &mut bus, &tx)?;
         let agent_connection_id = conn_id.clone();
         let iid = tau_proto::ExtensionInstanceId::new(_next_instance_counter);
         _next_instance_counter += 1;
@@ -1810,7 +1805,12 @@ pub fn run_embedded_message_with_trace(
     session_id: &str,
     message: &str,
 ) -> Result<InteractionOutcome, HarnessError> {
-    run_embedded_message_impl(session_store_path, session_id, message, default_agent_runner)
+    run_embedded_message_impl(
+        session_store_path,
+        session_id,
+        message,
+        default_agent_runner,
+    )
 }
 
 /// Runs one embedded interaction and returns the final agent response.

@@ -9,7 +9,7 @@
     "user.prompt.queued":   { fg: "dark_grey" },
 
     // -- Agent responses --
-    "agent.response":       {},
+    "agent.response":       { italic: true },
     "agent.pending":        { fg: "dark_grey" },
 
     // -- Tool execution --
@@ -27,6 +27,9 @@
 
     // -- Model status --
     "model.status":         { fg: "dark_grey" },
+
+    // -- Prompt --
+    "prompt.marker":        { bold: true },
 
     // -- Completion menu --
     "completion.label":     { fg: "green" },

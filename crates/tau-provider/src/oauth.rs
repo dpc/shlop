@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::io;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 use url::Url;
@@ -192,14 +192,8 @@ pub fn github_device_code_start() -> Result<DeviceCodeResponse, io::Error> {
     let json = post_form_with_accept(GITHUB_DEVICE_CODE_URL, &body, "application/json")?;
 
     Ok(DeviceCodeResponse {
-        device_code: json["device_code"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string(),
-        user_code: json["user_code"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string(),
+        device_code: json["device_code"].as_str().unwrap_or_default().to_string(),
+        user_code: json["user_code"].as_str().unwrap_or_default().to_string(),
         verification_uri: json["verification_uri"]
             .as_str()
             .unwrap_or_default()

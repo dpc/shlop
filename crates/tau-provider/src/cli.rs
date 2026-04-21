@@ -83,9 +83,7 @@ fn cmd_add() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         ProviderKind::Openai => {
-            let api_key: String = Input::new()
-                .with_prompt("API key")
-                .interact_text()?;
+            let api_key: String = Input::new().with_prompt("API key").interact_text()?;
             Credentials::ApiKey {
                 provider_kind: kind.clone(),
                 api_key,
@@ -93,9 +91,7 @@ fn cmd_add() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         ProviderKind::Anthropic => {
-            let api_key: String = Input::new()
-                .with_prompt("API key")
-                .interact_text()?;
+            let api_key: String = Input::new().with_prompt("API key").interact_text()?;
             Credentials::ApiKey {
                 provider_kind: kind.clone(),
                 api_key,
@@ -235,13 +231,13 @@ fn cmd_list() -> Result<(), Box<dyn std::error::Error>> {
         let model_info = models.providers.get(*name);
         let auth_info = store.providers.get(*name);
 
-        let auth_type = model_info
-            .and_then(|p| p.auth.as_deref())
-            .unwrap_or(if model_info.is_some_and(|p| p.api_key.is_some()) {
+        let auth_type = model_info.and_then(|p| p.auth.as_deref()).unwrap_or(
+            if model_info.is_some_and(|p| p.api_key.is_some()) {
                 "api-key"
             } else {
                 "none"
-            });
+            },
+        );
 
         let auth_status = match (auth_type, auth_info) {
             (_, Some(Credentials::Oauth { expires_at_ms, .. })) => {
@@ -262,9 +258,7 @@ fn cmd_list() -> Result<(), Box<dyn std::error::Error>> {
             (a, _) => a.to_string(),
         };
 
-        let api = model_info
-            .and_then(|p| p.api.as_deref())
-            .unwrap_or("-");
+        let api = model_info.and_then(|p| p.api.as_deref()).unwrap_or("-");
 
         let model_count = model_info.map_or(0, |p| p.models.len());
 
@@ -283,7 +277,8 @@ fn cmd_login(name_arg: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     let models = tau_config::settings::load_models()?;
     let mut store = storage::load()?;
 
-    // Collect providers that use OAuth (determined by `auth` field in models.json5).
+    // Collect providers that use OAuth (determined by `auth` field in
+    // models.json5).
     let mut oauth_names: Vec<String> = models
         .providers
         .iter()
@@ -311,9 +306,10 @@ fn cmd_login(name_arg: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let provider_cfg = models.providers.get(&name).ok_or_else(|| {
-        format!("provider '{name}' not found in models.json5")
-    })?;
+    let provider_cfg = models
+        .providers
+        .get(&name)
+        .ok_or_else(|| format!("provider '{name}' not found in models.json5"))?;
 
     let auth = provider_cfg.auth.as_deref().unwrap_or("api-key");
     let kind = auth_to_provider_kind(auth)?;
@@ -374,9 +370,10 @@ fn cmd_list_models(name_arg: Option<&str>) -> Result<(), Box<dyn std::error::Err
         }
     };
 
-    let provider_cfg = models.providers.get(&name).ok_or_else(|| {
-        format!("provider '{name}' not found in models.json5")
-    })?;
+    let provider_cfg = models
+        .providers
+        .get(&name)
+        .ok_or_else(|| format!("provider '{name}' not found in models.json5"))?;
 
     if provider_cfg.models.is_empty() {
         eprintln!("No models configured for '{name}' in models.json5.");
@@ -405,9 +402,7 @@ fn run_openai_codex_login(kind: &ProviderKind) -> Result<Credentials, Box<dyn st
     eprintln!("Copy the full URL from your browser's address bar and paste it here:\n");
 
     io::stdout().flush()?;
-    let redirect_input: String = Input::new()
-        .with_prompt("Redirect URL")
-        .interact_text()?;
+    let redirect_input: String = Input::new().with_prompt("Redirect URL").interact_text()?;
 
     let (code, state) = oauth::parse_redirect_url(&redirect_input)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
@@ -502,15 +497,13 @@ fn update_or_print_models_json5(
     entry: &serde_json::Value,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path = models_json5_path();
-    let can_write = path.as_ref().is_some_and(|p| {
-        p.exists() || p.parent().is_some_and(|d| d.is_dir())
-    });
+    let can_write = path
+        .as_ref()
+        .is_some_and(|p| p.exists() || p.parent().is_some_and(|d| d.is_dir()));
 
     if can_write {
         let update = Confirm::new()
-            .with_prompt(
-                "Update models.json5? (warning: comments will not be preserved)",
-            )
+            .with_prompt("Update models.json5? (warning: comments will not be preserved)")
             .default(true)
             .interact()?;
 

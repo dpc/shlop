@@ -177,18 +177,22 @@ fn run_chat(session_id: &str) -> Result<(), CliError> {
         SlashCommand::new("/quit", "Exit the chat session"),
         SlashCommand::new("/model", "Switch model (e.g. /model provider/model-id)"),
     ];
-    let (mut term, handle, completion_data) = HighTerm::new("> ", commands)?;
+    let theme = tau_themes::Theme::builtin();
+    let prompt_style = tau_cli_term::resolve::resolve(&theme, tau_themes::names::PROMPT_MARKER);
+    let prompt = tau_cli_term::Span::new("> ", prompt_style);
+    let (mut term, handle, completion_data) = HighTerm::new(prompt, commands, theme.clone())?;
 
     // Show logo if enabled.
     let settings = tau_config::settings::load_cli_settings().unwrap_or_default();
     if settings.show_logo {
-        use tau_cli_term::{Color, Span, Style, StyledBlock, StyledText};
+        use tau_cli_term::{Span, StyledBlock, StyledText};
+        let accent = tau_cli_term::resolve::resolve(&theme, tau_themes::names::BANNER_ACCENT);
         let now = chrono::Local::now();
         let banner = StyledText::from(vec![
-            Span::new("▀█▀▀ ", Style::default().fg(Color::Yellow)),
+            Span::new("▀█▀▀ ", accent),
             Span::plain(format!("tau {}", env!("CARGO_PKG_VERSION"))),
-            Span::new("\n", Style::default()),
-            Span::new(" █▄  ", Style::default().fg(Color::Yellow)),
+            Span::new("\n", Default::default()),
+            Span::new(" █▄  ", accent),
             Span::plain(now.format("%Y-%m-%d %H:%M").to_string()),
         ]);
         handle.print_output(StyledBlock::new(banner));
@@ -202,7 +206,7 @@ fn run_chat(session_id: &str) -> Result<(), CliError> {
     let renderer_rx = event_rx;
     let renderer_completion_data = completion_data;
     let _renderer = std::thread::spawn(move || {
-        let mut renderer = EventRenderer::new(renderer_handle, renderer_completion_data);
+        let mut renderer = EventRenderer::new(renderer_handle, renderer_completion_data, theme);
         while let Ok(event) = renderer_rx.recv() {
             renderer.handle(&event);
         }
@@ -246,11 +250,10 @@ fn terminal_input_loop(
                 if let Some(model) = text.strip_prefix("/model ") {
                     let model = model.trim();
                     if !model.is_empty() {
-                        let _ = writer.write_event(&Event::UiModelSelect(
-                            tau_proto::UiModelSelect {
+                        let _ =
+                            writer.write_event(&Event::UiModelSelect(tau_proto::UiModelSelect {
                                 model: model.to_owned(),
-                            },
-                        ));
+                            }));
                         let _ = writer.flush();
                     }
                     continue;
@@ -396,8 +399,7 @@ fn format_shell_completion(details: &CborValue) -> String {
     if !trimmed.is_empty() {
         text.push('\n');
         let mut chars = 0;
-        let mut lines = 0;
-        for line in trimmed.lines() {
+        for (lines, line) in trimmed.lines().enumerate() {
             if lines >= 5 || chars + line.len() > 500 {
                 text.push_str("...");
                 break;
@@ -407,7 +409,6 @@ fn format_shell_completion(details: &CborValue) -> String {
             }
             text.push_str(line);
             chars += line.len();
-            lines += 1;
         }
     }
     text
@@ -418,6 +419,7 @@ fn format_shell_completion(details: &CborValue) -> String {
 struct EventRenderer {
     handle: tau_cli_term::TermHandle,
     completion_data: tau_cli_term::CompletionData,
+    theme: tau_themes::Theme,
     prompt_blocks: HashMap<String, tau_cli_term::BlockId>,
     /// Block ID of the last user message (for moving on queue).
     last_user_block: Option<tau_cli_term::BlockId>,
@@ -439,10 +441,12 @@ impl EventRenderer {
     fn new(
         handle: tau_cli_term::TermHandle,
         completion_data: tau_cli_term::CompletionData,
+        theme: tau_themes::Theme,
     ) -> Self {
         Self {
             handle,
             completion_data,
+            theme,
             prompt_blocks: HashMap::new(),
             last_user_block: None,
             queued_user_blocks: VecDeque::new(),
@@ -453,40 +457,28 @@ impl EventRenderer {
     }
 
     fn handle(&mut self, event: &Event) {
-        use tau_cli_term::{Color, Span, Style, StyledBlock, StyledText};
+        use tau_cli_term::resolve::themed_block;
+        use tau_themes::names;
 
         match event {
             Event::UiPromptSubmitted(prompt) => {
-                // Render immediately in history. If the agent is busy,
-                // SessionPromptQueued will move it to above_sticky.
-                let id = self.handle.print_output(
-                    StyledBlock::new(StyledText::from(Span::new(
-                        format!("> {}", prompt.text),
-                        Style::default().fg(Color::White),
-                    )))
-                    .bg(Color::Rgb {
-                        r: 40,
-                        g: 40,
-                        b: 55,
-                    }),
+                let block = themed_block(
+                    &self.theme,
+                    names::USER_PROMPT,
+                    format!("> {}", prompt.text),
                 );
+                let id = self.handle.print_output(block);
                 self.last_user_block = Some(id);
             }
             Event::SessionPromptQueued(queued) => {
-                // Move the user message from history to above_sticky
-                // (below the streaming response) with queued styling.
                 if let Some(id) = self.last_user_block.take() {
                     self.handle.remove_block(id);
-                    let queued_block = StyledBlock::new(StyledText::from(Span::new(
+                    let block = themed_block(
+                        &self.theme,
+                        names::USER_PROMPT_QUEUED,
                         format!("> {} (queued)", queued.text),
-                        Style::default().fg(Color::DarkGrey),
-                    )))
-                    .bg(Color::Rgb {
-                        r: 35,
-                        g: 35,
-                        b: 40,
-                    });
-                    let queued_id = self.handle.new_block(queued_block);
+                    );
+                    let queued_id = self.handle.new_block(block);
                     self.handle.push_above_sticky(queued_id);
                     self.handle.redraw();
                     self.queued_user_blocks
@@ -494,33 +486,16 @@ impl EventRenderer {
                 }
             }
             Event::SessionPromptCreated(prompt) => {
-                // If this prompt was previously queued, move its
-                // user-message block from above_sticky back to
-                // history with normal styling.
                 if let Some((queued_id, text)) = self.queued_user_blocks.pop_front() {
                     self.handle.remove_block(queued_id);
-                    self.handle.print_output(
-                        StyledBlock::new(StyledText::from(Span::new(
-                            format!("> {text}"),
-                            Style::default().fg(Color::White),
-                        )))
-                        .bg(Color::Rgb {
-                            r: 40,
-                            g: 40,
-                            b: 55,
-                        }),
-                    );
+                    self.handle.print_output(themed_block(
+                        &self.theme,
+                        names::USER_PROMPT,
+                        format!("> {text}"),
+                    ));
                 }
 
-                let block = StyledBlock::new(StyledText::from(Span::new(
-                    "...",
-                    Style::default().fg(Color::DarkGrey),
-                )))
-                .bg(Color::Rgb {
-                    r: 25,
-                    g: 35,
-                    b: 45,
-                });
+                let block = themed_block(&self.theme, names::AGENT_PENDING, "...");
                 let id = self.handle.new_block(block);
                 self.handle.push_above_active(id);
                 self.handle.redraw();
@@ -529,15 +504,7 @@ impl EventRenderer {
             }
             Event::AgentResponseUpdated(update) => {
                 if let Some(&bid) = self.prompt_blocks.get(update.session_prompt_id.as_str()) {
-                    let block = StyledBlock::new(StyledText::from(Span::new(
-                        &update.text,
-                        Style::default().fg(Color::White),
-                    )))
-                    .bg(Color::Rgb {
-                        r: 25,
-                        g: 35,
-                        b: 45,
-                    });
+                    let block = themed_block(&self.theme, names::AGENT_RESPONSE, &update.text);
                     self.handle.set_block(bid, block);
                     self.handle.redraw();
                 }
@@ -551,32 +518,17 @@ impl EventRenderer {
 
                     let text = finished.text.as_deref().unwrap_or("");
                     if !text.is_empty() {
-                        self.handle.print_output(
-                            StyledBlock::new(StyledText::from(Span::new(
-                                text,
-                                Style::default().fg(Color::White),
-                            )))
-                            .bg(Color::Rgb {
-                                r: 25,
-                                g: 35,
-                                b: 45,
-                            }),
-                        );
+                        self.handle.print_output(themed_block(
+                            &self.theme,
+                            names::AGENT_RESPONSE,
+                            text,
+                        ));
                     }
                 }
 
-                // Show each tool call in the live area.
                 for call in &finished.tool_calls {
                     let label = format_tool_call(&call.name, &call.arguments);
-                    let block = StyledBlock::new(StyledText::from(Span::new(
-                        &label,
-                        Style::default().fg(Color::DarkCyan),
-                    )))
-                    .bg(Color::Rgb {
-                        r: 30,
-                        g: 35,
-                        b: 40,
-                    });
+                    let block = themed_block(&self.theme, names::TOOL_RUNNING, label);
                     let id = self.handle.new_block(block);
                     self.handle.push_above_active(id);
                     self.tool_blocks.insert(call.id.clone(), id);
@@ -586,22 +538,10 @@ impl EventRenderer {
                 }
             }
             Event::ToolProgress(progress) => {
-                if self.tool_blocks.contains_key(progress.call_id.as_str()) {
-                    // Already tracking this call via a live block;
-                    // skip the redundant progress line.
-                } else {
+                if !self.tool_blocks.contains_key(progress.call_id.as_str()) {
                     let text = tau_harness::format_tool_progress(progress);
-                    self.handle.print_output(
-                        StyledBlock::new(StyledText::from(Span::new(
-                            text,
-                            Style::default().fg(Color::DarkYellow),
-                        )))
-                        .bg(Color::Rgb {
-                            r: 50,
-                            g: 45,
-                            b: 20,
-                        }),
-                    );
+                    self.handle
+                        .print_output(themed_block(&self.theme, names::TOOL_PROGRESS, text));
                 }
             }
             Event::ToolResult(result) => {
@@ -609,17 +549,8 @@ impl EventRenderer {
                     self.handle.remove_block(bid);
                 }
                 let label = format_tool_completion(&result.tool_name, &result.result, None);
-                self.handle.print_output(
-                    StyledBlock::new(StyledText::from(Span::new(
-                        &label,
-                        Style::default().fg(Color::DarkGreen),
-                    )))
-                    .bg(Color::Rgb {
-                        r: 25,
-                        g: 35,
-                        b: 30,
-                    }),
-                );
+                self.handle
+                    .print_output(themed_block(&self.theme, names::TOOL_RESULT, label));
             }
             Event::ToolError(error) => {
                 if let Some(bid) = self.tool_blocks.remove(error.call_id.as_str()) {
@@ -631,23 +562,15 @@ impl EventRenderer {
                     cbor.unwrap_or(&CborValue::Null),
                     Some(&error.message),
                 );
-                self.handle.print_output(
-                    StyledBlock::new(StyledText::from(Span::new(
-                        &label,
-                        Style::default().fg(Color::DarkRed),
-                    )))
-                    .bg(Color::Rgb {
-                        r: 45,
-                        g: 25,
-                        b: 25,
-                    }),
-                );
+                self.handle
+                    .print_output(themed_block(&self.theme, names::TOOL_ERROR, label));
             }
             Event::ExtensionStarting(starting) => {
-                let block = StyledBlock::new(StyledText::from(Span::new(
+                let block = themed_block(
+                    &self.theme,
+                    names::EXTENSION_LIFECYCLE,
                     format!("extension {} starting", starting.extension_name),
-                    Style::default().fg(Color::DarkGrey),
-                )));
+                );
                 let id = self.handle.new_block(block);
                 self.handle.push_above_active(id);
                 self.handle.redraw();
@@ -657,39 +580,37 @@ impl EventRenderer {
                 if let Some(bid) = self.extension_blocks.remove(&ready.instance_id) {
                     self.handle.remove_block(bid);
                 }
-                self.handle
-                    .print_output(StyledBlock::new(StyledText::from(Span::new(
-                        format!("extension {} ready", ready.extension_name),
-                        Style::default().fg(Color::DarkGrey),
-                    ))));
+                self.handle.print_output(themed_block(
+                    &self.theme,
+                    names::EXTENSION_LIFECYCLE,
+                    format!("extension {} ready", ready.extension_name),
+                ));
             }
             Event::ExtensionExited(exited) => {
                 if let Some(bid) = self.extension_blocks.remove(&exited.instance_id) {
                     self.handle.remove_block(bid);
                 }
-                self.handle
-                    .print_output(StyledBlock::new(StyledText::from(Span::new(
-                        format!("extension {} exited", exited.extension_name),
-                        Style::default().fg(Color::DarkGrey),
-                    ))));
+                self.handle.print_output(themed_block(
+                    &self.theme,
+                    names::EXTENSION_LIFECYCLE,
+                    format!("extension {} exited", exited.extension_name),
+                ));
             }
             Event::HarnessInfo(info) => {
-                self.handle
-                    .print_output(StyledBlock::new(StyledText::from(Span::new(
-                        &info.message,
-                        Style::default().fg(Color::DarkGrey),
-                    ))));
+                self.handle.print_output(themed_block(
+                    &self.theme,
+                    names::SYSTEM_INFO,
+                    &info.message,
+                ));
             }
             Event::HarnessModelsAvailable(models) => {
                 let items: Vec<tau_cli_term::CompletionItem> = models
                     .models
                     .iter()
-                    .map(|m| tau_cli_term::CompletionItem::plain(m))
+                    .map(tau_cli_term::CompletionItem::plain)
                     .collect();
-                self.completion_data.set_arg_completions(
-                    tau_cli_term::CommandName::new("/model"),
-                    items,
-                );
+                self.completion_data
+                    .set_arg_completions(tau_cli_term::CommandName::new("/model"), items);
             }
             Event::HarnessModelSelected(selected) => {
                 let label = if selected.model.is_empty() {
@@ -697,10 +618,7 @@ impl EventRenderer {
                 } else {
                     selected.model.clone()
                 };
-                let block = StyledBlock::new(StyledText::from(Span::new(
-                    label,
-                    Style::default().fg(Color::DarkGrey),
-                )));
+                let block = themed_block(&self.theme, names::MODEL_STATUS, label);
                 match self.model_status_block {
                     Some(bid) => {
                         self.handle.set_block(bid, block);
@@ -715,13 +633,11 @@ impl EventRenderer {
             }
             Event::LifecycleDisconnect(disconnect) => {
                 let reason = disconnect.reason.as_deref().unwrap_or("disconnected");
-                self.handle.print_output(
-                    StyledBlock::new(StyledText::from(Span::new(
-                        reason,
-                        Style::default().fg(Color::White),
-                    )))
-                    .bg(Color::DarkRed),
-                );
+                self.handle.print_output(themed_block(
+                    &self.theme,
+                    names::SYSTEM_DISCONNECT,
+                    reason,
+                ));
             }
             _ => {}
         }
@@ -833,8 +749,9 @@ pub fn main_with_args() -> std::process::ExitCode {
 
             cli::Command::Init { force } => run_init(force),
 
-            cli::Command::Provider { args } => tau_provider::run(&args)
-                .map_err(|e| CliError::Participant(e.to_string())),
+            cli::Command::Provider { args } => {
+                tau_provider::run(&args).map_err(|e| CliError::Participant(e.to_string()))
+            }
 
             cli::Command::Component { name } => {
                 let runner: fn() -> Result<(), Box<dyn std::error::Error>> = match name.as_str() {
@@ -933,7 +850,11 @@ mod tests {
     #[test]
     fn single_prompt_response_cycle() {
         let (_term, handle, vt) = setup(80, 24);
-        let mut renderer = EventRenderer::new(handle.clone(), tau_cli_term::CompletionData::new());
+        let mut renderer = EventRenderer::new(
+            handle.clone(),
+            tau_cli_term::CompletionData::new(),
+            tau_themes::Theme::builtin(),
+        );
 
         // User submits prompt.
         renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
@@ -980,7 +901,11 @@ mod tests {
     #[test]
     fn queued_prompt_renders_after_first_completes() {
         let (_term, handle, vt) = setup(80, 24);
-        let mut renderer = EventRenderer::new(handle.clone(), tau_cli_term::CompletionData::new());
+        let mut renderer = EventRenderer::new(
+            handle.clone(),
+            tau_cli_term::CompletionData::new(),
+            tau_themes::Theme::builtin(),
+        );
 
         // First prompt.
         renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
@@ -1076,7 +1001,11 @@ mod tests {
     #[test]
     fn three_queued_prompts_render_sequentially() {
         let (_term, handle, vt) = setup(80, 24);
-        let mut renderer = EventRenderer::new(handle.clone(), tau_cli_term::CompletionData::new());
+        let mut renderer = EventRenderer::new(
+            handle.clone(),
+            tau_cli_term::CompletionData::new(),
+            tau_themes::Theme::builtin(),
+        );
 
         // Three rapid prompts.
         for i in 0..3 {
@@ -1147,7 +1076,11 @@ mod tests {
     #[test]
     fn streaming_block_does_not_duplicate_on_finish() {
         let (_term, handle, vt) = setup(80, 24);
-        let mut renderer = EventRenderer::new(handle.clone(), tau_cli_term::CompletionData::new());
+        let mut renderer = EventRenderer::new(
+            handle.clone(),
+            tau_cli_term::CompletionData::new(),
+            tau_themes::Theme::builtin(),
+        );
 
         renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
@@ -1192,7 +1125,11 @@ mod tests {
     #[test]
     fn three_prompts_during_streaming_all_render_correctly() {
         let (_term, handle, vt) = setup(80, 24);
-        let mut renderer = EventRenderer::new(handle.clone(), tau_cli_term::CompletionData::new());
+        let mut renderer = EventRenderer::new(
+            handle.clone(),
+            tau_cli_term::CompletionData::new(),
+            tau_themes::Theme::builtin(),
+        );
 
         // User sends first prompt.
         renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
@@ -1342,7 +1279,11 @@ mod tests {
     #[test]
     fn emoji_in_response_renders_correctly() {
         let (_term, handle, vt) = setup(40, 24);
-        let mut renderer = EventRenderer::new(handle.clone(), tau_cli_term::CompletionData::new());
+        let mut renderer = EventRenderer::new(
+            handle.clone(),
+            tau_cli_term::CompletionData::new(),
+            tau_themes::Theme::builtin(),
+        );
 
         renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
@@ -1397,7 +1338,11 @@ mod tests {
     #[test]
     fn multiple_emoji_no_column_drift() {
         let (_term, handle, vt) = setup(40, 24);
-        let mut renderer = EventRenderer::new(handle.clone(), tau_cli_term::CompletionData::new());
+        let mut renderer = EventRenderer::new(
+            handle.clone(),
+            tau_cli_term::CompletionData::new(),
+            tau_themes::Theme::builtin(),
+        );
 
         renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),

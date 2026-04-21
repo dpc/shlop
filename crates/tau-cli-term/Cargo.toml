@@ -10,3 +10,4 @@ workspace = true
 
 [dependencies]
 tau-cli-term-raw.workspace = true
+tau-themes.workspace = true

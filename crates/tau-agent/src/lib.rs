@@ -71,20 +71,10 @@ where
 
                 match backend {
                     Some(BackendConfig::ChatCompletions(cfg)) => {
-                        handle_chat_completions(
-                            &session_prompt_id,
-                            &cfg,
-                            &prompt,
-                            &mut writer,
-                        )?;
+                        handle_chat_completions(&session_prompt_id, &cfg, &prompt, &mut writer)?;
                     }
                     Some(BackendConfig::Responses(cfg)) => {
-                        handle_responses(
-                            &session_prompt_id,
-                            &cfg,
-                            &prompt,
-                            &mut writer,
-                        )?;
+                        handle_responses(&session_prompt_id, &cfg, &prompt, &mut writer)?;
                     }
                     None => {
                         let msg = match &prompt.model {
@@ -125,9 +115,14 @@ fn resolve_backend(
 ) -> Option<BackendConfig> {
     let (provider_name, model_id) = model.split_once('/')?;
     let provider = models.providers.get(provider_name)?;
-    let auth_type = provider.auth.as_deref().unwrap_or(
-        if provider.api_key.is_some() { "api-key" } else { "none" },
-    );
+    let auth_type = provider
+        .auth
+        .as_deref()
+        .unwrap_or(if provider.api_key.is_some() {
+            "api-key"
+        } else {
+            "none"
+        });
 
     match auth_type {
         "openai-codex" => {
@@ -167,19 +162,14 @@ fn resolve_backend(
         }
         "api-key" | "none" | _ => {
             // Standard Chat Completions API.
-            let base_url = provider
-                .base_url
-                .clone()
-                .or_else(|| {
-                    // Check auth.json for API key providers without base_url.
-                    use tau_provider::storage::Credentials;
-                    match auth_store.providers.get(provider_name)? {
-                        Credentials::ApiKey { .. } => {
-                            Some("https://api.openai.com/v1".to_owned())
-                        }
-                        _ => None,
-                    }
-                })?;
+            let base_url = provider.base_url.clone().or_else(|| {
+                // Check auth.json for API key providers without base_url.
+                use tau_provider::storage::Credentials;
+                match auth_store.providers.get(provider_name)? {
+                    Credentials::ApiKey { .. } => Some("https://api.openai.com/v1".to_owned()),
+                    _ => None,
+                }
+            })?;
             let api_key = provider.api_key.clone().unwrap_or_default();
             Some(BackendConfig::ChatCompletions(openai::OpenAiConfig {
                 base_url,
@@ -298,9 +288,7 @@ where
     R: Read,
     W: Write,
 {
-    use tau_proto::{
-        AgentToolCall, CborValue, ContentBlock, ConversationRole,
-    };
+    use tau_proto::{AgentToolCall, CborValue, ContentBlock, ConversationRole};
 
     let mut reader = EventReader::new(BufReader::new(reader));
     let mut writer = EventWriter::new(BufWriter::new(writer));

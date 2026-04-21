@@ -46,19 +46,18 @@ impl Theme {
     pub fn builtin() -> Self {
         // The embedded JSON5 is validated by tests; parsing cannot
         // fail at runtime.
-        Self::from_str(BUILTIN_THEME).expect("built-in theme is valid JSON5")
+        Self::parse(BUILTIN_THEME).expect("built-in theme is valid JSON5")
     }
 
     /// Loads a theme from a JSON5 file.
     pub fn load(path: &Path) -> Result<Self, ThemeLoadError> {
-        let contents = std::fs::read_to_string(path)
-            .map_err(|e| ThemeLoadError::Io(path.to_path_buf(), e))?;
-        Self::from_str(&contents)
-            .map_err(|e| ThemeLoadError::Parse(path.to_path_buf(), e))
+        let contents =
+            std::fs::read_to_string(path).map_err(|e| ThemeLoadError::Io(path.to_path_buf(), e))?;
+        Self::parse(&contents).map_err(|e| ThemeLoadError::Parse(path.to_path_buf(), e))
     }
 
     /// Parses a theme from a JSON5 string.
-    pub fn from_str(s: &str) -> Result<Self, json5::Error> {
+    pub fn parse(s: &str) -> Result<Self, json5::Error> {
         json5::from_str(s)
     }
 
@@ -129,7 +128,7 @@ mod tests {
 
     #[test]
     fn named_style_resolves() {
-        let theme: Theme = Theme::from_str(
+        let theme: Theme = Theme::parse(
             r#"{
                 styles: {
                     prompt: { fg: "green", bold: true },
@@ -150,7 +149,7 @@ mod tests {
 
     #[test]
     fn default_idx_resolves_to_default_style() {
-        let theme: Theme = Theme::from_str(
+        let theme: Theme = Theme::parse(
             r#"{
                 styles: {
                     prompt: { fg: "red" },
@@ -168,7 +167,7 @@ mod tests {
 
     #[test]
     fn hex_color_in_theme() {
-        let theme: Theme = Theme::from_str(
+        let theme: Theme = Theme::parse(
             r##"{
                 styles: {
                     custom: { fg: "#ff8800", bg: "#001122" },
@@ -202,7 +201,7 @@ mod tests {
 
     #[test]
     fn multiple_spans_resolve_independently() {
-        let theme: Theme = Theme::from_str(
+        let theme: Theme = Theme::parse(
             r#"{
                 styles: {
                     error: { fg: "red", bold: true },

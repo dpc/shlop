@@ -13,6 +13,7 @@ chrono.workspace = true
 clap.workspace = true
 dirs.workspace = true
 tau-cli-term.workspace = true
+tau-themes.workspace = true
 tau-config.workspace = true
 tau-harness.workspace = true
 tau-proto.workspace = true

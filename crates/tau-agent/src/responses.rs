@@ -8,7 +8,7 @@ use std::io::BufRead;
 use serde::Serialize;
 use tau_proto::{ContentBlock, ConversationMessage, ConversationRole};
 
-use crate::openai::{cbor_to_json, OpenAiError, PromptPayload, StreamState};
+use crate::openai::{OpenAiError, PromptPayload, StreamState, cbor_to_json};
 
 /// Config for the Codex Responses API.
 #[derive(Clone, Debug)]
@@ -26,10 +26,7 @@ pub fn responses_stream(
     request: &PromptPayload<'_>,
     mut on_update: impl FnMut(&str),
 ) -> Result<StreamState, OpenAiError> {
-    let url = format!(
-        "{}/codex/responses",
-        config.base_url.trim_end_matches('/')
-    );
+    let url = format!("{}/codex/responses", config.base_url.trim_end_matches('/'));
 
     let body = build_request(config, request);
     let body_str = serde_json::to_string(&body).map_err(OpenAiError::Json)?;
@@ -90,7 +87,9 @@ pub fn responses_stream(
                             arguments_json: String::new(),
                         });
                     }
-                    state.tool_calls[output_index].arguments_json.push_str(delta);
+                    state.tool_calls[output_index]
+                        .arguments_json
+                        .push_str(delta);
                 }
             }
             "response.output_item.added" => {
@@ -113,8 +112,11 @@ pub fn responses_stream(
                     }
                 }
             }
-            "response.completed" | "response.incomplete" | "response.failed"
-            | "response.done" | "error" => {
+            "response.completed"
+            | "response.incomplete"
+            | "response.failed"
+            | "response.done"
+            | "error" => {
                 break;
             }
             _ => {}
@@ -197,7 +199,13 @@ fn build_request(config: &ResponsesConfig, request: &PromptPayload<'_>) -> Respo
 /// Encode tool name for the API: replace non-`[a-zA-Z0-9_-]` with `_`.
 fn encode_tool_name(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 

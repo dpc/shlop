@@ -9,7 +9,10 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
-use tau_cli_term_raw::{BlockId, Color, Span, Style, StyledBlock, StyledText, TermHandle};
+use tau_cli_term_raw::{BlockId, Span, StyledBlock, StyledText, TermHandle};
+use tau_themes::Theme;
+
+use crate::resolve;
 
 // -----------------------------------------------------------------
 // Public types
@@ -90,6 +93,12 @@ pub struct CompletionData {
     inner: Arc<Mutex<HashMap<CommandName, Vec<CompletionItem>>>>,
 }
 
+impl Default for CompletionData {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CompletionData {
     pub fn new() -> Self {
         Self {
@@ -166,14 +175,16 @@ impl State {
 pub struct Completer {
     commands: Vec<SlashCommand>,
     data: CompletionData,
+    theme: Theme,
     state: State,
 }
 
 impl Completer {
-    pub(crate) fn new(commands: Vec<SlashCommand>, data: CompletionData) -> Self {
+    pub(crate) fn new(commands: Vec<SlashCommand>, data: CompletionData, theme: Theme) -> Self {
         Self {
             commands,
             data,
+            theme,
             state: State::new(),
         }
     }
@@ -332,9 +343,9 @@ impl Completer {
     // -----------------------------------------------------------------
 
     fn render_menu(&mut self, handle: &TermHandle) {
-        let selected_style = Style::default().fg(Color::White).bg(Color::DarkBlue).bold();
-        let label_style = Style::default().fg(Color::Green);
-        let desc_style = Style::default().fg(Color::DarkGrey);
+        let selected_style = resolve::resolve(&self.theme, tau_themes::names::COMPLETION_SELECTED);
+        let label_style = resolve::resolve(&self.theme, tau_themes::names::COMPLETION_LABEL);
+        let desc_style = resolve::resolve(&self.theme, tau_themes::names::COMPLETION_DESC);
 
         let max_label_len = self
             .state

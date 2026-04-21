@@ -9,15 +9,16 @@
 //! - Dynamic argument completion (e.g. model names for `/model`)
 
 mod completion;
+pub mod resolve;
 
 use std::io;
 
+pub use completion::{CommandName, Completer, CompletionData, CompletionItem, SlashCommand};
 use tau_cli_term_raw::Event as RawEvent;
 pub use tau_cli_term_raw::{
     Align, BlockId, Cell, Color, Span, Style, StyledBlock, StyledText, TermHandle,
 };
-
-pub use completion::{CommandName, CompletionData, CompletionItem, Completer, SlashCommand};
+use tau_themes::Theme;
 
 /// High-level events surfaced to the caller.
 pub enum Event {
@@ -47,12 +48,13 @@ impl HighTerm {
     pub fn new(
         left_prompt: impl Into<StyledText>,
         commands: Vec<SlashCommand>,
+        theme: Theme,
     ) -> io::Result<(Self, TermHandle, CompletionData)> {
         let (term, handle) = tau_cli_term_raw::Term::new(left_prompt)?;
         let handle_clone = handle.clone();
         let data = CompletionData::new();
         let data_clone = data.clone();
-        let completer = Completer::new(commands, data);
+        let completer = Completer::new(commands, data, theme);
         Ok((
             Self {
                 term,

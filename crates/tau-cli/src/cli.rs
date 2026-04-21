@@ -57,7 +57,8 @@ pub enum Command {
 
     /// Manage LLM providers (add, login, list-models)
     Provider {
-        /// Subcommand and arguments (e.g. add, login [name], list-models [name])
+        /// Subcommand and arguments (e.g. add, login [name], list-models
+        /// [name])
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
     },

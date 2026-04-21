@@ -59,12 +59,12 @@ impl Color {
         if hex.len() != 6 {
             return Err(ColorParseError(format!("#{hex}")));
         }
-        let r = u8::from_str_radix(&hex[0..2], 16)
-            .map_err(|_| ColorParseError(format!("#{hex}")))?;
-        let g = u8::from_str_radix(&hex[2..4], 16)
-            .map_err(|_| ColorParseError(format!("#{hex}")))?;
-        let b = u8::from_str_radix(&hex[4..6], 16)
-            .map_err(|_| ColorParseError(format!("#{hex}")))?;
+        let r =
+            u8::from_str_radix(&hex[0..2], 16).map_err(|_| ColorParseError(format!("#{hex}")))?;
+        let g =
+            u8::from_str_radix(&hex[2..4], 16).map_err(|_| ColorParseError(format!("#{hex}")))?;
+        let b =
+            u8::from_str_radix(&hex[4..6], 16).map_err(|_| ColorParseError(format!("#{hex}")))?;
         Ok(Self::Rgb { r, g, b })
     }
 }
