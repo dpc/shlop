@@ -3,19 +3,18 @@
 //! Receives `SessionPromptCreated` from the harness and emits
 //! `AgentResponseUpdated` / `AgentResponseFinished` events.
 
-mod openai;
+pub(crate) mod openai;
+mod responses;
 
 use std::error::Error;
 use std::io::{BufReader, BufWriter, Read, Write};
 
-use tau_config::settings::{self, ModelRegistry, ProviderConfig};
+use tau_config::settings::{self, ModelRegistry};
 use tau_proto::{
     AgentPromptSubmitted, AgentResponseFinished, AgentResponseUpdated, ClientKind, Event,
     EventName, EventReader, EventSelector, EventWriter, LifecycleHello, LifecycleReady,
     LifecycleSubscribe, PROTOCOL_VERSION,
 };
-
-use crate::openai::OpenAiConfig;
 
 /// Runs the agent on stdin/stdout.
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
@@ -64,15 +63,28 @@ where
                 }))?;
                 writer.flush()?;
 
-                // Resolve config from the model specified in the prompt.
-                let config = prompt
+                // Resolve backend from the model specified in the prompt.
+                let backend = prompt
                     .model
                     .as_deref()
-                    .and_then(|m| resolve_model_config(m, &model_registry, &auth_store));
+                    .and_then(|m| resolve_backend(m, &model_registry, &auth_store));
 
-                match config {
-                    Some(cfg) => {
-                        handle_llm(&session_prompt_id, &cfg, &prompt, &mut writer)?;
+                match backend {
+                    Some(BackendConfig::ChatCompletions(cfg)) => {
+                        handle_chat_completions(
+                            &session_prompt_id,
+                            &cfg,
+                            &prompt,
+                            &mut writer,
+                        )?;
+                    }
+                    Some(BackendConfig::Responses(cfg)) => {
+                        handle_responses(
+                            &session_prompt_id,
+                            &cfg,
+                            &prompt,
+                            &mut writer,
+                        )?;
                     }
                     None => {
                         let msg = match &prompt.model {
@@ -97,78 +109,84 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// Model config resolution
+// Backend config resolution
 // ---------------------------------------------------------------------------
 
-/// Resolve a `"provider/model_id"` string into an `OpenAiConfig`.
-///
-/// Checks models.json5 for base_url/api_key first, then falls back to
-/// auth.json for OAuth credentials with default base URLs per auth type.
-fn resolve_model_config(
+enum BackendConfig {
+    ChatCompletions(openai::OpenAiConfig),
+    Responses(responses::ResponsesConfig),
+}
+
+/// Resolve a `"provider/model_id"` string into a backend config.
+fn resolve_backend(
     model: &str,
     models: &ModelRegistry,
     auth_store: &tau_provider::storage::AuthStore,
-) -> Option<OpenAiConfig> {
+) -> Option<BackendConfig> {
     let (provider_name, model_id) = model.split_once('/')?;
     let provider = models.providers.get(provider_name)?;
+    let auth_type = provider.auth.as_deref().unwrap_or(
+        if provider.api_key.is_some() { "api-key" } else { "none" },
+    );
 
-    // Try direct config (base_url + api_key in models.json5).
-    if let Some(config) = resolve_from_provider_config(provider, model_id) {
-        return Some(config);
-    }
-
-    // Try OAuth credentials from auth.json.
-    resolve_from_auth(provider_name, provider, model_id, auth_store)
-}
-
-/// Resolve from models.json5 provider config (has base_url + api_key).
-fn resolve_from_provider_config(provider: &ProviderConfig, model_id: &str) -> Option<OpenAiConfig> {
-    let base_url = provider.base_url.as_ref()?;
-    Some(OpenAiConfig {
-        base_url: base_url.clone(),
-        api_key: provider.api_key.clone().unwrap_or_default(),
-        model_id: model_id.to_owned(),
-    })
-}
-
-/// Resolve from auth.json OAuth credentials.
-fn resolve_from_auth(
-    provider_name: &str,
-    provider: &ProviderConfig,
-    model_id: &str,
-    auth_store: &tau_provider::storage::AuthStore,
-) -> Option<OpenAiConfig> {
-    use tau_provider::storage::Credentials;
-
-    let creds = auth_store.providers.get(provider_name)?;
-    match creds {
-        Credentials::Oauth { access_token, .. } => {
-            let base_url = match provider.auth.as_deref() {
-                Some("openai-codex") => "https://api.openai.com/v1".to_owned(),
-                Some("github-copilot") => {
-                    // Extract proxy-ep from token if possible.
-                    extract_copilot_base_url(access_token)
-                        .unwrap_or_else(|| {
-                            "https://api.individual.githubcopilot.com".to_owned()
-                        })
-                }
+    match auth_type {
+        "openai-codex" => {
+            // Codex subscription → Responses API via chatgpt.com.
+            use tau_provider::storage::Credentials;
+            let creds = auth_store.providers.get(provider_name)?;
+            let (access_token, account_id) = match creds {
+                Credentials::Oauth {
+                    access_token,
+                    account_id,
+                    ..
+                } => (access_token.clone(), account_id.clone()),
                 _ => return None,
             };
-            Some(OpenAiConfig {
+            Some(BackendConfig::Responses(responses::ResponsesConfig {
+                base_url: "https://chatgpt.com/backend-api".to_owned(),
+                api_key: access_token,
+                model_id: model_id.to_owned(),
+                account_id,
+            }))
+        }
+        "github-copilot" => {
+            // Copilot → Chat Completions with token from auth.json.
+            use tau_provider::storage::Credentials;
+            let creds = auth_store.providers.get(provider_name)?;
+            let access_token = match creds {
+                Credentials::Oauth { access_token, .. } => access_token.clone(),
+                _ => return None,
+            };
+            let base_url = extract_copilot_base_url(&access_token)
+                .unwrap_or_else(|| "https://api.individual.githubcopilot.com".to_owned());
+            Some(BackendConfig::ChatCompletions(openai::OpenAiConfig {
                 base_url,
-                api_key: access_token.clone(),
+                api_key: access_token,
                 model_id: model_id.to_owned(),
-            })
+            }))
         }
-        Credentials::ApiKey { api_key, .. } => {
-            // api_key in auth.json but no base_url in models.json5 — use OpenAI default.
-            Some(OpenAiConfig {
-                base_url: "https://api.openai.com/v1".to_owned(),
-                api_key: api_key.clone(),
+        "api-key" | "none" | _ => {
+            // Standard Chat Completions API.
+            let base_url = provider
+                .base_url
+                .clone()
+                .or_else(|| {
+                    // Check auth.json for API key providers without base_url.
+                    use tau_provider::storage::Credentials;
+                    match auth_store.providers.get(provider_name)? {
+                        Credentials::ApiKey { .. } => {
+                            Some("https://api.openai.com/v1".to_owned())
+                        }
+                        _ => None,
+                    }
+                })?;
+            let api_key = provider.api_key.clone().unwrap_or_default();
+            Some(BackendConfig::ChatCompletions(openai::OpenAiConfig {
+                base_url,
+                api_key,
                 model_id: model_id.to_owned(),
-            })
+            }))
         }
-        Credentials::None { .. } => None,
     }
 }
 
@@ -183,12 +201,12 @@ fn extract_copilot_base_url(token: &str) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// LLM backend
+// LLM backends
 // ---------------------------------------------------------------------------
 
-fn handle_llm<W: Write>(
+fn handle_chat_completions<W: Write>(
     session_prompt_id: &str,
-    config: &OpenAiConfig,
+    config: &openai::OpenAiConfig,
     prompt: &tau_proto::SessionPromptCreated,
     writer: &mut EventWriter<BufWriter<W>>,
 ) -> Result<(), Box<dyn Error>> {
@@ -205,28 +223,67 @@ fn handle_llm<W: Write>(
         }));
         let _ = writer.flush();
     }) {
-        Ok(state) => {
-            let text = if state.text.is_empty() {
-                None
-            } else {
-                Some(state.text.clone())
-            };
-            writer.write_event(&Event::AgentResponseFinished(AgentResponseFinished {
-                session_prompt_id: session_prompt_id.into(),
-                text,
-                tool_calls: state.into_tool_calls(),
-            }))?;
-            writer.flush()?;
-        }
-        Err(error) => {
-            writer.write_event(&Event::AgentResponseFinished(AgentResponseFinished {
-                session_prompt_id: session_prompt_id.into(),
-                text: Some(format!("LLM error: {error}")),
-                tool_calls: Vec::new(),
-            }))?;
-            writer.flush()?;
-        }
+        Ok(state) => finish_stream(session_prompt_id, state, writer)?,
+        Err(error) => finish_error(session_prompt_id, error, writer)?,
     }
+    Ok(())
+}
+
+fn handle_responses<W: Write>(
+    session_prompt_id: &str,
+    config: &responses::ResponsesConfig,
+    prompt: &tau_proto::SessionPromptCreated,
+    writer: &mut EventWriter<BufWriter<W>>,
+) -> Result<(), Box<dyn Error>> {
+    let request = openai::PromptPayload {
+        system_prompt: &prompt.system_prompt,
+        messages: &prompt.messages,
+        tools: &prompt.tools,
+    };
+
+    match responses::responses_stream(config, &request, |text_so_far| {
+        let _ = writer.write_event(&Event::AgentResponseUpdated(AgentResponseUpdated {
+            session_prompt_id: session_prompt_id.into(),
+            text: text_so_far.to_owned(),
+        }));
+        let _ = writer.flush();
+    }) {
+        Ok(state) => finish_stream(session_prompt_id, state, writer)?,
+        Err(error) => finish_error(session_prompt_id, error, writer)?,
+    }
+    Ok(())
+}
+
+fn finish_stream<W: Write>(
+    session_prompt_id: &str,
+    state: openai::StreamState,
+    writer: &mut EventWriter<BufWriter<W>>,
+) -> Result<(), Box<dyn Error>> {
+    let text = if state.text.is_empty() {
+        None
+    } else {
+        Some(state.text.clone())
+    };
+    writer.write_event(&Event::AgentResponseFinished(AgentResponseFinished {
+        session_prompt_id: session_prompt_id.into(),
+        text,
+        tool_calls: state.into_tool_calls(),
+    }))?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn finish_error<W: Write>(
+    session_prompt_id: &str,
+    error: openai::OpenAiError,
+    writer: &mut EventWriter<BufWriter<W>>,
+) -> Result<(), Box<dyn Error>> {
+    writer.write_event(&Event::AgentResponseFinished(AgentResponseFinished {
+        session_prompt_id: session_prompt_id.into(),
+        text: Some(format!("LLM error: {error}")),
+        tool_calls: Vec::new(),
+    }))?;
+    writer.flush()?;
     Ok(())
 }
 
@@ -366,6 +423,6 @@ mod tests {
     fn no_config_resolves_none() {
         let models = ModelRegistry::default();
         let auth = tau_provider::storage::AuthStore::default();
-        assert!(resolve_model_config("fake/model", &models, &auth).is_none());
+        assert!(resolve_backend("fake/model", &models, &auth).is_none());
     }
 }

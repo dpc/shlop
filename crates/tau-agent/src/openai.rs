@@ -64,7 +64,7 @@ pub struct ToolCallAccumulator {
 }
 
 impl StreamState {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             text: String::new(),
             tool_calls: Vec::new(),
@@ -404,7 +404,7 @@ struct StreamFunction {
 // CBOR ↔ JSON value conversion
 // ---------------------------------------------------------------------------
 
-fn cbor_to_json(v: &CborValue) -> serde_json::Value {
+pub fn cbor_to_json(v: &CborValue) -> serde_json::Value {
     match v {
         CborValue::Null => serde_json::Value::Null,
         CborValue::Bool(b) => serde_json::Value::Bool(*b),
@@ -432,7 +432,7 @@ fn cbor_to_json(v: &CborValue) -> serde_json::Value {
     }
 }
 
-fn json_to_cbor(v: &serde_json::Value) -> CborValue {
+pub fn json_to_cbor(v: &serde_json::Value) -> CborValue {
     match v {
         serde_json::Value::Null => CborValue::Null,
         serde_json::Value::Bool(b) => CborValue::Bool(*b),
