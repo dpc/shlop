@@ -209,15 +209,12 @@ fn encode_tool_name(name: &str) -> String {
         .collect()
 }
 
-/// Decode tool name from the API: `fs_read` → `fs.read`.
-/// We use `_` as separator in encoded names where the original had `.`.
+/// Decode tool name from the API response.
+///
+/// Tool names no longer contain dots, so this is now an identity function.
+/// Kept as a hook in case future encoding transforms are needed.
 fn decode_tool_name(name: &str) -> String {
-    // Convention: single `_` that was originally `.` in our tool names.
-    // This is lossy but good enough for `fs.read` → `fs_read` → `fs.read`.
-    // We only replace `_` between word segments that match known patterns.
-    name.replacen("fs_", "fs.", 1)
-        .replacen("shell_", "shell.", 1)
-        .replacen("demo_", "demo.", 1)
+    name.to_owned()
 }
 
 // ---------------------------------------------------------------------------

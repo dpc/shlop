@@ -79,7 +79,7 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
         register,
         Event::ToolRegister(ToolRegister {
             tool: tau_proto::ToolSpec {
-                name: "demo.echo".into(),
+                name: "echo".into(),
                 description: Some("Echo test payloads".to_owned()),
                 parameters: None,
             },
@@ -89,7 +89,7 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
     child
         .send(&Event::ToolInvoke(ToolInvoke {
             call_id: "call-1".into(),
-            tool_name: "demo.echo".into(),
+            tool_name: "echo".into(),
             arguments: CborValue::Text("hello".to_owned()),
         }))
         .expect("tool invoke should be sent");
@@ -101,7 +101,7 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
         result,
         Event::ToolResult(tau_proto::ToolResult {
             call_id: "call-1".into(),
-            tool_name: "demo.echo".into(),
+            tool_name: "echo".into(),
             result: CborValue::Text("hello".to_owned()),
         })
     );
@@ -175,9 +175,9 @@ fn disconnect_cleanup_removes_registered_tools_after_child_exit() {
 
     assert_eq!(
         cleanup.removed_tools,
-        vec![tau_proto::ToolName::from("demo.echo")]
+        vec![tau_proto::ToolName::from("echo")]
     );
-    assert!(registry.providers_for("demo.echo").is_empty());
+    assert!(registry.providers_for("echo").is_empty());
     assert_eq!(
         cleanup.lifecycle_event,
         Event::ExtensionExited(tau_proto::ExtensionExited {
@@ -224,7 +224,7 @@ fn restarted_child_can_reregister_after_disconnect_cleanup() {
             panic!("expected tool register event");
         };
         registry.register(connection_id, register.tool);
-        assert_eq!(registry.providers_for("demo.echo").len(), 1);
+        assert_eq!(registry.providers_for("echo").len(), 1);
 
         child
             .send(&Event::LifecycleDisconnect(LifecycleDisconnect {
@@ -237,8 +237,8 @@ fn restarted_child_can_reregister_after_disconnect_cleanup() {
         let cleanup = child.cleanup_disconnect(0.into(), None, &mut registry, connection_id, &exit);
         assert_eq!(
             cleanup.removed_tools,
-            vec![tau_proto::ToolName::from("demo.echo")]
+            vec![tau_proto::ToolName::from("echo")]
         );
-        assert!(registry.providers_for("demo.echo").is_empty());
+        assert!(registry.providers_for("echo").is_empty());
     }
 }

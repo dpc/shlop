@@ -5,7 +5,6 @@ members = [
   "crates/tau-config",
   "crates/tau-core",
   "crates/tau-ext-fs",
-  "crates/tau-ext-shell",
   "crates/tau-harness",
   "crates/tau-proto",
   "crates/tau-provider",
@@ -45,7 +44,6 @@ tau-cli-term-raw = { path = "crates/tau-cli-term-raw" }
 tau-config = { path = "crates/tau-config" }
 tau-core = { path = "crates/tau-core" }
 tau-ext-fs = { path = "crates/tau-ext-fs" }
-tau-ext-shell = { path = "crates/tau-ext-shell" }
 tau-harness = { path = "crates/tau-harness" }
 tau-proto = { path = "crates/tau-proto" }
 tau-provider = { path = "crates/tau-provider" }

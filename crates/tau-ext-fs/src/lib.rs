@@ -1,13 +1,53 @@
 //! Filesystem and shell tool extension.
 //!
-//! Provides `fs.read`, `fs.write`, `shell.exec`, and the deterministic
-//! `demo.echo` tool used by the first vertical slice.
+//! Provides `read`, `write`, and `bash` tools.
+//!
+//! The `echo` tool is available for testing via `include_echo: true`.
 
 use std::error::Error;
 use std::fs;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::mpsc;
+use std::sync::{Arc, Condvar, Mutex};
+
+// ---------------------------------------------------------------------------
+// Simple counting semaphore
+// ---------------------------------------------------------------------------
+
+struct Semaphore {
+    state: Mutex<usize>,
+    cond: Condvar,
+}
+
+struct SemaphoreGuard<'a>(&'a Semaphore);
+
+impl Semaphore {
+    fn new(permits: usize) -> Self {
+        Self {
+            state: Mutex::new(permits),
+            cond: Condvar::new(),
+        }
+    }
+
+    fn acquire(&self) -> SemaphoreGuard<'_> {
+        let mut count = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        while *count == 0 {
+            count = self.cond.wait(count).unwrap_or_else(|e| e.into_inner());
+        }
+        *count -= 1;
+        SemaphoreGuard(self)
+    }
+}
+
+impl Drop for SemaphoreGuard<'_> {
+    fn drop(&mut self) {
+        let mut count = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        *count += 1;
+        self.0.cond.notify_one();
+    }
+}
 
 use tau_proto::{
     CborValue, ClientKind, Event, EventReader, EventSelector, EventWriter, LifecycleHello,
@@ -15,21 +55,24 @@ use tau_proto::{
     ToolResult, ToolSpec,
 };
 
-pub const DEMO_ECHO_TOOL_NAME: &str = "demo.echo";
-pub const FS_READ_TOOL_NAME: &str = "fs.read";
-pub const FS_WRITE_TOOL_NAME: &str = "fs.write";
-pub const SHELL_EXEC_TOOL_NAME: &str = "shell.exec";
+pub const ECHO_TOOL_NAME: &str = "echo";
+pub const READ_TOOL_NAME: &str = "read";
+pub const WRITE_TOOL_NAME: &str = "write";
+pub const EDIT_TOOL_NAME: &str = "edit";
+pub const SHELL_TOOL_NAME: &str = "shell";
 
-/// Runs the extension on stdin/stdout.
+/// Runs the extension on stdin/stdout (production, no echo).
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
-    run(std::io::stdin(), std::io::stdout())
+    run(std::io::stdin(), std::io::stdout(), false)
 }
 
 /// Runs the extension over arbitrary reader/writer streams.
-pub fn run<R, W>(reader: R, writer: W) -> Result<(), Box<dyn Error>>
+///
+/// When `include_echo` is true, registers the `echo` tool (for testing).
+pub fn run<R, W>(reader: R, writer: W, include_echo: bool) -> Result<(), Box<dyn Error>>
 where
     R: Read,
-    W: Write,
+    W: Write + Send + 'static,
 {
     let mut reader = EventReader::new(BufReader::new(reader));
     let mut writer = EventWriter::new(BufWriter::new(writer));
@@ -45,14 +88,18 @@ where
             EventSelector::Exact(tau_proto::EventName::LifecycleDisconnect),
         ],
     }))?;
+    if include_echo {
+        writer.write_event(&Event::ToolRegister(ToolRegister {
+            tool: ToolSpec {
+                name: ECHO_TOOL_NAME.into(),
+                description: Some("Echo the provided payload unchanged".to_owned()),
+                parameters: None,
+            },
+        }))?;
+    }
     for tool in [
         ToolSpec {
-            name: DEMO_ECHO_TOOL_NAME.into(),
-            description: Some("Echo the provided payload unchanged".to_owned()),
-            parameters: None,
-        },
-        ToolSpec {
-            name: FS_READ_TOOL_NAME.into(),
+            name: READ_TOOL_NAME.into(),
             description: Some(
                 "Read the contents of a file. Returns the file path and text content. \
                  Use this instead of shell commands like cat or head."
@@ -70,7 +117,7 @@ where
             })),
         },
         ToolSpec {
-            name: FS_WRITE_TOOL_NAME.into(),
+            name: WRITE_TOOL_NAME.into(),
             description: Some(
                 "Write content to a file, creating it if it does not exist. \
                  Returns the path and bytes written."
@@ -92,11 +139,48 @@ where
             })),
         },
         ToolSpec {
-            name: SHELL_EXEC_TOOL_NAME.into(),
+            name: EDIT_TOOL_NAME.into(),
             description: Some(
-                "Execute a bash command in the current working directory. \
-                 Returns stdout, stderr, and exit status. \
-                 Use this for running builds, tests, git commands, and other shell operations."
+                "Edit a file using exact text replacement. Each edit's oldText must match \
+                 a unique, non-overlapping region of the original file. All edits are matched \
+                 against the original content, not incrementally."
+                    .to_owned(),
+            ),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the file to edit (relative or absolute)"
+                    },
+                    "edits": {
+                        "type": "array",
+                        "description": "One or more targeted replacements matched against the original file",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "oldText": {
+                                    "type": "string",
+                                    "description": "Exact text to find. Must be unique in the file."
+                                },
+                                "newText": {
+                                    "type": "string",
+                                    "description": "Replacement text."
+                                }
+                            },
+                            "required": ["oldText", "newText"]
+                        }
+                    }
+                },
+                "required": ["path", "edits"]
+            })),
+        },
+        ToolSpec {
+            name: SHELL_TOOL_NAME.into(),
+            description: Some(
+                "Execute a shell command via `sh -c`. Returns stdout, stderr, and \
+                 exit status. Use this for running builds, tests, git commands, and \
+                 other shell operations."
                     .to_owned(),
             ),
             parameters: Some(serde_json::json!({
@@ -105,6 +189,10 @@ where
                     "command": {
                         "type": "string",
                         "description": "The shell command to execute"
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "Timeout in seconds. The command is killed if it exceeds this. Default: 120"
                     }
                 },
                 "required": ["command"]
@@ -118,102 +206,156 @@ where
     }))?;
     writer.flush()?;
 
+    // Response channel: worker threads send events here, writer thread
+    // drains them onto the wire.
+    let (tx, rx) = mpsc::channel::<Event>();
+    let sem = Arc::new(Semaphore::new(16));
+
+    // Writer thread: drains response events and writes them to the wire.
+    let writer_handle = std::thread::spawn(move || -> Result<(), Box<dyn Error + Send>> {
+        for event in rx {
+            writer
+                .write_event(&event)
+                .map_err(|e| -> Box<dyn Error + Send> { Box::new(e) })?;
+            writer
+                .flush()
+                .map_err(|e| -> Box<dyn Error + Send> { Box::new(e) })?;
+        }
+        Ok(())
+    });
+
+    // Reader loop: dispatch each tool invocation to a worker thread.
     loop {
         let Some(event) = reader.read_event()? else {
-            return Ok(());
+            break;
         };
         match event {
-            Event::ToolInvoke(invoke) if invoke.tool_name == DEMO_ECHO_TOOL_NAME => {
-                writer.write_event(&Event::ToolResult(ToolResult {
-                    call_id: invoke.call_id,
-                    tool_name: invoke.tool_name,
-                    result: invoke.arguments,
-                }))?;
-                writer.flush()?;
-            }
-            Event::ToolInvoke(invoke) if invoke.tool_name == FS_READ_TOOL_NAME => {
-                match read_file(&invoke.arguments) {
-                    Ok(result) => {
-                        writer.write_event(&Event::ToolResult(ToolResult {
-                            call_id: invoke.call_id,
-                            tool_name: invoke.tool_name,
-                            result,
-                        }))?;
-                    }
-                    Err(error) => {
-                        writer.write_event(&Event::ToolError(ToolError {
-                            call_id: invoke.call_id,
-                            tool_name: invoke.tool_name,
-                            message: error,
-                            details: None,
-                        }))?;
-                    }
-                }
-                writer.flush()?;
-            }
-            Event::ToolInvoke(invoke) if invoke.tool_name == FS_WRITE_TOOL_NAME => {
-                match write_file(&invoke.arguments) {
-                    Ok(result) => {
-                        writer.write_event(&Event::ToolResult(ToolResult {
-                            call_id: invoke.call_id,
-                            tool_name: invoke.tool_name,
-                            result,
-                        }))?;
-                    }
-                    Err(error) => {
-                        writer.write_event(&Event::ToolError(ToolError {
-                            call_id: invoke.call_id,
-                            tool_name: invoke.tool_name,
-                            message: error,
-                            details: None,
-                        }))?;
-                    }
-                }
-                writer.flush()?;
-            }
-            Event::ToolInvoke(invoke) if invoke.tool_name == SHELL_EXEC_TOOL_NAME => {
-                writer.write_event(&Event::ToolProgress(ToolProgress {
-                    call_id: invoke.call_id.clone(),
-                    tool_name: invoke.tool_name.clone(),
-                    message: Some("running shell command".to_owned()),
-                    progress: None,
-                }))?;
-                match run_command(&invoke.arguments) {
-                    Ok(result) => {
-                        writer.write_event(&Event::ToolResult(ToolResult {
-                            call_id: invoke.call_id,
-                            tool_name: invoke.tool_name,
-                            result,
-                        }))?;
-                    }
-                    Err((message, details)) => {
-                        writer.write_event(&Event::ToolError(ToolError {
-                            call_id: invoke.call_id,
-                            tool_name: invoke.tool_name,
-                            message,
-                            details,
-                        }))?;
-                    }
-                }
-                writer.flush()?;
-            }
             Event::ToolInvoke(invoke) => {
-                writer.write_event(&Event::ToolError(ToolError {
-                    call_id: invoke.call_id,
-                    tool_name: invoke.tool_name,
-                    message: "unknown tool".to_owned(),
-                    details: None,
-                }))?;
-                writer.flush()?;
+                let tx = tx.clone();
+                let sem = Arc::clone(&sem);
+                let include_echo = include_echo;
+                std::thread::spawn(move || {
+                    let _permit = sem.acquire();
+                    dispatch_tool_invoke(invoke, include_echo, &tx);
+                });
             }
-            Event::LifecycleDisconnect(_) => return Ok(()),
+            Event::LifecycleDisconnect(_) => break,
             _ => {}
         }
     }
+
+    // Drop the sender so the writer thread exits.
+    drop(tx);
+    writer_handle
+        .join()
+        .map_err(|_| "writer thread panicked")?
+        .map_err(|e| -> Box<dyn Error> { e })?;
+    Ok(())
+}
+
+/// Execute a single tool invocation and send the response event(s).
+fn dispatch_tool_invoke(
+    invoke: tau_proto::ToolInvoke,
+    include_echo: bool,
+    tx: &mpsc::Sender<Event>,
+) {
+    let events = execute_tool(invoke, include_echo);
+    for event in events {
+        let _ = tx.send(event);
+    }
+}
+
+/// Execute a tool and return the response event(s).
+fn execute_tool(invoke: tau_proto::ToolInvoke, include_echo: bool) -> Vec<Event> {
+    if include_echo && invoke.tool_name == ECHO_TOOL_NAME {
+        return vec![Event::ToolResult(ToolResult {
+            call_id: invoke.call_id,
+            tool_name: invoke.tool_name,
+            result: invoke.arguments,
+        })];
+    }
+
+    if invoke.tool_name == READ_TOOL_NAME {
+        return match read_file(&invoke.arguments) {
+            Ok(result) => vec![Event::ToolResult(ToolResult {
+                call_id: invoke.call_id,
+                tool_name: invoke.tool_name,
+                result,
+            })],
+            Err(error) => vec![Event::ToolError(ToolError {
+                call_id: invoke.call_id,
+                tool_name: invoke.tool_name,
+                message: error,
+                details: None,
+            })],
+        };
+    }
+
+    if invoke.tool_name == WRITE_TOOL_NAME {
+        return match write_file(&invoke.arguments) {
+            Ok(result) => vec![Event::ToolResult(ToolResult {
+                call_id: invoke.call_id,
+                tool_name: invoke.tool_name,
+                result,
+            })],
+            Err(error) => vec![Event::ToolError(ToolError {
+                call_id: invoke.call_id,
+                tool_name: invoke.tool_name,
+                message: error,
+                details: None,
+            })],
+        };
+    }
+
+    if invoke.tool_name == EDIT_TOOL_NAME {
+        return match edit_file(&invoke.arguments) {
+            Ok(result) => vec![Event::ToolResult(ToolResult {
+                call_id: invoke.call_id,
+                tool_name: invoke.tool_name,
+                result,
+            })],
+            Err(error) => vec![Event::ToolError(ToolError {
+                call_id: invoke.call_id,
+                tool_name: invoke.tool_name,
+                message: error,
+                details: None,
+            })],
+        };
+    }
+
+    if invoke.tool_name == SHELL_TOOL_NAME {
+        let mut events = vec![Event::ToolProgress(ToolProgress {
+            call_id: invoke.call_id.clone(),
+            tool_name: invoke.tool_name.clone(),
+            message: Some("running shell command".to_owned()),
+            progress: None,
+        })];
+        match run_command(&invoke.arguments) {
+            Ok(result) => events.push(Event::ToolResult(ToolResult {
+                call_id: invoke.call_id,
+                tool_name: invoke.tool_name,
+                result,
+            })),
+            Err((message, details)) => events.push(Event::ToolError(ToolError {
+                call_id: invoke.call_id,
+                tool_name: invoke.tool_name,
+                message,
+                details,
+            })),
+        }
+        return events;
+    }
+
+    vec![Event::ToolError(ToolError {
+        call_id: invoke.call_id,
+        tool_name: invoke.tool_name,
+        message: "unknown tool".to_owned(),
+        details: None,
+    })]
 }
 
 // ---------------------------------------------------------------------------
-// fs.read
+// read
 // ---------------------------------------------------------------------------
 
 fn read_file(arguments: &CborValue) -> Result<CborValue, String> {
@@ -234,7 +376,7 @@ fn read_file(arguments: &CborValue) -> Result<CborValue, String> {
 }
 
 // ---------------------------------------------------------------------------
-// fs.write
+// write
 // ---------------------------------------------------------------------------
 
 fn write_file(arguments: &CborValue) -> Result<CborValue, String> {
@@ -270,20 +412,120 @@ fn write_file(arguments: &CborValue) -> Result<CborValue, String> {
 }
 
 // ---------------------------------------------------------------------------
-// shell.exec
+// edit
 // ---------------------------------------------------------------------------
+
+fn edit_file(arguments: &CborValue) -> Result<CborValue, String> {
+    let path = argument_text(arguments, "path")?;
+    let path_buf = PathBuf::from(&path);
+
+    let original = fs::read_to_string(&path_buf)
+        .map_err(|e| format!("failed to read {}: {e}", path_buf.display()))?;
+
+    let edits = argument_array(arguments, "edits")?;
+    if edits.is_empty() {
+        return Err("edits array must not be empty".to_owned());
+    }
+
+    // Collect all (oldText, newText) pairs and validate against the original.
+    let mut replacements: Vec<(usize, usize, &str)> = Vec::new();
+    for edit in edits {
+        let old_text = cbor_map_text(edit, "oldText")
+            .ok_or_else(|| "each edit must have a string oldText".to_owned())?;
+        let new_text = cbor_map_text(edit, "newText")
+            .ok_or_else(|| "each edit must have a string newText".to_owned())?;
+
+        let Some(start) = original.find(old_text) else {
+            return Err(format!(
+                "oldText not found in {}: {:?}",
+                path_buf.display(),
+                truncate(old_text, 80)
+            ));
+        };
+        let end = start + old_text.len();
+
+        // Check uniqueness: there should be no second match.
+        if original[start + 1..].contains(old_text) {
+            return Err(format!(
+                "oldText matches multiple locations in {}: {:?}",
+                path_buf.display(),
+                truncate(old_text, 80)
+            ));
+        }
+
+        replacements.push((start, end, new_text));
+    }
+
+    // Sort by start position (descending) so we can apply from end to start
+    // without invalidating earlier offsets.
+    replacements.sort_by(|a, b| b.0.cmp(&a.0));
+
+    // Check for overlapping ranges.
+    for pair in replacements.windows(2) {
+        // After descending sort: pair[0].start >= pair[1].start.
+        // Overlap if pair[1].end > pair[0].start (pair[1] is earlier in file).
+        if pair[1].1 > pair[0].0 {
+            return Err("edits overlap — merge nearby changes into one edit".to_owned());
+        }
+    }
+
+    // Apply replacements from end to start.
+    let mut result = original.clone();
+    for (start, end, new_text) in &replacements {
+        result.replace_range(*start..*end, new_text);
+    }
+
+    fs::write(&path_buf, &result)
+        .map_err(|e| format!("failed to write {}: {e}", path_buf.display()))?;
+
+    Ok(CborValue::Map(vec![
+        (
+            CborValue::Text("path".to_owned()),
+            CborValue::Text(path_buf.display().to_string()),
+        ),
+        (
+            CborValue::Text("edits_applied".to_owned()),
+            CborValue::Integer((edits.len() as i64).into()),
+        ),
+    ]))
+}
+
+fn truncate(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+// ---------------------------------------------------------------------------
+// shell
+// ---------------------------------------------------------------------------
+
+const DEFAULT_TIMEOUT_SECS: u64 = 120;
 
 fn run_command(arguments: &CborValue) -> Result<CborValue, (String, Option<CborValue>)> {
     let command = argument_text(arguments, "command").map_err(|message| (message, None))?;
     let cwd = optional_argument_text(arguments, "cwd");
+    let timeout_secs = optional_argument_int(arguments, "timeout")
+        .map(|v| v.max(1) as u64)
+        .unwrap_or(DEFAULT_TIMEOUT_SECS);
+    let timeout = std::time::Duration::from_secs(timeout_secs);
 
-    let mut child = Command::new("sh");
-    child.arg("-lc").arg(&command);
+    let mut child_cmd = Command::new("sh");
+    child_cmd
+        .arg("-c")
+        .arg(&command)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
     if let Some(cwd) = &cwd {
-        child.current_dir(cwd);
+        child_cmd.current_dir(cwd);
     }
 
-    let output = child.output().map_err(|error| {
+    let mut child = child_cmd.spawn().map_err(|error| {
         (
             format!("failed to start shell command: {error}"),
             Some(command_details_value(
@@ -296,24 +538,101 @@ fn run_command(arguments: &CborValue) -> Result<CborValue, (String, Option<CborV
         )
     })?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-    let status_code = output.status.code();
-    let result = command_details_value(command.clone(), cwd.clone(), status_code, stdout, stderr);
+    let wait = match wait_with_timeout(&mut child, timeout) {
+        Some(wait) => wait,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err((
+                format!("command timed out after {timeout_secs}s"),
+                Some(command_details_value(
+                    command.clone(),
+                    cwd.clone(),
+                    None,
+                    String::new(),
+                    String::new(),
+                )),
+            ));
+        }
+    };
 
-    if output.status.success() {
+    let status_code = wait.status.code();
+    let success = wait.status.success();
+    let result = command_details_value(
+        command.clone(),
+        cwd.clone(),
+        status_code,
+        wait.stdout,
+        wait.stderr,
+    );
+
+    if success {
         Ok(result)
     } else {
         Err((
             format!(
                 "command exited with status {}",
                 status_code
-                    .map(|value| value.to_string())
+                    .map(|v| v.to_string())
                     .unwrap_or_else(|| "unknown".to_owned())
             ),
             Some(result),
         ))
     }
+}
+
+/// Wait for a child process with a timeout. Returns `None` if timed out.
+///
+/// Pipes are read on dedicated threads to avoid deadlocks. When the child
+/// exits its pipes close, the reader threads complete, and we get our
+/// signal — no polling.
+fn wait_with_timeout(
+    child: &mut std::process::Child,
+    timeout: std::time::Duration,
+) -> Option<WaitResult> {
+    // Take the pipes so we can move them into reader threads.
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+
+    // Read stdout/stderr on dedicated threads so a full pipe buffer
+    // can't prevent the child from exiting.
+    let stdout_handle = std::thread::spawn(move || read_pipe(stdout_pipe));
+    let stderr_handle = std::thread::spawn(move || read_pipe(stderr_pipe));
+
+    // Collector thread: joins both readers (which complete when the child
+    // exits and closes its pipes), then sends the output on a channel.
+    let (tx, rx) = mpsc::channel::<(String, String)>();
+    std::thread::spawn(move || {
+        let stdout = stdout_handle.join().unwrap_or_default();
+        let stderr = stderr_handle.join().unwrap_or_default();
+        let _ = tx.send((stdout, stderr));
+    });
+
+    match rx.recv_timeout(timeout) {
+        Ok((stdout, stderr)) => {
+            // Pipes closed → child exited. Reap it.
+            let status = child.wait().expect("child already exited");
+            Some(WaitResult { status, stdout, stderr })
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => None,
+        Err(mpsc::RecvTimeoutError::Disconnected) => None,
+    }
+}
+
+struct WaitResult {
+    status: std::process::ExitStatus,
+    stdout: String,
+    stderr: String,
+}
+
+
+fn read_pipe(pipe: Option<impl std::io::Read>) -> String {
+    let Some(mut pipe) = pipe else {
+        return String::new();
+    };
+    let mut buf = String::new();
+    let _ = pipe.read_to_string(&mut buf);
+    buf
 }
 
 fn command_details_value(
@@ -358,18 +677,46 @@ fn argument_text(arguments: &CborValue, key: &str) -> Result<String, String> {
 }
 
 fn optional_argument_text(arguments: &CborValue, key: &str) -> Option<String> {
+    cbor_map_text(arguments, key).map(str::to_owned)
+}
+
+fn optional_argument_int(arguments: &CborValue, key: &str) -> Option<i64> {
+    match arguments {
+        CborValue::Map(entries) => entries.iter().find_map(|(k, v)| match (k, v) {
+            (CborValue::Text(k), CborValue::Integer(n)) if k == key => {
+                i128::from(*n).try_into().ok()
+            }
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+/// Extract a string value from a CBOR map by key.
+fn cbor_map_text<'a>(map: &'a CborValue, key: &str) -> Option<&'a str> {
+    match map {
+        CborValue::Map(entries) => entries.iter().find_map(|(k, v)| match (k, v) {
+            (CborValue::Text(k), CborValue::Text(v)) if k == key => Some(v.as_str()),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+/// Extract an array value from a CBOR map by key.
+fn argument_array<'a>(arguments: &'a CborValue, key: &str) -> Result<&'a [CborValue], String> {
     match arguments {
         CborValue::Map(entries) => {
-            entries
-                .iter()
-                .find_map(|(entry_key, entry_value)| match (entry_key, entry_value) {
-                    (CborValue::Text(entry_key), CborValue::Text(value)) if entry_key == key => {
-                        Some(value.clone())
+            for (k, v) in entries {
+                if let (CborValue::Text(k), CborValue::Array(arr)) = (k, v) {
+                    if k == key {
+                        return Ok(arr);
                     }
-                    _ => None,
-                })
+                }
+            }
+            Err(format!("missing array argument: {key}"))
         }
-        _ => None,
+        _ => Err(format!("missing array argument: {key}")),
     }
 }
 
@@ -392,7 +739,7 @@ mod tests {
             .try_clone()
             .expect("runtime reader clone should succeed");
         thread::spawn(move || {
-            run(reader_stream, runtime_stream).expect("extension should run");
+            run(reader_stream, runtime_stream, true).expect("extension should run");
         });
         (
             EventReader::new(BufReader::new(
@@ -409,6 +756,7 @@ mod tests {
         for expected in [
             EventName::LifecycleHello,
             EventName::LifecycleSubscribe,
+            EventName::ToolRegister,
             EventName::ToolRegister,
             EventName::ToolRegister,
             EventName::ToolRegister,
@@ -435,7 +783,7 @@ mod tests {
         writer
             .write_event(&Event::ToolInvoke(ToolInvoke {
                 call_id: "call-1".into(),
-                tool_name: FS_READ_TOOL_NAME.into(),
+                tool_name: READ_TOOL_NAME.into(),
                 arguments: CborValue::Map(vec![(
                     CborValue::Text("path".to_owned()),
                     CborValue::Text(file_path.display().to_string()),
@@ -448,7 +796,7 @@ mod tests {
         let Event::ToolResult(result) = result else {
             panic!("expected tool result");
         };
-        assert_eq!(result.tool_name, FS_READ_TOOL_NAME);
+        assert_eq!(result.tool_name, READ_TOOL_NAME);
         assert_eq!(
             optional_argument_text(&result.result, "content"),
             Some("hello from file".to_owned())
@@ -470,7 +818,7 @@ mod tests {
         writer
             .write_event(&Event::ToolInvoke(ToolInvoke {
                 call_id: "call-1".into(),
-                tool_name: FS_READ_TOOL_NAME.into(),
+                tool_name: READ_TOOL_NAME.into(),
                 arguments: CborValue::Map(vec![(
                     CborValue::Text("path".to_owned()),
                     CborValue::Text("/definitely/missing/file.txt".to_owned()),
@@ -504,7 +852,7 @@ mod tests {
         writer
             .write_event(&Event::ToolInvoke(ToolInvoke {
                 call_id: "call-1".into(),
-                tool_name: FS_WRITE_TOOL_NAME.into(),
+                tool_name: WRITE_TOOL_NAME.into(),
                 arguments: CborValue::Map(vec![
                     (
                         CborValue::Text("path".to_owned()),
@@ -523,7 +871,7 @@ mod tests {
         let Event::ToolResult(result) = result else {
             panic!("expected tool result");
         };
-        assert_eq!(result.tool_name, FS_WRITE_TOOL_NAME);
+        assert_eq!(result.tool_name, WRITE_TOOL_NAME);
         assert_eq!(
             fs::read_to_string(&file_path).expect("read back"),
             "written content"
@@ -548,7 +896,7 @@ mod tests {
         writer
             .write_event(&Event::ToolInvoke(ToolInvoke {
                 call_id: "call-1".into(),
-                tool_name: FS_WRITE_TOOL_NAME.into(),
+                tool_name: WRITE_TOOL_NAME.into(),
                 arguments: CborValue::Map(vec![
                     (
                         CborValue::Text("path".to_owned()),
@@ -586,7 +934,7 @@ mod tests {
         writer
             .write_event(&Event::ToolInvoke(ToolInvoke {
                 call_id: "call-1".into(),
-                tool_name: SHELL_EXEC_TOOL_NAME.into(),
+                tool_name: SHELL_TOOL_NAME.into(),
                 arguments: CborValue::Map(vec![(
                     CborValue::Text("command".to_owned()),
                     CborValue::Text("printf hello".to_owned()),
@@ -602,7 +950,7 @@ mod tests {
         let Event::ToolResult(result) = result else {
             panic!("expected tool result");
         };
-        assert_eq!(result.tool_name, SHELL_EXEC_TOOL_NAME);
+        assert_eq!(result.tool_name, SHELL_TOOL_NAME);
         assert_eq!(
             optional_argument_text(&result.result, "stdout"),
             Some("hello".to_owned())
@@ -624,7 +972,7 @@ mod tests {
         writer
             .write_event(&Event::ToolInvoke(ToolInvoke {
                 call_id: "call-1".into(),
-                tool_name: SHELL_EXEC_TOOL_NAME.into(),
+                tool_name: SHELL_TOOL_NAME.into(),
                 arguments: CborValue::Map(vec![(
                     CborValue::Text("command".to_owned()),
                     CborValue::Text("exit 7".to_owned()),
@@ -639,7 +987,7 @@ mod tests {
         let Event::ToolError(error) = error else {
             panic!("expected tool error");
         };
-        assert_eq!(error.tool_name, SHELL_EXEC_TOOL_NAME);
+        assert_eq!(error.tool_name, SHELL_TOOL_NAME);
         assert!(error.message.contains("command exited with status 7"));
         assert!(error.details.is_some());
 

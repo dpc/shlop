@@ -80,8 +80,7 @@ macro_rules! string_newtype {
 
 string_newtype!(/// Session identifier.
     SessionId);
-string_newtype!(/// Tool name.
-    ToolName);
+// ToolName is defined manually below with validation.
 string_newtype!(/// Tool call identifier.
     ToolCallId);
 string_newtype!(/// Connection identifier.
@@ -94,6 +93,124 @@ string_newtype!(/// Qualified model identifier (e.g. `"openai/gpt-4o"`).
     ModelId);
 string_newtype!(/// Provider name (e.g. `"openai"`, `"anthropic"`).
     ProviderName);
+
+// ---------------------------------------------------------------------------
+// ToolName (validated newtype)
+// ---------------------------------------------------------------------------
+
+/// Tool name: must be non-empty and contain only ASCII alphanumerics or
+/// underscores (`[a-zA-Z0-9_]+`).
+#[derive(Clone, Debug, Eq, PartialEq, Hash, serde::Serialize)]
+#[serde(transparent)]
+pub struct ToolName(String);
+
+impl ToolName {
+    /// Create a new `ToolName`, panicking if the name is invalid.
+    pub fn new(s: impl Into<String>) -> Self {
+        let s = s.into();
+        assert!(Self::is_valid(&s), "invalid tool name: {s:?}");
+        Self(s)
+    }
+
+    /// Try to create a `ToolName`, returning `None` if invalid.
+    pub fn try_new(s: impl Into<String>) -> Option<Self> {
+        let s = s.into();
+        Self::is_valid(&s).then(|| Self(s))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+    pub fn into_string(self) -> String {
+        self.0
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn is_valid(s: &str) -> bool {
+        !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    }
+}
+
+impl Default for ToolName {
+    fn default() -> Self {
+        // Default is used by serde/ciborium for missing fields; an empty
+        // ToolName will fail validation at the boundary where it matters.
+        Self(String::new())
+    }
+}
+
+impl std::ops::Deref for ToolName {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ToolName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<String> for ToolName {
+    fn from(s: String) -> Self {
+        Self::new(s)
+    }
+}
+
+impl From<&str> for ToolName {
+    fn from(s: &str) -> Self {
+        Self::new(s)
+    }
+}
+
+impl PartialEq<str> for ToolName {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<&str> for ToolName {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialEq<String> for ToolName {
+    fn eq(&self, other: &String) -> bool {
+        self.0 == *other
+    }
+}
+
+impl std::borrow::Borrow<str> for ToolName {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for ToolName {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ToolName {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        if Self::is_valid(&s) {
+            Ok(Self(s))
+        } else {
+            Err(serde::de::Error::custom(format!(
+                "invalid tool name: {s:?}"
+            )))
+        }
+    }
+}
 
 /// Unique identifier for one extension instance (monotonic counter).
 #[derive(
@@ -263,35 +380,35 @@ mod tests {
             }),
             Event::ToolRegister(ToolRegister {
                 tool: ToolSpec {
-                    name: "demo.echo".into(),
+                    name: "echo".into(),
                     description: Some("Echo a payload".to_owned()),
                     parameters: None,
                 },
             }),
             Event::ToolRequest(ToolRequest {
                 call_id: "call-1".into(),
-                tool_name: "demo.echo".into(),
+                tool_name: "echo".into(),
                 arguments: CborValue::Text("hello".to_owned()),
             }),
             Event::ToolInvoke(ToolInvoke {
                 call_id: "call-1".into(),
-                tool_name: "demo.echo".into(),
+                tool_name: "echo".into(),
                 arguments: CborValue::Text("hello".to_owned()),
             }),
             Event::ToolResult(ToolResult {
                 call_id: "call-1".into(),
-                tool_name: "demo.echo".into(),
+                tool_name: "echo".into(),
                 result: CborValue::Text("hello".to_owned()),
             }),
             Event::ToolError(ToolError {
                 call_id: "call-1".into(),
-                tool_name: "missing.tool".into(),
+                tool_name: "missing_tool".into(),
                 message: "no live provider".to_owned(),
                 details: None,
             }),
             Event::ToolProgress(ToolProgress {
                 call_id: "call-1".into(),
-                tool_name: "shell.exec".into(),
+                tool_name: "shell".into(),
                 message: Some("running".to_owned()),
                 progress: Some(ProgressUpdate {
                     current: Some(1),
@@ -313,7 +430,7 @@ mod tests {
                     }],
                 }],
                 tools: vec![ToolDefinition {
-                    name: "fs.read".to_owned(),
+                    name: "read".to_owned(),
                     description: Some("Read a file".to_owned()),
                     parameters: None,
                 }],
@@ -393,5 +510,28 @@ mod tests {
         }
 
         assert_eq!(decoded, events);
+    }
+
+    #[test]
+    fn tool_name_accepts_valid_names() {
+        assert!(ToolName::try_new("read").is_some());
+        assert!(ToolName::try_new("shell").is_some());
+        assert!(ToolName::try_new("my_tool_2").is_some());
+        assert!(ToolName::try_new("Echo").is_some());
+    }
+
+    #[test]
+    fn tool_name_rejects_invalid_names() {
+        assert!(ToolName::try_new("").is_none());
+        assert!(ToolName::try_new("fs.read").is_none());
+        assert!(ToolName::try_new("my tool").is_none());
+        assert!(ToolName::try_new("a-b").is_none());
+        assert!(ToolName::try_new("tool/name").is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid tool name")]
+    fn tool_name_new_panics_on_invalid() {
+        let _ = ToolName::new("bad.name");
     }
 }

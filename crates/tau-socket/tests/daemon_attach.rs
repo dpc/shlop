@@ -23,7 +23,7 @@ fn socket_transport_supports_later_attached_end_to_end_clients() {
         .expect("second client message should succeed");
 
     assert!(!first.is_empty(), "response should not be empty");
-    assert!(!second.is_empty(), "fs.read response should not be empty");
+    assert!(!second.is_empty(), "read response should not be empty");
     daemon.join().expect("daemon should exit cleanly");
 
     let store = runtime

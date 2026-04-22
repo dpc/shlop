@@ -317,17 +317,21 @@ fn cbor_int_field(value: &CborValue, key: &str) -> Option<i128> {
 /// Formats a tool call for display while it is running.
 fn format_tool_call(tool_name: &str, arguments: &CborValue) -> String {
     match tool_name {
-        "shell.exec" => {
+        "shell" => {
             let cmd = cbor_text_field(arguments, "command").unwrap_or_default();
             format!("shell {cmd}")
         }
-        "fs.read" => {
+        "read" => {
             let path = cbor_text_field(arguments, "path").unwrap_or_default();
             format!("read {path}")
         }
-        "fs.write" => {
+        "write" => {
             let path = cbor_text_field(arguments, "path").unwrap_or_default();
             format!("write {path}")
+        }
+        "edit" => {
+            let path = cbor_text_field(arguments, "path").unwrap_or_default();
+            format!("edit {path}")
         }
         _ => tool_name.to_owned(),
     }
@@ -350,8 +354,8 @@ fn format_tool_completion(
     error_message: Option<&str>,
 ) -> ToolCompletionDisplay {
     match tool_name {
-        "shell.exec" => format_shell_completion(details),
-        "fs.read" => {
+        "shell" => format_shell_completion(details),
+        "read" => {
             let path = cbor_text_field(details, "path");
             let label = if let Some(msg) = error_message {
                 match path {
@@ -370,7 +374,7 @@ fn format_tool_completion(
                 output: None,
             }
         }
-        "fs.write" => {
+        "write" => {
             let path = cbor_text_field(details, "path");
             let label = if let Some(msg) = error_message {
                 match path {
@@ -381,6 +385,23 @@ fn format_tool_completion(
                 let path = path.unwrap_or_default();
                 let bytes = cbor_int_field(details, "bytes_written").unwrap_or(0);
                 format!("write {path} ({bytes} bytes)")
+            };
+            ToolCompletionDisplay {
+                label,
+                output: None,
+            }
+        }
+        "edit" => {
+            let path = cbor_text_field(details, "path");
+            let label = if let Some(msg) = error_message {
+                match path {
+                    Some(p) => format!("edit {p}: {msg}"),
+                    None => format!("edit: {msg}"),
+                }
+            } else {
+                let path = path.unwrap_or_default();
+                let count = cbor_int_field(details, "edits_applied").unwrap_or(0);
+                format!("edit {path} ({count} edits applied)")
             };
             ToolCompletionDisplay {
                 label,

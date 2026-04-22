@@ -295,8 +295,8 @@ role = "tool"
 mode = "daemon"
 
 [[extensions]]
-name = "shell"
-command = "tau-ext-shell"
+name = "extra_tools"
+command = "tau-ext-fs"
 args = ["--login"]
 role = "tool"
 "#;
@@ -377,7 +377,7 @@ role = "tool"
         assert_eq!(config.extensions.len(), 3);
         assert_eq!(config.extensions[0].name, "agent");
         assert_eq!(config.extensions[1].name, "fs");
-        assert_eq!(config.extensions[2].name, "shell");
+        assert_eq!(config.extensions[2].name, "extra_tools");
     }
 
     #[test]

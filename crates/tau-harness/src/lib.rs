@@ -429,13 +429,14 @@ impl Harness {
         store_path: impl Into<PathBuf>,
         policy_store_path: impl Into<PathBuf>,
     ) -> Result<Self, HarnessError> {
-        Self::new_with_agent(store_path, policy_store_path, default_agent_runner)
+        Self::new_with_agent(store_path, policy_store_path, default_agent_runner, false)
     }
 
     fn new_with_agent(
         store_path: impl Into<PathBuf>,
         policy_store_path: impl Into<PathBuf>,
         agent_runner: AgentRunner,
+        include_echo: bool,
     ) -> Result<Self, HarnessError> {
         let (tx, rx) = mpsc::channel();
         let mut bus = EventBus::with_subscription_policy(Box::new(
@@ -465,7 +466,7 @@ impl Harness {
         let (conn_id, thread) = spawn_in_process(
             "tools",
             ClientKind::Tool,
-            |r, w| tau_ext_fs::run(r, w).map_err(|e| e.to_string()),
+            move |r, w| tau_ext_fs::run(r, w, include_echo).map_err(|e| e.to_string()),
             &mut bus,
             &tx,
         )?;
@@ -1541,8 +1542,8 @@ fn build_system_prompt(tools: &[ToolDefinition]) -> String {
         "Guidelines:\n\
          - Be concise in your responses.\n\
          - Show file paths clearly when working with files.\n\
-         - When asked to read a file, use the fs.read tool.\n\
-         - When asked to run a command, use the shell.exec tool.\n",
+         - When asked to read a file, use the read tool.\n\
+         - When asked to run a command, use the bash tool.\n",
     );
 
     // Date and CWD.
@@ -1881,6 +1882,7 @@ fn run_embedded_message_impl(
         session_store_path.clone(),
         default_policy_store_path_from(&session_store_path),
         agent_runner,
+        true,
     )?;
     let mut outcome = harness.send_user_message(session_id, message, None)?;
     harness.shutdown()?;
@@ -2243,7 +2245,7 @@ mod tests {
         sp: impl Into<PathBuf>,
         pp: impl Into<PathBuf>,
     ) -> Result<Harness, HarnessError> {
-        Harness::new_with_agent(sp, pp, echo_runner)
+        Harness::new_with_agent(sp, pp, echo_runner, true)
     }
 
     #[test]
@@ -2313,7 +2315,7 @@ mod tests {
         let r = run_embedded_message_with_echo(&sp, "s1", &format!("read {}", fp.display()))
             .expect("should succeed")
             .response;
-        assert!(!r.is_empty(), "fs.read response should not be empty");
+        assert!(!r.is_empty(), "read response should not be empty");
         assert!(r.contains("hello from disk"));
     }
 
@@ -2339,7 +2341,7 @@ mod tests {
             .expect("tools")
             .to_owned();
         let removed = h.registry.unregister_connection(&conn_id);
-        assert!(removed.iter().any(|t| t == "shell.exec"));
+        assert!(removed.iter().any(|t| t == "shell"));
 
         let outcome = h
             .send_user_message("s1", "shell printf hi", None)
@@ -2395,7 +2397,7 @@ mod tests {
         }
 
         assert!(h.bus.connection(&conn_id).is_none());
-        assert!(h.registry.providers_for("shell.exec").is_empty());
+        assert!(h.registry.providers_for("shell").is_empty());
         assert!(
             h.lifecycle_messages
                 .iter()
@@ -2416,7 +2418,7 @@ mod tests {
         let o = run_embedded_message_with_echo(&sp, "s1", "shell printf hi").expect("ok");
         assert_eq!(
             o.progress_messages,
-            vec!["shell.exec: running shell command"]
+            vec!["shell: running shell command"]
         );
         assert!(!o.response.is_empty(), "shell response should not be empty");
     }
@@ -2462,7 +2464,7 @@ mod tests {
         );
         assert_eq!(
             o.progress_messages,
-            vec!["shell.exec: running shell command"]
+            vec!["shell: running shell command"]
         );
         assert!(!o.response.is_empty(), "shell response should not be empty");
         server.join().expect("join").expect("clean exit");
@@ -2525,7 +2527,7 @@ mod tests {
 
         let sl = session_lines(&sp, "s1").expect("lines");
         assert!(sl.iter().any(|l| l.contains("user: hello")));
-        assert!(sl.iter().any(|l| l.contains("tool.request demo.echo")));
+        assert!(sl.iter().any(|l| l.contains("tool.request echo")));
         let sll = session_list_lines(&sp).expect("list");
         assert!(sll.iter().any(|l| l.contains("s1 (4 entries)")));
         let pl = policy_lines(&pp).expect("policy");

@@ -1599,7 +1599,7 @@ mod tests {
                 Some(&tool_id),
                 Event::ToolInvoke(tau_proto::ToolInvoke {
                     call_id: "call-1".into(),
-                    tool_name: "demo.echo".into(),
+                    tool_name: "echo".into(),
                     arguments: CborValue::Null,
                 }),
             )
@@ -1625,7 +1625,7 @@ mod tests {
 
         let first_report = bus.publish(Event::ToolResult(tau_proto::ToolResult {
             call_id: "call-1".into(),
-            tool_name: "demo.echo".into(),
+            tool_name: "echo".into(),
             result: CborValue::Text("done".to_owned()),
         }));
         assert_eq!(first_report.delivered_to, vec![tool_id.clone()]);
@@ -1654,7 +1654,7 @@ mod tests {
         let register_report = registry.register(
             &tool_id,
             ToolSpec {
-                name: "demo.echo".into(),
+                name: "echo".into(),
                 description: Some("Echo a payload".to_owned()),
                 parameters: None,
             },
@@ -1667,7 +1667,7 @@ mod tests {
                 &agent_id,
                 ToolRequest {
                     call_id: "call-1".into(),
-                    tool_name: "demo.echo".into(),
+                    tool_name: "echo".into(),
                     arguments: CborValue::Text("hello".to_owned()),
                 },
             )
@@ -1687,7 +1687,7 @@ mod tests {
             delivered_events[0].event,
             Event::ToolInvoke(tau_proto::ToolInvoke {
                 call_id: "call-1".into(),
-                tool_name: "demo.echo".into(),
+                tool_name: "echo".into(),
                 arguments: CborValue::Text("hello".to_owned()),
             })
         );
@@ -1700,7 +1700,7 @@ mod tests {
         let first_report = registry.register(
             "conn-a",
             ToolSpec {
-                name: "demo.echo".into(),
+                name: "echo".into(),
                 description: Some("Echo".to_owned()),
                 parameters: None,
             },
@@ -1710,7 +1710,7 @@ mod tests {
         let second_report = registry.register(
             "conn-b",
             ToolSpec {
-                name: "demo.echo".into(),
+                name: "echo".into(),
                 description: Some("Echo from another provider".to_owned()),
                 parameters: None,
             },
@@ -1719,12 +1719,12 @@ mod tests {
         assert_eq!(
             second_report.warnings[0],
             ToolRegistryWarning::DuplicateRegistration {
-                tool_name: "demo.echo".into(),
+                tool_name: "echo".into(),
                 existing_provider_ids: vec!["conn-a".into()],
             }
         );
 
-        let providers = registry.providers_for("demo.echo");
+        let providers = registry.providers_for("echo");
         assert_eq!(providers.len(), 2);
         assert_eq!(providers[0].connection_id, "conn-a");
         assert_eq!(providers[1].connection_id, "conn-b");
@@ -1743,7 +1743,7 @@ mod tests {
         registry.register(
             &first_id,
             ToolSpec {
-                name: "demo.echo".into(),
+                name: "echo".into(),
                 description: None,
                 parameters: None,
             },
@@ -1751,7 +1751,7 @@ mod tests {
         registry.register(
             &second_id,
             ToolSpec {
-                name: "demo.echo".into(),
+                name: "echo".into(),
                 description: None,
                 parameters: None,
             },
@@ -1759,7 +1759,7 @@ mod tests {
         registry.register(
             &first_id,
             ToolSpec {
-                name: "demo.upper".into(),
+                name: "demo_upper".into(),
                 description: None,
                 parameters: None,
             },
@@ -1772,18 +1772,18 @@ mod tests {
         assert!(
             removed_tools
                 .iter()
-                .any(|tool_name| tool_name == "demo.echo")
+                .any(|tool_name| tool_name == "echo")
         );
         assert!(
             removed_tools
                 .iter()
-                .any(|tool_name| tool_name == "demo.upper")
+                .any(|tool_name| tool_name == "demo_upper")
         );
 
-        let echo_providers = registry.providers_for("demo.echo");
+        let echo_providers = registry.providers_for("echo");
         assert_eq!(echo_providers.len(), 1);
         assert_eq!(echo_providers[0].connection_id, second_id);
-        assert!(registry.providers_for("demo.upper").is_empty());
+        assert!(registry.providers_for("demo_upper").is_empty());
     }
 
     #[test]
@@ -1794,7 +1794,7 @@ mod tests {
             "conn-tool",
             ToolRegister {
                 tool: ToolSpec {
-                    name: "demo.echo".into(),
+                    name: "echo".into(),
                     description: Some("Echo".to_owned()),
                     parameters: None,
                 },
@@ -1803,9 +1803,9 @@ mod tests {
         );
 
         assert!(report.warnings.is_empty());
-        assert_eq!(registry.providers_for("demo.echo").len(), 1);
-        assert!(registry.unregister("conn-tool", "demo.echo"));
-        assert!(registry.providers_for("demo.echo").is_empty());
+        assert_eq!(registry.providers_for("echo").len(), 1);
+        assert!(registry.unregister("conn-tool", "echo"));
+        assert!(registry.providers_for("echo").is_empty());
     }
 
     #[test]
@@ -1902,7 +1902,7 @@ mod tests {
                 "session-1",
                 ToolActivityRecord {
                     call_id: "call-1".into(),
-                    tool_name: "fs.read".into(),
+                    tool_name: "read".into(),
                     outcome: ToolActivityOutcome::Result {
                         result: CborValue::Text("README".to_owned()),
                     },
@@ -1920,7 +1920,7 @@ mod tests {
             *branch[1],
             SessionEntry::ToolActivity(ToolActivityRecord {
                 call_id: "call-1".into(),
-                tool_name: "fs.read".into(),
+                tool_name: "read".into(),
                 outcome: ToolActivityOutcome::Result {
                     result: CborValue::Text("README".to_owned()),
                 },
@@ -2020,7 +2020,7 @@ mod tests {
             let tool_reader = tool_runtime_stream
                 .try_clone()
                 .expect("tool reader clone should succeed");
-            tau_ext_fs::run(tool_reader, tool_runtime_stream)
+            tau_ext_fs::run(tool_reader, tool_runtime_stream, true)
                 .expect("tool extension should run successfully");
         });
 
@@ -2083,8 +2083,8 @@ mod tests {
                 _ => panic!("unexpected tool startup event"),
             }
         }
-        assert!(registered_tool_names.iter().any(|name| name == "demo.echo"));
-        assert!(registered_tool_names.iter().any(|name| name == "fs.read"));
+        assert!(registered_tool_names.iter().any(|name| name == "echo"));
+        assert!(registered_tool_names.iter().any(|name| name == "read"));
 
         // Send a SessionPromptCreated to the agent (new protocol).
         use tau_proto::{ContentBlock, ConversationMessage, ConversationRole, ToolDefinition};
@@ -2100,7 +2100,7 @@ mod tests {
                 }],
             }],
             tools: vec![ToolDefinition {
-                name: "demo.echo".to_owned(),
+                name: "echo".to_owned(),
                 description: None,
                 parameters: None,
             }],

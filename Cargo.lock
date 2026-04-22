@@ -1317,13 +1317,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tau-ext-shell"
-version = "0.1.0"
-dependencies = [
- "tau-proto",
-]
-
-[[package]]
 name = "tau-harness"
 version = "0.1.0"
 dependencies = [

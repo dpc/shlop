@@ -282,7 +282,7 @@ fn finish_error<W: Write>(
 // ---------------------------------------------------------------------------
 
 /// A simple echo agent for integration tests. Echoes user text back
-/// as a `demo.echo` tool call, or returns tool results as text.
+/// as a `echo` tool call, or returns tool results as text.
 pub fn run_echo<R, W>(reader: R, writer: W) -> Result<(), Box<dyn Error>>
 where
     R: Read,
@@ -366,7 +366,7 @@ where
                     let tool_call = if let Some(path) = user_text.strip_prefix("read ") {
                         AgentToolCall {
                             id: call_id,
-                            name: "fs.read".to_owned(),
+                            name: "read".to_owned(),
                             arguments: CborValue::Map(vec![(
                                 CborValue::Text("path".to_owned()),
                                 CborValue::Text(path.trim().to_owned()),
@@ -375,7 +375,7 @@ where
                     } else if let Some(cmd) = user_text.strip_prefix("shell ") {
                         AgentToolCall {
                             id: call_id,
-                            name: "shell.exec".to_owned(),
+                            name: "shell".to_owned(),
                             arguments: CborValue::Map(vec![(
                                 CborValue::Text("command".to_owned()),
                                 CborValue::Text(cmd.trim().to_owned()),
@@ -384,7 +384,7 @@ where
                     } else {
                         AgentToolCall {
                             id: call_id,
-                            name: "demo.echo".to_owned(),
+                            name: "echo".to_owned(),
                             arguments: CborValue::Text(user_text),
                         }
                     };
