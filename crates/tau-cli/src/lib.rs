@@ -1415,4 +1415,72 @@ mod tests {
             text
         );
     }
+
+    /// Replacing a long streaming block with its final settled output
+    /// must not leave stale partial lines behind, even when the live
+    /// block overflowed the viewport while streaming.
+    #[test]
+    fn overflowing_stream_replaced_cleanly_on_finish() {
+        let (_term, handle, vt) = setup(40, 5);
+        let mut renderer = EventRenderer::new(
+            handle.clone(),
+            tau_cli_term::CompletionData::new(),
+            tau_themes::Theme::builtin(),
+        );
+
+        renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "overflow please".into(),
+        }));
+        renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
+            session_prompt_id: "sp-0".into(),
+            session_id: "s1".into(),
+            system_prompt: String::new(),
+            messages: Vec::new(),
+            tools: Vec::new(),
+            model: None,
+        }));
+
+        let partial = "stream 0\nstream 1\nstream 2\nstream 3\nPARTIAL ONLY";
+        renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
+            session_prompt_id: "sp-0".into(),
+            text: partial.into(),
+        }));
+        sync(&handle);
+        assert!(
+            vt.screen_contains(40, "PARTIAL ONLY"),
+            "partial overflowed response should be visible before finish, got: {:?}",
+            vt.screen_text(40)
+        );
+
+        let final_text = "final 0\nfinal 1\nfinal 2";
+        renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
+            session_prompt_id: "sp-0".into(),
+            text: Some(final_text.into()),
+            tool_calls: Vec::new(),
+        }));
+        sync(&handle);
+
+        let text = vt.screen_text(40);
+        assert!(
+            vt.screen_contains(40, "final 0"),
+            "final response missing, got: {:?}",
+            text
+        );
+        assert!(
+            vt.screen_contains(40, "final 2"),
+            "final response tail missing, got: {:?}",
+            text
+        );
+        assert!(
+            !vt.screen_contains(40, "PARTIAL ONLY"),
+            "stale partial content should be gone, got: {:?}",
+            text
+        );
+        assert!(
+            vt.screen_contains(40, "> "),
+            "prompt should remain visible, got: {:?}",
+            text
+        );
+    }
 }

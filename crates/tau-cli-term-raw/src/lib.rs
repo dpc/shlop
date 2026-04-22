@@ -1713,4 +1713,52 @@ mod tests {
             "line 1 should be in scrollback, got: {sb_rows:?}"
         );
     }
+
+    /// Pi-style overflow must also work when the content growth comes
+    /// from updating an existing live block in place, not only from
+    /// appending new history entries.
+    #[test]
+    fn live_block_growth_scrolls_updated_lines_into_scrollback() {
+        let buf = SharedBuffer::new();
+        let mut parser = vt100::Parser::new(5, 40, 50);
+
+        let (_term, handle, _input_tx) = Term::new_virtual(40, 5, "> ", Box::new(buf.clone()));
+        flush_redraws(&handle, &buf, &mut parser);
+
+        let block_id = handle.new_block(StyledBlock::new(StyledText::from(Span::plain(
+            "starting",
+        ))));
+        handle.push_above_active(block_id);
+        flush_redraws(&handle, &buf, &mut parser);
+
+        handle.set_block(
+            block_id,
+            StyledBlock::new(StyledText::from(Span::plain(
+                "stream 0\nstream 1\nstream 2\nstream 3\nstream 4\nstream 5",
+            ))),
+        );
+        flush_redraws(&handle, &buf, &mut parser);
+
+        assert!(
+            screen_contains(&parser, 40, "stream 5"),
+            "latest line should remain visible, got: {:?}",
+            vt100_rows(&parser, 40)
+        );
+        assert!(
+            screen_contains(&parser, 40, "> "),
+            "prompt should remain visible, got: {:?}",
+            vt100_rows(&parser, 40)
+        );
+
+        parser.screen_mut().set_scrollback(2);
+        let sb_rows = vt100_rows(&parser, 40);
+        assert!(
+            sb_rows[0].contains("stream 0"),
+            "updated line 0 should be in scrollback, got: {sb_rows:?}"
+        );
+        assert!(
+            sb_rows[1].contains("stream 1"),
+            "updated line 1 should be in scrollback, got: {sb_rows:?}"
+        );
+    }
 }
