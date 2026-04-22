@@ -374,6 +374,15 @@ fn format_tool_call(tool_name: &str, arguments: &CborValue) -> String {
             let path = cbor_text_field(arguments, "path").unwrap_or_default();
             format!("edit {path}")
         }
+        "find" => {
+            let pattern = cbor_text_field(arguments, "pattern").unwrap_or_default();
+            let path = cbor_text_field(arguments, "path").unwrap_or_else(|| ".".to_owned());
+            format!("find {pattern} in {path}")
+        }
+        "ls" => {
+            let path = cbor_text_field(arguments, "path").unwrap_or_else(|| ".".to_owned());
+            format!("ls {path}")
+        }
         "skill" => {
             let name = cbor_text_field(arguments, "name").unwrap_or_default();
             format!("skill {name}")
@@ -452,6 +461,53 @@ fn format_tool_completion(
                 label,
                 output: None,
             }
+        }
+        "find" => {
+            let path = cbor_text_field(details, "path");
+            let pattern = cbor_text_field(details, "pattern");
+            let label = if let Some(msg) = error_message {
+                match (pattern, path) {
+                    (Some(pattern), Some(path)) => format!("find {pattern} in {path}: {msg}"),
+                    (Some(pattern), None) => format!("find {pattern}: {msg}"),
+                    _ => format!("find: {msg}"),
+                }
+            } else {
+                let path = path.unwrap_or_else(|| ".".to_owned());
+                let pattern = pattern.unwrap_or_default();
+                let count = cbor_int_field(details, "matches").unwrap_or(0);
+                format!("find {pattern} in {path} ({count} matches)")
+            };
+            let output = cbor_text_field(details, "output").and_then(|text| {
+                let trimmed = text.trim().to_owned();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                }
+            });
+            ToolCompletionDisplay { label, output }
+        }
+        "ls" => {
+            let path = cbor_text_field(details, "path");
+            let label = if let Some(msg) = error_message {
+                match path {
+                    Some(p) => format!("ls {p}: {msg}"),
+                    None => format!("ls: {msg}"),
+                }
+            } else {
+                let path = path.unwrap_or_else(|| ".".to_owned());
+                let count = cbor_int_field(details, "entries").unwrap_or(0);
+                format!("ls {path} ({count} entries)")
+            };
+            let output = cbor_text_field(details, "output").and_then(|text| {
+                let trimmed = text.trim().to_owned();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                }
+            });
+            ToolCompletionDisplay { label, output }
         }
         "skill" => {
             let name = cbor_text_field(details, "name");

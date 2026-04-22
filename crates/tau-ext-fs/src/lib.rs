@@ -7,9 +7,12 @@
 use std::error::Error;
 use std::fs;
 use std::io::{BufReader, BufWriter, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Condvar, Mutex, mpsc};
+
+use globset::{Glob, GlobSet, GlobSetBuilder};
+use ignore::WalkBuilder;
 
 // ---------------------------------------------------------------------------
 // Simple counting semaphore
@@ -60,16 +63,31 @@ pub const WRITE_TOOL_NAME: &str = "write";
 pub const EDIT_TOOL_NAME: &str = "edit";
 pub const SHELL_TOOL_NAME: &str = "shell";
 pub const GREP_TOOL_NAME: &str = "grep";
+pub const FIND_TOOL_NAME: &str = "find";
+pub const LS_TOOL_NAME: &str = "ls";
 
 /// Runs the extension on stdin/stdout (production, no echo).
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
-    run(std::io::stdin(), std::io::stdout(), false)
+    run_impl(std::io::stdin(), std::io::stdout(), false, true)
 }
 
 /// Runs the extension over arbitrary reader/writer streams.
 ///
 /// When `include_echo` is true, registers the `echo` tool (for testing).
 pub fn run<R, W>(reader: R, writer: W, include_echo: bool) -> Result<(), Box<dyn Error>>
+where
+    R: Read,
+    W: Write + Send + 'static,
+{
+    run_impl(reader, writer, include_echo, true)
+}
+
+fn run_impl<R, W>(
+    reader: R,
+    writer: W,
+    include_echo: bool,
+    announce_skills: bool,
+) -> Result<(), Box<dyn Error>>
 where
     R: Read,
     W: Write + Send + 'static,
@@ -219,6 +237,55 @@ where
             })),
         },
         ToolSpec {
+            name: FIND_TOOL_NAME.into(),
+            description: Some(
+                "Search for files by glob pattern. Returns matching file paths relative to the \
+                 search directory. Respects .gitignore. Output is truncated to 1000 results or \
+                 50KB (whichever is hit first)."
+                    .to_owned(),
+            ),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Glob pattern to match files, e.g. '*.rs' or '**/*.md'"
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Directory to search (default: current directory)"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of results to return (default: 1000)"
+                    }
+                },
+                "required": ["pattern"]
+            })),
+        },
+        ToolSpec {
+            name: LS_TOOL_NAME.into(),
+            description: Some(
+                "List directory contents. Returns entries sorted alphabetically, with '/' suffix \
+                 for directories. Includes dotfiles. Output is truncated to 500 entries or 50KB \
+                 (whichever is hit first)."
+                    .to_owned(),
+            ),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Directory to list (default: current directory)"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of entries to return (default: 500)"
+                    }
+                }
+            })),
+        },
+        ToolSpec {
             name: SHELL_TOOL_NAME.into(),
             description: Some(
                 "Execute a shell command via `sh -c`. Returns stdout, stderr, and \
@@ -246,7 +313,7 @@ where
     }
 
     // Discover and announce skills.
-    {
+    if announce_skills {
         let mut skill_dirs = Vec::new();
         if let Ok(cwd) = std::env::current_dir() {
             skill_dirs.push(cwd.join(".agents").join("skills"));
@@ -303,7 +370,6 @@ where
             Event::ToolInvoke(invoke) => {
                 let tx = tx.clone();
                 let sem = Arc::clone(&sem);
-                let include_echo = include_echo;
                 std::thread::spawn(move || {
                     let _permit = sem.acquire();
                     dispatch_tool_invoke(invoke, include_echo, &tx);
@@ -409,6 +475,38 @@ fn execute_tool(invoke: tau_proto::ToolInvoke, include_echo: bool) -> Vec<Event>
         };
     }
 
+    if invoke.tool_name == FIND_TOOL_NAME {
+        return match run_find(&invoke.arguments) {
+            Ok(result) => vec![Event::ToolResult(ToolResult {
+                call_id: invoke.call_id,
+                tool_name: invoke.tool_name,
+                result,
+            })],
+            Err(error) => vec![Event::ToolError(ToolError {
+                call_id: invoke.call_id,
+                tool_name: invoke.tool_name,
+                message: error,
+                details: None,
+            })],
+        };
+    }
+
+    if invoke.tool_name == LS_TOOL_NAME {
+        return match run_ls(&invoke.arguments) {
+            Ok(result) => vec![Event::ToolResult(ToolResult {
+                call_id: invoke.call_id,
+                tool_name: invoke.tool_name,
+                result,
+            })],
+            Err(error) => vec![Event::ToolError(ToolError {
+                call_id: invoke.call_id,
+                tool_name: invoke.tool_name,
+                message: error,
+                details: None,
+            })],
+        };
+    }
+
     if invoke.tool_name == SHELL_TOOL_NAME {
         let mut events = vec![Event::ToolProgress(ToolProgress {
             call_id: invoke.call_id.clone(),
@@ -457,8 +555,7 @@ struct Truncated {
     total_bytes: usize,
 }
 
-/// Truncate from the head (keep first lines).  Used by `read`.
-fn truncate_head(input: &str) -> Truncated {
+fn truncate_head_plain(input: &str) -> Truncated {
     let total_lines = input.lines().count();
     let total_bytes = input.len();
 
@@ -475,23 +572,18 @@ fn truncate_head(input: &str) -> Truncated {
     let mut bytes = 0;
     let mut kept_lines = 0;
 
-    for line in input.lines() {
+    for (line_idx, line) in input.lines().enumerate() {
         if kept_lines >= MAX_OUTPUT_LINES || bytes + line.len() + 1 > MAX_OUTPUT_BYTES {
             break;
         }
-        if kept_lines > 0 {
+        if line_idx > 0 {
             result.push('\n');
             bytes += 1;
         }
         result.push_str(line);
         bytes += line.len();
-        kept_lines += 1;
+        kept_lines = line_idx + 1;
     }
-
-    result.push_str(&format!(
-        "\n\n[Showing lines 1-{kept_lines} of {total_lines} ({total_bytes} bytes total). \
-         Use offset to continue reading.]"
-    ));
 
     Truncated {
         content: result,
@@ -499,6 +591,22 @@ fn truncate_head(input: &str) -> Truncated {
         total_lines,
         total_bytes,
     }
+}
+
+/// Truncate from the head (keep first lines).  Used by `read`.
+fn truncate_head(input: &str) -> Truncated {
+    let mut truncated = truncate_head_plain(input);
+    if !truncated.was_truncated {
+        return truncated;
+    }
+
+    let kept_lines = truncated.content.lines().count();
+    truncated.content.push_str(&format!(
+        "\n\n[Showing lines 1-{kept_lines} of {} ({} bytes total). \
+         Use offset to continue reading.]",
+        truncated.total_lines, truncated.total_bytes
+    ));
+    truncated
 }
 
 /// Truncate from the tail (keep last lines).  Used by `shell`.
@@ -714,6 +822,8 @@ fn truncate(s: &str, max: usize) -> &str {
 
 const DEFAULT_GREP_LIMIT: usize = 100;
 const GREP_MAX_LINE_LENGTH: usize = 500;
+const DEFAULT_FIND_LIMIT: usize = 1000;
+const DEFAULT_LS_LIMIT: usize = 500;
 
 fn run_grep(arguments: &CborValue) -> Result<CborValue, String> {
     let pattern = argument_text(arguments, "pattern")?;
@@ -845,6 +955,217 @@ fn run_grep(arguments: &CborValue) -> Result<CborValue, String> {
         (
             CborValue::Text("matches".to_owned()),
             CborValue::Integer((match_count as i64).into()),
+        ),
+        (
+            CborValue::Text("output".to_owned()),
+            CborValue::Text(output_text),
+        ),
+    ]))
+}
+
+fn run_find(arguments: &CborValue) -> Result<CborValue, String> {
+    let pattern = argument_text(arguments, "pattern")?;
+    let path = optional_argument_text(arguments, "path").unwrap_or_else(|| ".".to_owned());
+    let limit = optional_argument_int(arguments, "limit")
+        .map(|v| v.max(1) as usize)
+        .unwrap_or(DEFAULT_FIND_LIMIT);
+    let search_path = PathBuf::from(&path);
+
+    let metadata = fs::metadata(&search_path)
+        .map_err(|e| format!("failed to access {}: {e}", search_path.display()))?;
+    if !metadata.is_dir() {
+        return Err(format!("not a directory: {}", search_path.display()));
+    }
+
+    let glob = compile_find_glob(&pattern)?;
+    let mut matches = Vec::new();
+    for entry in WalkBuilder::new(&search_path)
+        .hidden(false)
+        .parents(true)
+        .ignore(true)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .build()
+    {
+        let entry = entry.map_err(|e| format!("failed to walk {}: {e}", search_path.display()))?;
+        let file_type = match entry.file_type() {
+            Some(file_type) => file_type,
+            None => continue,
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+
+        let Ok(relative_path) = entry.path().strip_prefix(&search_path) else {
+            continue;
+        };
+        if glob.is_match(relative_path) {
+            matches.push(path_to_slash(relative_path));
+        }
+    }
+    matches.sort_by_key(|entry| entry.to_lowercase());
+
+    if matches.is_empty() {
+        return Ok(CborValue::Map(vec![
+            (
+                CborValue::Text("path".to_owned()),
+                CborValue::Text(search_path.display().to_string()),
+            ),
+            (
+                CborValue::Text("pattern".to_owned()),
+                CborValue::Text(pattern),
+            ),
+            (
+                CborValue::Text("matches".to_owned()),
+                CborValue::Integer(0.into()),
+            ),
+            (
+                CborValue::Text("output".to_owned()),
+                CborValue::Text("no files found matching pattern".to_owned()),
+            ),
+        ]));
+    }
+
+    let total_matches = matches.len();
+    let displayed: Vec<String> = matches.into_iter().take(limit).collect();
+    let limit_reached = total_matches > displayed.len();
+    let mut output_text = displayed.join("\n");
+    let truncated = truncate_head_plain(&output_text);
+    if truncated.was_truncated {
+        output_text = truncated.content;
+    }
+
+    let mut notices = Vec::new();
+    if limit_reached {
+        notices.push(format!(
+            "{limit} results limit reached. Use limit={} for more, or refine pattern.",
+            limit * 2
+        ));
+    }
+    if truncated.was_truncated {
+        notices.push("50KB/2000 line output limit reached.".to_owned());
+    }
+    if !notices.is_empty() {
+        output_text.push_str("\n\n[");
+        output_text.push_str(&notices.join(" "));
+        output_text.push(']');
+    }
+
+    Ok(CborValue::Map(vec![
+        (
+            CborValue::Text("path".to_owned()),
+            CborValue::Text(search_path.display().to_string()),
+        ),
+        (
+            CborValue::Text("pattern".to_owned()),
+            CborValue::Text(pattern),
+        ),
+        (
+            CborValue::Text("matches".to_owned()),
+            CborValue::Integer((total_matches as i64).into()),
+        ),
+        (
+            CborValue::Text("output".to_owned()),
+            CborValue::Text(output_text),
+        ),
+    ]))
+}
+
+fn compile_find_glob(pattern: &str) -> Result<GlobSet, String> {
+    let glob = Glob::new(pattern).map_err(|e| format!("invalid glob pattern {pattern:?}: {e}"))?;
+    let mut builder = GlobSetBuilder::new();
+    builder.add(glob);
+    builder
+        .build()
+        .map_err(|e| format!("failed to compile glob pattern {pattern:?}: {e}"))
+}
+
+fn path_to_slash(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn run_ls(arguments: &CborValue) -> Result<CborValue, String> {
+    let path = optional_argument_text(arguments, "path").unwrap_or_else(|| ".".to_owned());
+    let limit = optional_argument_int(arguments, "limit")
+        .map(|v| v.max(1) as usize)
+        .unwrap_or(DEFAULT_LS_LIMIT);
+    let dir_path = PathBuf::from(&path);
+
+    let metadata = fs::metadata(&dir_path)
+        .map_err(|e| format!("failed to access {}: {e}", dir_path.display()))?;
+    if !metadata.is_dir() {
+        return Err(format!("not a directory: {}", dir_path.display()));
+    }
+
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(&dir_path)
+        .map_err(|e| format!("failed to read {}: {e}", dir_path.display()))?
+    {
+        let entry = entry.map_err(|e| format!("failed to read {}: {e}", dir_path.display()))?;
+        let name = entry.file_name();
+        let mut display = name.to_string_lossy().into_owned();
+        if entry
+            .file_type()
+            .map_err(|e| format!("failed to read {}: {e}", dir_path.display()))?
+            .is_dir()
+        {
+            display.push('/');
+        }
+        entries.push(display);
+    }
+    entries.sort_by_key(|entry| entry.to_lowercase());
+
+    if entries.is_empty() {
+        return Ok(CborValue::Map(vec![
+            (
+                CborValue::Text("path".to_owned()),
+                CborValue::Text(dir_path.display().to_string()),
+            ),
+            (
+                CborValue::Text("entries".to_owned()),
+                CborValue::Integer(0.into()),
+            ),
+            (
+                CborValue::Text("output".to_owned()),
+                CborValue::Text("(empty directory)".to_owned()),
+            ),
+        ]));
+    }
+
+    let total_entries = entries.len();
+    let displayed: Vec<String> = entries.into_iter().take(limit).collect();
+    let limit_reached = total_entries > displayed.len();
+    let mut output_text = displayed.join("\n");
+    let truncated = truncate_head_plain(&output_text);
+    if truncated.was_truncated {
+        output_text = truncated.content;
+    }
+
+    let mut notices = Vec::new();
+    if limit_reached {
+        notices.push(format!(
+            "{limit} entries limit reached. Use limit={} for more.",
+            limit * 2
+        ));
+    }
+    if truncated.was_truncated {
+        notices.push("50KB/2000 line output limit reached.".to_owned());
+    }
+    if !notices.is_empty() {
+        output_text.push_str("\n\n[");
+        output_text.push_str(&notices.join(" "));
+        output_text.push(']');
+    }
+
+    Ok(CborValue::Map(vec![
+        (
+            CborValue::Text("path".to_owned()),
+            CborValue::Text(dir_path.display().to_string()),
+        ),
+        (
+            CborValue::Text("entries".to_owned()),
+            CborValue::Integer((total_entries as i64).into()),
         ),
         (
             CborValue::Text("output".to_owned()),
@@ -1144,6 +1465,16 @@ mod tests {
 
     use super::*;
 
+    fn cbor_int_field(value: &CborValue, key: &str) -> Option<i128> {
+        match value {
+            CborValue::Map(entries) => entries.iter().find_map(|(k, v)| match (k, v) {
+                (CborValue::Text(k), CborValue::Integer(n)) if k == key => Some((*n).into()),
+                _ => None,
+            }),
+            _ => None,
+        }
+    }
+
     fn spawn_extension() -> (
         EventReader<BufReader<UnixStream>>,
         EventWriter<BufWriter<UnixStream>>,
@@ -1153,7 +1484,7 @@ mod tests {
             .try_clone()
             .expect("runtime reader clone should succeed");
         thread::spawn(move || {
-            run(reader_stream, runtime_stream, true).expect("extension should run");
+            run_impl(reader_stream, runtime_stream, true, false).expect("extension should run");
         });
         (
             EventReader::new(BufReader::new(
@@ -1175,6 +1506,8 @@ mod tests {
             EventName::ToolRegister, // write
             EventName::ToolRegister, // edit
             EventName::ToolRegister, // grep
+            EventName::ToolRegister, // find
+            EventName::ToolRegister, // ls
             EventName::ToolRegister, // shell
             EventName::LifecycleReady,
         ] {
@@ -1332,6 +1665,99 @@ mod tests {
             fs::read_to_string(&file_path).expect("read back"),
             "deep content"
         );
+
+        writer
+            .write_event(&Event::LifecycleDisconnect(
+                tau_proto::LifecycleDisconnect { reason: None },
+            ))
+            .expect("disconnect");
+        writer.flush().expect("flush");
+    }
+
+    #[test]
+    fn extension_finds_files() {
+        let tempdir = TempDir::new().expect("tempdir");
+        fs::create_dir_all(tempdir.path().join("src/nested")).expect("mkdir");
+        fs::write(tempdir.path().join("src/lib.rs"), "pub fn one() {}\n").expect("write");
+        fs::write(
+            tempdir.path().join("src/nested/mod.rs"),
+            "pub fn two() {}\n",
+        )
+        .expect("write");
+        fs::write(tempdir.path().join("README.md"), "# hi\n").expect("write");
+
+        let (mut reader, mut writer) = spawn_extension();
+        drain_startup(&mut reader);
+
+        writer
+            .write_event(&Event::ToolInvoke(ToolInvoke {
+                call_id: "call-1".into(),
+                tool_name: FIND_TOOL_NAME.into(),
+                arguments: CborValue::Map(vec![
+                    (
+                        CborValue::Text("pattern".to_owned()),
+                        CborValue::Text("**/*.rs".to_owned()),
+                    ),
+                    (
+                        CborValue::Text("path".to_owned()),
+                        CborValue::Text(tempdir.path().display().to_string()),
+                    ),
+                ]),
+            }))
+            .expect("invoke");
+        writer.flush().expect("flush");
+
+        let result = reader.read_event().expect("read").expect("result");
+        let Event::ToolResult(result) = result else {
+            panic!("expected tool result");
+        };
+        assert_eq!(result.tool_name, FIND_TOOL_NAME);
+        assert_eq!(cbor_int_field(&result.result, "matches"), Some(2));
+        let output = cbor_map_text(&result.result, "output").expect("output");
+        assert!(output.contains("src/lib.rs"));
+        assert!(output.contains("src/nested/mod.rs"));
+        assert!(!output.contains("README.md"));
+
+        writer
+            .write_event(&Event::LifecycleDisconnect(
+                tau_proto::LifecycleDisconnect { reason: None },
+            ))
+            .expect("disconnect");
+        writer.flush().expect("flush");
+    }
+
+    #[test]
+    fn extension_lists_directory_contents() {
+        let tempdir = TempDir::new().expect("tempdir");
+        fs::create_dir_all(tempdir.path().join("src")).expect("mkdir");
+        fs::write(tempdir.path().join("README.md"), "# hi\n").expect("write");
+        fs::write(tempdir.path().join(".env"), "SECRET=1\n").expect("write");
+
+        let (mut reader, mut writer) = spawn_extension();
+        drain_startup(&mut reader);
+
+        writer
+            .write_event(&Event::ToolInvoke(ToolInvoke {
+                call_id: "call-1".into(),
+                tool_name: LS_TOOL_NAME.into(),
+                arguments: CborValue::Map(vec![(
+                    CborValue::Text("path".to_owned()),
+                    CborValue::Text(tempdir.path().display().to_string()),
+                )]),
+            }))
+            .expect("invoke");
+        writer.flush().expect("flush");
+
+        let result = reader.read_event().expect("read").expect("result");
+        let Event::ToolResult(result) = result else {
+            panic!("expected tool result");
+        };
+        assert_eq!(result.tool_name, LS_TOOL_NAME);
+        assert_eq!(cbor_int_field(&result.result, "entries"), Some(3));
+        let output = cbor_map_text(&result.result, "output").expect("output");
+        assert!(output.contains(".env"));
+        assert!(output.contains("README.md"));
+        assert!(output.contains("src/"));
 
         writer
             .write_event(&Event::LifecycleDisconnect(
@@ -1503,5 +1929,56 @@ mod tests {
         let content = cbor_map_text(&result, "content").expect("content field");
         assert!(content.contains("line 1\n"));
         assert!(content.contains("[Showing lines 1-"));
+    }
+
+    #[test]
+    fn run_find_returns_matching_files() {
+        let tempdir = TempDir::new().expect("tempdir");
+        fs::create_dir_all(tempdir.path().join("src/nested")).expect("mkdir");
+        fs::write(tempdir.path().join("src/lib.rs"), "pub fn one() {}\n").expect("write");
+        fs::write(
+            tempdir.path().join("src/nested/mod.rs"),
+            "pub fn two() {}\n",
+        )
+        .expect("write");
+        fs::write(tempdir.path().join("README.md"), "# hi\n").expect("write");
+
+        let args = CborValue::Map(vec![
+            (
+                CborValue::Text("pattern".to_owned()),
+                CborValue::Text("**/*.rs".to_owned()),
+            ),
+            (
+                CborValue::Text("path".to_owned()),
+                CborValue::Text(tempdir.path().display().to_string()),
+            ),
+        ]);
+        let result = run_find(&args).expect("find");
+
+        assert_eq!(cbor_int_field(&result, "matches"), Some(2));
+        let output = cbor_map_text(&result, "output").expect("output");
+        assert!(output.contains("src/lib.rs"));
+        assert!(output.contains("src/nested/mod.rs"));
+        assert!(!output.contains("README.md"));
+    }
+
+    #[test]
+    fn run_ls_lists_directory_contents() {
+        let tempdir = TempDir::new().expect("tempdir");
+        fs::create_dir_all(tempdir.path().join("src")).expect("mkdir");
+        fs::write(tempdir.path().join("README.md"), "# hi\n").expect("write");
+        fs::write(tempdir.path().join(".env"), "SECRET=1\n").expect("write");
+
+        let args = CborValue::Map(vec![(
+            CborValue::Text("path".to_owned()),
+            CborValue::Text(tempdir.path().display().to_string()),
+        )]);
+        let result = run_ls(&args).expect("ls");
+
+        assert_eq!(cbor_int_field(&result, "entries"), Some(3));
+        let output = cbor_map_text(&result, "output").expect("output");
+        assert!(output.contains(".env"));
+        assert!(output.contains("README.md"));
+        assert!(output.contains("src/"));
     }
 }

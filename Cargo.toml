@@ -72,6 +72,8 @@ clap = { version = "4", features = ["derive"] }
 crossterm = "0.28"
 unicode-width = "0.2"
 dirs = "6"
+globset = "0.4"
+ignore = "0.4"
 serde = { version = "1", features = ["derive"] }
 tempfile = "3"
 toml = "0.9"
