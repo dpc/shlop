@@ -304,6 +304,30 @@ pub struct ToolSpec {
     /// JSON Schema describing the tool's input parameters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parameters: Option<serde_json::Value>,
+    /// Side-effect class used by the harness dispatch state machine to
+    /// serialize mutating calls with respect to pure ones. Unknown /
+    /// unset declarations default to `Mutating` so extensions that
+    /// haven't been updated don't silently lose ordering.
+    #[serde(default)]
+    pub side_effects: ToolSideEffects,
+}
+
+/// Whether a tool observably mutates state. Purely informational for
+/// the agent; enforced by the harness's tool dispatch queue.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolSideEffects {
+    /// Read-only / commutative with other tool calls. Multiple `Pure`
+    /// calls can run concurrently and can be interleaved freely.
+    Pure,
+    /// May mutate externally observable state (filesystem, network,
+    /// processes, shared session data, …). Serialized against every
+    /// other in-flight tool call — the next tool does not dispatch
+    /// until this one's result has been received. Default so that
+    /// tools which don't explicitly opt in to `Pure` are treated
+    /// conservatively.
+    #[default]
+    Mutating,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -383,6 +383,7 @@ mod tests {
                     name: "echo".into(),
                     description: Some("Echo a payload".to_owned()),
                     parameters: None,
+                    side_effects: ToolSideEffects::Pure,
                 },
             }),
             Event::ToolRequest(ToolRequest {

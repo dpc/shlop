@@ -33,6 +33,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         name: "echo".into(),
                         description: Some("Echo test payloads".to_owned()),
                         parameters: None,
+                        side_effects: tau_proto::ToolSideEffects::Pure,
                     },
                 }))?;
                 writer.flush()?;

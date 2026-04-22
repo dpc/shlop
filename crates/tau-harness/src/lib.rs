@@ -490,6 +490,20 @@ struct Harness {
     /// arise under at-least-once delivery (e.g. an agent that reconnects
     /// after a crash and replays its last prompt).
     completed_prompts: std::collections::HashSet<SessionPromptId>,
+    /// Tool invocations from the current agent turn that have not been
+    /// dispatched yet. Drained in FIFO order by
+    /// `drain_pending_tool_invocations` whenever the in-flight set
+    /// allows the next call through. Cleared out implicitly: a turn
+    /// only completes once this is empty and `in_flight_tool_kinds` is
+    /// empty.
+    pending_tool_invocations: VecDeque<(SessionId, AgentToolCall, tau_proto::ToolSideEffects)>,
+    /// Kind of every tool call currently dispatched but not yet
+    /// completed (no `ToolResult`/`ToolError` received). Keyed by
+    /// `call_id`. Used by the dispatch state machine to decide whether
+    /// the next queued invocation can proceed: a `Pure` call may go
+    /// whenever no `Mutating` is in flight; a `Mutating` call may go
+    /// only when this set is empty.
+    in_flight_tool_kinds: std::collections::HashMap<ToolCallId, tau_proto::ToolSideEffects>,
     /// Directory layout (config + state) the harness reads and writes.
     dirs: tau_config::settings::TauDirs,
 }
@@ -598,6 +612,8 @@ impl Harness {
             discovered_agents_files: Vec::new(),
             initialized_sessions: std::collections::HashSet::new(),
             completed_prompts: std::collections::HashSet::new(),
+            pending_tool_invocations: VecDeque::new(),
+            in_flight_tool_kinds: std::collections::HashMap::new(),
             dirs,
         };
 
@@ -686,6 +702,8 @@ impl Harness {
             discovered_agents_files: Vec::new(),
             initialized_sessions: std::collections::HashSet::new(),
             completed_prompts: std::collections::HashSet::new(),
+            pending_tool_invocations: VecDeque::new(),
+            in_flight_tool_kinds: std::collections::HashMap::new(),
             dirs,
         };
 
@@ -921,7 +939,7 @@ impl Harness {
                     self.persist_tool_result(&result)?;
                     let call_id = result.call_id.to_string();
                     self.publish_event(Some(source_id), Event::ToolResult(result));
-                    self.maybe_complete_agent_turn(&call_id);
+                    self.on_tool_call_complete(&call_id);
                 } else {
                     self.emit_info(&format!(
                         "discarding duplicate tool result for call_id={}",
@@ -934,7 +952,7 @@ impl Harness {
                     self.persist_tool_error(&error)?;
                     let call_id = error.call_id.to_string();
                     self.publish_event(Some(source_id), Event::ToolError(error));
-                    self.maybe_complete_agent_turn(&call_id);
+                    self.on_tool_call_complete(&call_id);
                 } else {
                     self.emit_info(&format!(
                         "discarding duplicate tool error for call_id={}",
@@ -1521,9 +1539,15 @@ impl Harness {
                 session_id: session_id.clone(),
                 remaining_calls: call_ids,
             };
+            // Classify each call and enqueue in the order the agent
+            // emitted them. Dispatch is done by `drain_pending_tool_invocations`,
+            // which respects the pure-vs-mutating ordering rule.
             for call in &response.tool_calls {
-                self.execute_agent_tool_call(&session_id, call)?;
+                let kind = self.resolve_tool_kind(&call.name);
+                self.pending_tool_invocations
+                    .push_back((session_id.clone(), call.clone(), kind));
             }
+            self.drain_pending_tool_invocations()?;
         } else {
             // No tool calls — turn is done. Dispatch next queued
             // prompt if any, otherwise mark agent as idle.
@@ -1613,6 +1637,77 @@ impl Harness {
         self.try_advance_queue();
     }
 
+    /// Returns the side-effect class of a tool name.
+    ///
+    /// Falls back to `Mutating` for unknown tools so an unregistered
+    /// name does not accidentally parallelize.
+    fn resolve_tool_kind(&self, name: &str) -> tau_proto::ToolSideEffects {
+        self.registry
+            .resolve_provider(name)
+            .map(|provider| provider.tool.side_effects)
+            .unwrap_or(tau_proto::ToolSideEffects::Mutating)
+    }
+
+    /// Whether any currently in-flight tool call is `Mutating`.
+    fn has_mutating_in_flight(&self) -> bool {
+        self.in_flight_tool_kinds
+            .values()
+            .any(|kind| matches!(kind, tau_proto::ToolSideEffects::Mutating))
+    }
+
+    /// State-machine drain: dispatch queued tool invocations in FIFO
+    /// order while the in-flight set allows them through.
+    ///
+    /// Rule:
+    /// - `Pure` head may dispatch when no `Mutating` is in-flight.
+    /// - `Mutating` head may dispatch when the in-flight set is empty.
+    ///
+    /// Because the queue is FIFO and new calls are only enqueued from
+    /// `handle_agent_response_finished` (one agent turn at a time),
+    /// this gives the agent a sequential read-after-write view even
+    /// though individual `Pure` calls still run concurrently.
+    ///
+    /// Call this after enqueuing new work or after any in-flight call
+    /// completes.
+    fn drain_pending_tool_invocations(&mut self) -> Result<(), HarnessError> {
+        while let Some((_, _, kind)) = self.pending_tool_invocations.front() {
+            let compatible = match *kind {
+                tau_proto::ToolSideEffects::Pure => !self.has_mutating_in_flight(),
+                tau_proto::ToolSideEffects::Mutating => self.in_flight_tool_kinds.is_empty(),
+            };
+            if !compatible {
+                break;
+            }
+            let (session_id, call, kind) = self
+                .pending_tool_invocations
+                .pop_front()
+                .expect("front just peeked");
+            let call_id: ToolCallId = call.id.clone().into();
+            self.in_flight_tool_kinds.insert(call_id.clone(), kind);
+            // If dispatch fails synchronously, roll back the in-flight
+            // entry so a retry or clean-up is not wedged on a phantom
+            // slot.
+            if let Err(error) = self.execute_agent_tool_call(&session_id, &call) {
+                self.in_flight_tool_kinds.remove(&call_id);
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    /// Hook called whenever a tool call has finished (result, error,
+    /// synthetic NoProvider error, or inline skill completion). Removes
+    /// it from the in-flight set, drains any freshly-eligible queued
+    /// calls, and then checks whether the turn is done.
+    fn on_tool_call_complete(&mut self, call_id: &str) {
+        let owned: ToolCallId = call_id.to_owned().into();
+        self.in_flight_tool_kinds.remove(&owned);
+        if let Err(error) = self.drain_pending_tool_invocations() {
+            self.emit_info(&format!("queued tool dispatch failed: {error}"));
+        }
+        self.maybe_complete_agent_turn(call_id);
+    }
+
     fn maybe_complete_agent_turn(&mut self, completed_call_id: &str) {
         let should_send = if let TurnState::ToolsRunning {
             remaining_calls, ..
@@ -1685,7 +1780,7 @@ impl Harness {
                 };
                 self.persist_tool_error(&error)?;
                 // Mark this call as completed so the turn can proceed.
-                self.maybe_complete_agent_turn(&call.id);
+                self.on_tool_call_complete(&call.id);
             }
             Err(error) => return Err(HarnessError::ToolRoute(error)),
         }
@@ -1714,6 +1809,7 @@ impl Harness {
                     },
                     "required": ["name"]
                 })),
+                side_effects: tau_proto::ToolSideEffects::Pure,
             },
         );
     }
@@ -1793,7 +1889,7 @@ impl Harness {
             _ => {}
         }
         self.publish_event(None, result_event);
-        self.maybe_complete_agent_turn(&call.id);
+        self.on_tool_call_complete(&call.id);
 
         Ok(())
     }
@@ -3291,6 +3387,136 @@ mod tests {
         assert_eq!(prompt, "hello");
 
         h.shutdown().expect("shutdown");
+    }
+
+    // -- Tool dispatch state machine --
+
+    #[test]
+    fn pure_mutating_pure_serializes_through_dispatch_state_machine() {
+        use tau_proto::ToolSideEffects::{Mutating, Pure};
+
+        let td = TempDir::new().expect("tempdir");
+        let sp = td.path().join("sessions.cbor");
+        let pp = td.path().join("policy.cbor");
+        let mut h = echo_harness(&sp, &pp).expect("start");
+
+        // Pre-seed turn state as if the agent had just been prompted
+        // and is about to respond with tool calls.
+        h.selected_model = "test/model".into();
+        h.turn_state = TurnState::AgentThinking {
+            _session_id: "s1".into(),
+        };
+        h.prompt_sessions.insert("sp-x".into(), "s1".into());
+
+        // A `read` of a nonexistent path returns a ToolError (Pure);
+        // `write` of a valid path creates the file and returns
+        // ToolResult (Mutating). Either kind of response path is
+        // handled identically by the state machine.
+        let read_args = CborValue::Map(vec![(
+            CborValue::Text("path".to_owned()),
+            CborValue::Text("/nonexistent/tau-test-path".to_owned()),
+        )]);
+        let write_args = CborValue::Map(vec![
+            (
+                CborValue::Text("path".to_owned()),
+                CborValue::Text(td.path().join("w.txt").display().to_string()),
+            ),
+            (
+                CborValue::Text("content".to_owned()),
+                CborValue::Text("hi".to_owned()),
+            ),
+        ]);
+        let response = AgentResponseFinished {
+            session_prompt_id: "sp-x".into(),
+            text: None,
+            tool_calls: vec![
+                AgentToolCall {
+                    id: "c1".into(),
+                    name: "read".into(),
+                    arguments: read_args.clone(),
+                },
+                AgentToolCall {
+                    id: "c2".into(),
+                    name: "write".into(),
+                    arguments: write_args,
+                },
+                AgentToolCall {
+                    id: "c3".into(),
+                    name: "read".into(),
+                    arguments: read_args,
+                },
+            ],
+        };
+
+        h.handle_agent_response_finished(response)
+            .expect("finished");
+
+        // Right after dispatch, only c1 (Pure) should be in-flight;
+        // c2 (Mutating) and c3 (Pure behind the Mutating) must wait.
+        let c1_id: ToolCallId = "c1".to_owned().into();
+        let c2_id: ToolCallId = "c2".to_owned().into();
+        let c3_id: ToolCallId = "c3".to_owned().into();
+        assert_eq!(h.in_flight_tool_kinds.len(), 1);
+        assert_eq!(h.in_flight_tool_kinds.get(&c1_id), Some(&Pure));
+        assert_eq!(h.pending_tool_invocations.len(), 2);
+        assert_eq!(h.pending_tool_invocations[0].1.id, "c2");
+        assert_eq!(h.pending_tool_invocations[1].1.id, "c3");
+
+        drive_harness_until_call_completes(&mut h, "c1");
+
+        // After c1 completes the Mutating gate opens and c2 dispatches.
+        // c3 must stay queued behind it.
+        assert_eq!(h.in_flight_tool_kinds.len(), 1);
+        assert_eq!(h.in_flight_tool_kinds.get(&c2_id), Some(&Mutating));
+        assert_eq!(h.pending_tool_invocations.len(), 1);
+        assert_eq!(h.pending_tool_invocations[0].1.id, "c3");
+
+        drive_harness_until_call_completes(&mut h, "c2");
+
+        // With the Mutating cleared, c3 finally dispatches.
+        assert_eq!(h.in_flight_tool_kinds.len(), 1);
+        assert_eq!(h.in_flight_tool_kinds.get(&c3_id), Some(&Pure));
+        assert!(h.pending_tool_invocations.is_empty());
+
+        drive_harness_until_call_completes(&mut h, "c3");
+        assert!(h.in_flight_tool_kinds.is_empty());
+
+        h.shutdown().expect("shutdown");
+    }
+
+    /// Pumps the harness event loop until the named tool call's result
+    /// or error is received and handled. Panics on timeout.
+    fn drive_harness_until_call_completes(h: &mut Harness, target_call_id: &str) {
+        let started = Instant::now();
+        loop {
+            if started.elapsed() >= Duration::from_secs(3) {
+                panic!("timed out waiting for {target_call_id} to complete");
+            }
+            let event =
+                h.rx.recv_timeout(Duration::from_secs(1))
+                    .expect("tool result should arrive");
+            match event {
+                HarnessEvent::FromConnection {
+                    connection_id,
+                    event,
+                } => {
+                    let is_target = match &event {
+                        Event::ToolResult(r) => r.call_id.as_str() == target_call_id,
+                        Event::ToolError(e) => e.call_id.as_str() == target_call_id,
+                        _ => false,
+                    };
+                    h.handle_extension_event(&connection_id, event)
+                        .expect("handle");
+                    if is_target {
+                        return;
+                    }
+                }
+                HarnessEvent::Disconnected { connection_id } => {
+                    h.handle_disconnect(&connection_id);
+                }
+                HarnessEvent::NewClient(_) => {}
+            }
+        }
     }
 
     // -- At-least-once delivery --

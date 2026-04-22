@@ -82,6 +82,7 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
                 name: "echo".into(),
                 description: Some("Echo test payloads".to_owned()),
                 parameters: None,
+                side_effects: tau_proto::ToolSideEffects::Pure,
             },
         })
     );

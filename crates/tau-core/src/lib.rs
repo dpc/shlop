@@ -1467,7 +1467,7 @@ mod tests {
 
     use tau_proto::{
         AgentResponseFinished, CborValue, EventName, EventReader, EventWriter, LifecycleSubscribe,
-        SessionPromptCreated, ToolRegister, UiPromptSubmitted,
+        SessionPromptCreated, ToolRegister, ToolSideEffects, UiPromptSubmitted,
     };
     use tempfile::TempDir;
 
@@ -1663,6 +1663,7 @@ mod tests {
                 name: "echo".into(),
                 description: Some("Echo a payload".to_owned()),
                 parameters: None,
+                side_effects: ToolSideEffects::Pure,
             },
         );
         assert!(register_report.warnings.is_empty());
@@ -1709,6 +1710,7 @@ mod tests {
                 name: "echo".into(),
                 description: Some("Echo".to_owned()),
                 parameters: None,
+                side_effects: ToolSideEffects::Pure,
             },
         );
         assert!(first_report.warnings.is_empty());
@@ -1719,6 +1721,7 @@ mod tests {
                 name: "echo".into(),
                 description: Some("Echo from another provider".to_owned()),
                 parameters: None,
+                side_effects: ToolSideEffects::Pure,
             },
         );
         assert_eq!(second_report.warnings.len(), 1);
@@ -1752,6 +1755,7 @@ mod tests {
                 name: "echo".into(),
                 description: None,
                 parameters: None,
+                side_effects: ToolSideEffects::Pure,
             },
         );
         registry.register(
@@ -1760,6 +1764,7 @@ mod tests {
                 name: "echo".into(),
                 description: None,
                 parameters: None,
+                side_effects: ToolSideEffects::Pure,
             },
         );
         registry.register(
@@ -1768,6 +1773,7 @@ mod tests {
                 name: "demo_upper".into(),
                 description: None,
                 parameters: None,
+                side_effects: ToolSideEffects::Pure,
             },
         );
 
@@ -1799,6 +1805,7 @@ mod tests {
                     name: "echo".into(),
                     description: Some("Echo".to_owned()),
                     parameters: None,
+                    side_effects: ToolSideEffects::Pure,
                 },
             }
             .tool,

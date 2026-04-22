@@ -54,7 +54,7 @@ impl Drop for SemaphoreGuard<'_> {
 use tau_proto::{
     Ack, CborValue, ClientKind, Event, EventReader, EventSelector, EventWriter, LifecycleHello,
     LifecycleReady, LifecycleSubscribe, LogEventId, PROTOCOL_VERSION, SessionStarted, ToolError,
-    ToolProgress, ToolRegister, ToolResult, ToolSpec,
+    ToolProgress, ToolRegister, ToolResult, ToolSideEffects, ToolSpec,
 };
 
 pub const ECHO_TOOL_NAME: &str = "echo";
@@ -113,6 +113,7 @@ where
                 name: ECHO_TOOL_NAME.into(),
                 description: Some("Echo the provided payload unchanged".to_owned()),
                 parameters: None,
+                side_effects: ToolSideEffects::Pure,
             },
         }))?;
     }
@@ -134,6 +135,7 @@ where
                 },
                 "required": ["path"]
             })),
+            side_effects: ToolSideEffects::Pure,
         },
         ToolSpec {
             name: WRITE_TOOL_NAME.into(),
@@ -156,6 +158,7 @@ where
                 },
                 "required": ["path", "content"]
             })),
+            side_effects: ToolSideEffects::Mutating,
         },
         ToolSpec {
             name: EDIT_TOOL_NAME.into(),
@@ -193,6 +196,7 @@ where
                 },
                 "required": ["path", "edits"]
             })),
+            side_effects: ToolSideEffects::Mutating,
         },
         ToolSpec {
             name: GREP_TOOL_NAME.into(),
@@ -236,6 +240,7 @@ where
                 },
                 "required": ["pattern"]
             })),
+            side_effects: ToolSideEffects::Pure,
         },
         ToolSpec {
             name: FIND_TOOL_NAME.into(),
@@ -264,6 +269,7 @@ where
                 },
                 "required": ["pattern"]
             })),
+            side_effects: ToolSideEffects::Pure,
         },
         ToolSpec {
             name: LS_TOOL_NAME.into(),
@@ -286,6 +292,7 @@ where
                     }
                 }
             })),
+            side_effects: ToolSideEffects::Pure,
         },
         ToolSpec {
             name: SHELL_TOOL_NAME.into(),
@@ -309,6 +316,7 @@ where
                 },
                 "required": ["command"]
             })),
+            side_effects: ToolSideEffects::Mutating,
         },
     ] {
         writer.write_event(&Event::ToolRegister(ToolRegister { tool }))?;
