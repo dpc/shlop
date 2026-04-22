@@ -4,10 +4,11 @@ use std::path::{Path, PathBuf};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use tau_config::settings::TauDirs;
 use tau_core::{PolicyStore, SessionStore};
 use tau_harness::{
-    HarnessError, ServeOptions, open_policy_store, open_session_store, run_daemon,
-    run_embedded_message, send_daemon_message,
+    EmbeddedOptions, HarnessError, ServeOptions, open_policy_store, open_session_store, run_daemon,
+    run_embedded_message_with_options, send_daemon_message,
 };
 use tempfile::TempDir;
 
@@ -18,23 +19,51 @@ pub struct TestRuntime {
     pub socket_path: PathBuf,
     pub session_store_path: PathBuf,
     pub policy_store_path: PathBuf,
+    /// Isolated `$XDG_CONFIG_HOME`/`$XDG_STATE_HOME` layout so tests don't
+    /// leak into (or read from) the developer's real `~/.config/tau` and
+    /// `~/.local/state/tau`.
+    pub dirs: TauDirs,
 }
 
 impl TestRuntime {
     /// Creates isolated temporary paths for one test runtime.
+    ///
+    /// Seeds the isolated config dir with a minimal `models.json5` so the
+    /// harness picks a non-empty `selected_model` and dispatches prompts
+    /// immediately. The agent can't resolve this fake provider, so it replies
+    /// with a short "cannot resolve model config" message — which is exactly
+    /// what tests asserting "response is non-empty" want.
     pub fn new() -> Result<Self, std::io::Error> {
         let tempdir = TempDir::new()?;
+        let config_dir = tempdir.path().join("config");
+        let state_dir = tempdir.path().join("state");
+        std::fs::create_dir_all(&config_dir)?;
+        std::fs::create_dir_all(&state_dir)?;
+        std::fs::write(
+            config_dir.join("models.json5"),
+            r#"{ providers: { "test": { auth: "none", models: [{ id: "echo" }] } } }"#,
+        )?;
         Ok(Self {
             socket_path: tempdir.path().join("daemon.sock"),
             session_store_path: tempdir.path().join("sessions.cbor"),
             policy_store_path: tempdir.path().join("policy.cbor"),
+            dirs: TauDirs {
+                config_dir: Some(config_dir),
+                state_dir: Some(state_dir),
+            },
             _tempdir: tempdir,
         })
     }
 
     /// Runs one embedded interaction and returns the agent response.
     pub fn run_embedded(&self, session_id: &str, message: &str) -> Result<String, HarnessError> {
-        run_embedded_message(&self.session_store_path, session_id, message)
+        Ok(run_embedded_message_with_options(
+            &self.session_store_path,
+            session_id,
+            message,
+            EmbeddedOptions::builder().dirs(self.dirs.clone()).build(),
+        )?
+        .response)
     }
 
     /// Starts a foreground daemon in a background thread.
@@ -42,15 +71,14 @@ impl TestRuntime {
         let socket_path = self.socket_path.clone();
         let session_store_path = self.session_store_path.clone();
         let policy_store_path = self.policy_store_path.clone();
+        let dirs = self.dirs.clone();
         let join_handle = thread::spawn(move || {
-            run_daemon(
-                socket_path,
-                session_store_path,
-                ServeOptions {
-                    max_clients,
-                    policy_store_path: Some(policy_store_path),
-                },
-            )
+            let mut options = ServeOptions::builder()
+                .policy_store_path(policy_store_path)
+                .dirs(dirs)
+                .build();
+            options.max_clients = max_clients;
+            run_daemon(socket_path, session_store_path, options)
         });
         DaemonHandle { join_handle }
     }

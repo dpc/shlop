@@ -56,6 +56,7 @@ tau-themes = { path = "crates/tau-themes" }
 
 # External crates
 base64 = "0.22"
+bon = "3"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 comfy-table = "7"
 ciborium = "0.2.2"

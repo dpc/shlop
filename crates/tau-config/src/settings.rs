@@ -167,31 +167,73 @@ pub fn config_dir() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("tau"))
 }
 
-/// Loads CLI settings from `~/.config/tau/cli.json5` with
-/// `cli.d/*.json5` overrides.
+/// Returns the default tau state directory (`~/.local/state/tau`).
+#[must_use]
+pub fn state_dir() -> Option<PathBuf> {
+    dirs::state_dir()
+        .or_else(dirs::data_local_dir)
+        .map(|d| d.join("tau"))
+}
+
+/// Overridable directory layout for tau. Use the defaults (`Self::default()`)
+/// for normal user runs or construct explicit paths for tests and custom
+/// installations.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TauDirs {
+    /// Where to look for `cli.json5`, `harness.json5`, `models.json5`, etc.
+    pub config_dir: Option<PathBuf>,
+    /// Where to read/write runtime state like `harness-state.json`.
+    pub state_dir: Option<PathBuf>,
+}
+
+impl Default for TauDirs {
+    fn default() -> Self {
+        Self {
+            config_dir: config_dir(),
+            state_dir: state_dir(),
+        }
+    }
+}
+
+/// Loads CLI settings from `cli.json5` with `cli.d/*.json5` overrides.
 pub fn load_cli_settings() -> Result<CliSettings, SettingsError> {
-    let Some(dir) = config_dir() else {
+    load_cli_settings_in(&TauDirs::default())
+}
+
+/// Like [`load_cli_settings`] but reads from an explicit directory layout.
+pub fn load_cli_settings_in(dirs: &TauDirs) -> Result<CliSettings, SettingsError> {
+    let Some(ref dir) = dirs.config_dir else {
         return Ok(CliSettings::default());
     };
-    load_json5_layered(&dir, "cli")
+    load_json5_layered(dir, "cli")
 }
 
-/// Loads harness settings from `~/.config/tau/harness.json5` with
-/// `harness.d/*.json5` overrides.
+/// Loads harness settings from `harness.json5` with `harness.d/*.json5`
+/// overrides.
 pub fn load_harness_settings() -> Result<HarnessSettings, SettingsError> {
-    let Some(dir) = config_dir() else {
+    load_harness_settings_in(&TauDirs::default())
+}
+
+/// Like [`load_harness_settings`] but reads from an explicit directory layout.
+pub fn load_harness_settings_in(dirs: &TauDirs) -> Result<HarnessSettings, SettingsError> {
+    let Some(ref dir) = dirs.config_dir else {
         return Ok(HarnessSettings::default());
     };
-    load_json5_layered(&dir, "harness")
+    load_json5_layered(dir, "harness")
 }
 
-/// Loads the model registry from `~/.config/tau/models.json5` with
-/// `models.d/*.json5` overrides.
+/// Loads the model registry from `models.json5` with `models.d/*.json5`
+/// overrides.
 pub fn load_models() -> Result<ModelRegistry, SettingsError> {
-    let Some(dir) = config_dir() else {
+    load_models_in(&TauDirs::default())
+}
+
+/// Like [`load_models`] but reads from an explicit directory layout.
+pub fn load_models_in(dirs: &TauDirs) -> Result<ModelRegistry, SettingsError> {
+    let Some(ref dir) = dirs.config_dir else {
         return Ok(ModelRegistry::default());
     };
-    load_json5_layered(&dir, "models")
+    load_json5_layered(dir, "models")
 }
 
 /// Generic layered JSON5 loader: reads `{name}.json5` then all

@@ -9,6 +9,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+tau-config.workspace = true
 tau-core.workspace = true
 tau-harness.workspace = true
 tempfile.workspace = true

@@ -47,10 +47,13 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 // ---------------------------------------------------------------------------
 
 /// Serve-loop options for daemon mode.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, bon::Builder)]
 pub struct ServeOptions {
     pub max_clients: Option<usize>,
     pub policy_store_path: Option<PathBuf>,
+    /// Directory layout (config + state) the harness reads. Defaults to
+    /// [`tau_config::settings::TauDirs::default()`] on the call site.
+    pub dirs: Option<tau_config::settings::TauDirs>,
 }
 
 /// One completed user interaction with optional progress updates.
@@ -427,6 +430,8 @@ struct Harness {
     selected_model: ModelId,
     /// Skills discovered by extensions, keyed by name.
     discovered_skills: std::collections::HashMap<String, DiscoveredSkill>,
+    /// Directory layout (config + state) the harness reads and writes.
+    dirs: tau_config::settings::TauDirs,
 }
 
 type AgentRunner = fn(UnixStream, UnixStream) -> Result<(), String>;
@@ -440,13 +445,21 @@ impl Harness {
     fn new(
         store_path: impl Into<PathBuf>,
         policy_store_path: impl Into<PathBuf>,
+        dirs: tau_config::settings::TauDirs,
     ) -> Result<Self, HarnessError> {
-        Self::new_with_agent(store_path, policy_store_path, default_agent_runner, false)
+        Self::new_with_agent(
+            store_path,
+            policy_store_path,
+            dirs,
+            default_agent_runner,
+            false,
+        )
     }
 
     fn new_with_agent(
         store_path: impl Into<PathBuf>,
         policy_store_path: impl Into<PathBuf>,
+        dirs: tau_config::settings::TauDirs,
         agent_runner: AgentRunner,
         include_echo: bool,
     ) -> Result<Self, HarnessError> {
@@ -492,7 +505,7 @@ impl Harness {
             in_process_thread: Some(thread),
         });
 
-        let (available_models, selected_model) = load_model_list();
+        let (available_models, selected_model) = load_model_list(&dirs);
 
         let mut harness = Self {
             tx,
@@ -516,6 +529,7 @@ impl Harness {
             available_models,
             selected_model,
             discovered_skills: std::collections::HashMap::new(),
+            dirs,
         };
 
         let n = harness.extensions.len();
@@ -534,6 +548,7 @@ impl Harness {
         config: &Config,
         store_path: impl Into<PathBuf>,
         policy_store_path: impl Into<PathBuf>,
+        dirs: tau_config::settings::TauDirs,
     ) -> Result<Self, HarnessError> {
         let (tx, rx) = mpsc::channel();
         let mut bus = EventBus::with_subscription_policy(Box::new(
@@ -569,7 +584,7 @@ impl Harness {
 
         let agent_connection_id = agent_connection_id.ok_or(HarnessError::NoAgentConfigured)?;
 
-        let (available_models, selected_model) = load_model_list();
+        let (available_models, selected_model) = load_model_list(&dirs);
 
         let mut harness = Self {
             tx,
@@ -593,6 +608,7 @@ impl Harness {
             available_models,
             selected_model,
             discovered_skills: std::collections::HashMap::new(),
+            dirs,
         };
 
         let n = harness.extensions.len();
@@ -881,7 +897,7 @@ impl Harness {
                 if self.available_models.contains(&select.model) {
                     let was_empty = self.selected_model.is_empty();
                     self.selected_model = select.model.clone();
-                    save_last_selected_model(&self.selected_model);
+                    save_last_selected_model(&self.dirs, &self.selected_model);
                     self.publish_event(
                         None,
                         Event::HarnessModelSelected(HarnessModelSelected {
@@ -1617,9 +1633,9 @@ fn spawn_supervised(
 ///
 /// Priority: default_model from harness.json5 → last used from state →
 /// first available → empty (no model).
-fn load_model_list() -> (Vec<ModelId>, ModelId) {
-    let model_registry = tau_config::settings::load_models().unwrap_or_default();
-    let harness_settings = tau_config::settings::load_harness_settings().unwrap_or_default();
+fn load_model_list(dirs: &tau_config::settings::TauDirs) -> (Vec<ModelId>, ModelId) {
+    let model_registry = tau_config::settings::load_models_in(dirs).unwrap_or_default();
+    let harness_settings = tau_config::settings::load_harness_settings_in(dirs).unwrap_or_default();
     let mut available: Vec<ModelId> = Vec::new();
     for (provider_name, provider_cfg) in &model_registry.providers {
         for model in &provider_cfg.models {
@@ -1632,7 +1648,7 @@ fn load_model_list() -> (Vec<ModelId>, ModelId) {
         .filter(|m| available.iter().any(|a| **a == **m))
         .map(ModelId::from)
         .or_else(|| {
-            load_last_selected_model()
+            load_last_selected_model(dirs)
                 .filter(|m| available.iter().any(|a| **a == **m))
                 .map(ModelId::from)
         })
@@ -1641,28 +1657,21 @@ fn load_model_list() -> (Vec<ModelId>, ModelId) {
     (available, selected)
 }
 
-/// State directory for harness runtime state.
-fn harness_state_dir() -> Option<PathBuf> {
-    dirs::state_dir()
-        .or_else(dirs::data_local_dir)
-        .map(|d| d.join("tau"))
-}
-
-/// Load the last-selected model from `~/.local/state/tau/harness-state.json`.
-fn load_last_selected_model() -> Option<String> {
-    let path = harness_state_dir()?.join("harness-state.json");
+/// Load the last-selected model from `<state_dir>/harness-state.json`.
+fn load_last_selected_model(dirs: &tau_config::settings::TauDirs) -> Option<String> {
+    let path = dirs.state_dir.as_ref()?.join("harness-state.json");
     let text = std::fs::read_to_string(path).ok()?;
     let json: serde_json::Value = serde_json::from_str(&text).ok()?;
     json["last_selected_model"].as_str().map(String::from)
 }
 
-/// Persist the last-selected model to `~/.local/state/tau/harness-state.json`.
-fn save_last_selected_model(model: &str) {
-    let Some(dir) = harness_state_dir() else {
+/// Persist the last-selected model to `<state_dir>/harness-state.json`.
+fn save_last_selected_model(dirs: &tau_config::settings::TauDirs, model: &str) {
+    let Some(dir) = dirs.state_dir.as_ref() else {
         return;
     };
     let path = dir.join("harness-state.json");
-    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::create_dir_all(dir);
     let json = serde_json::json!({ "last_selected_model": model });
     let _ = serde_json::to_string_pretty(&json)
         .ok()
@@ -2017,6 +2026,14 @@ pub fn default_config() -> Config {
 // Public API — in-process (test-only)
 // ---------------------------------------------------------------------------
 
+/// Options for a one-shot embedded run.
+#[derive(Clone, Debug, Default, Eq, PartialEq, bon::Builder)]
+pub struct EmbeddedOptions {
+    /// Directory layout (config + state) the harness reads. Defaults to
+    /// [`tau_config::settings::TauDirs::default()`] on the call site.
+    pub dirs: Option<tau_config::settings::TauDirs>,
+}
+
 /// Runs one embedded interaction and returns progress plus the final
 /// agent response.
 pub fn run_embedded_message_with_trace(
@@ -2029,6 +2046,7 @@ pub fn run_embedded_message_with_trace(
         session_id,
         message,
         default_agent_runner,
+        EmbeddedOptions::default(),
     )
 }
 
@@ -2041,7 +2059,25 @@ pub fn run_embedded_message(
     Ok(run_embedded_message_with_trace(session_store_path, session_id, message)?.response)
 }
 
-/// Like `run_embedded_message_with_trace` but uses the echo agent for testing.
+/// Like [`run_embedded_message_with_trace`] but lets the caller override
+/// directory layout and other options.
+pub fn run_embedded_message_with_options(
+    session_store_path: impl Into<PathBuf>,
+    session_id: &str,
+    message: &str,
+    options: EmbeddedOptions,
+) -> Result<InteractionOutcome, HarnessError> {
+    run_embedded_message_impl(
+        session_store_path,
+        session_id,
+        message,
+        default_agent_runner,
+        options,
+    )
+}
+
+/// Like [`run_embedded_message_with_trace`] but uses the echo agent for
+/// testing.
 pub fn run_embedded_message_with_echo(
     session_store_path: impl Into<PathBuf>,
     session_id: &str,
@@ -2050,7 +2086,13 @@ pub fn run_embedded_message_with_echo(
     fn echo_runner(r: UnixStream, w: UnixStream) -> Result<(), String> {
         tau_agent::run_echo(r, w).map_err(|e| e.to_string())
     }
-    run_embedded_message_impl(session_store_path, session_id, message, echo_runner)
+    run_embedded_message_impl(
+        session_store_path,
+        session_id,
+        message,
+        echo_runner,
+        EmbeddedOptions::default(),
+    )
 }
 
 fn run_embedded_message_impl(
@@ -2058,11 +2100,14 @@ fn run_embedded_message_impl(
     session_id: &str,
     message: &str,
     agent_runner: AgentRunner,
+    options: EmbeddedOptions,
 ) -> Result<InteractionOutcome, HarnessError> {
     let session_store_path = session_store_path.into();
+    let dirs = options.dirs.unwrap_or_default();
     let mut harness = Harness::new_with_agent(
         session_store_path.clone(),
         default_policy_store_path_from(&session_store_path),
+        dirs,
         agent_runner,
         true,
     )?;
@@ -2089,7 +2134,8 @@ pub fn run_daemon(
         .policy_store_path
         .clone()
         .unwrap_or_else(|| default_policy_store_path_from(&session_store_path));
-    let mut harness = Harness::new(session_store_path, policy_store_path)?;
+    let dirs = options.dirs.clone().unwrap_or_default();
+    let mut harness = Harness::new(session_store_path, policy_store_path, dirs)?;
 
     let tx = harness.tx.clone();
     thread::spawn(move || {
@@ -2120,7 +2166,8 @@ pub fn run_daemon_with_config(
         .policy_store_path
         .clone()
         .unwrap_or_else(|| default_policy_store_path_from(&session_store_path));
-    let mut harness = Harness::from_config(config, session_store_path, policy_store_path)?;
+    let dirs = options.dirs.clone().unwrap_or_default();
+    let mut harness = Harness::from_config(config, session_store_path, policy_store_path, dirs)?;
 
     let tx = harness.tx.clone();
     thread::spawn(move || {
@@ -2233,7 +2280,8 @@ pub fn run_harness_daemon(
         .clone()
         .unwrap_or_else(|| project_root.join(".tau").join("policy.cbor"));
 
-    let mut harness = Harness::from_config(config, &session_store_path, &policy_store_path)?;
+    let dirs = options.dirs.clone().unwrap_or_default();
+    let mut harness = Harness::from_config(config, &session_store_path, &policy_store_path, dirs)?;
 
     // Enable event debug log.
     let log_dir = project_root.join(".tau");
@@ -2427,7 +2475,13 @@ mod tests {
         sp: impl Into<PathBuf>,
         pp: impl Into<PathBuf>,
     ) -> Result<Harness, HarnessError> {
-        Harness::new_with_agent(sp, pp, echo_runner, true)
+        Harness::new_with_agent(
+            sp,
+            pp,
+            tau_config::settings::TauDirs::default(),
+            echo_runner,
+            true,
+        )
     }
 
     #[test]
@@ -2457,16 +2511,7 @@ mod tests {
         let server = thread::spawn({
             let sock = sock.clone();
             let sp = sp.clone();
-            move || {
-                run_daemon(
-                    sock,
-                    sp,
-                    ServeOptions {
-                        max_clients: Some(2),
-                        policy_store_path: None,
-                    },
-                )
-            }
+            move || run_daemon(sock, sp, ServeOptions::builder().max_clients(2).build())
         });
 
         let started = Instant::now();
@@ -2612,16 +2657,7 @@ mod tests {
         let server = thread::spawn({
             let sock = sock.clone();
             let sp = sp.clone();
-            move || {
-                run_daemon(
-                    sock,
-                    sp,
-                    ServeOptions {
-                        max_clients: Some(1),
-                        policy_store_path: None,
-                    },
-                )
-            }
+            move || run_daemon(sock, sp, ServeOptions::builder().max_clients(1).build())
         });
 
         let started = Instant::now();
@@ -2684,10 +2720,10 @@ mod tests {
                 run_daemon(
                     sock,
                     sp,
-                    ServeOptions {
-                        max_clients: Some(1),
-                        policy_store_path: Some(pp),
-                    },
+                    ServeOptions::builder()
+                        .max_clients(1)
+                        .policy_store_path(pp)
+                        .build(),
                 )
             }
         });
