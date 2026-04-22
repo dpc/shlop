@@ -53,8 +53,8 @@ impl Drop for SemaphoreGuard<'_> {
 
 use tau_proto::{
     CborValue, ClientKind, Event, EventReader, EventSelector, EventWriter, LifecycleHello,
-    LifecycleReady, LifecycleSubscribe, PROTOCOL_VERSION, ToolError, ToolProgress, ToolRegister,
-    ToolResult, ToolSpec,
+    LifecycleReady, LifecycleSubscribe, PROTOCOL_VERSION, SessionContextRequested, ToolError,
+    ToolProgress, ToolRegister, ToolResult, ToolSpec,
 };
 
 pub const ECHO_TOOL_NAME: &str = "echo";
@@ -66,9 +66,14 @@ pub const GREP_TOOL_NAME: &str = "grep";
 pub const FIND_TOOL_NAME: &str = "find";
 pub const LS_TOOL_NAME: &str = "ls";
 
+struct DiscoveredAgentsFile {
+    file_path: PathBuf,
+    content: String,
+}
+
 /// Runs the extension on stdin/stdout (production, no echo).
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
-    run_impl(std::io::stdin(), std::io::stdout(), false, true)
+    run_impl(std::io::stdin(), std::io::stdout(), false)
 }
 
 /// Runs the extension over arbitrary reader/writer streams.
@@ -79,15 +84,10 @@ where
     R: Read,
     W: Write + Send + 'static,
 {
-    run_impl(reader, writer, include_echo, true)
+    run_impl(reader, writer, include_echo)
 }
 
-fn run_impl<R, W>(
-    reader: R,
-    writer: W,
-    include_echo: bool,
-    announce_skills: bool,
-) -> Result<(), Box<dyn Error>>
+fn run_impl<R, W>(reader: R, writer: W, include_echo: bool) -> Result<(), Box<dyn Error>>
 where
     R: Read,
     W: Write + Send + 'static,
@@ -103,6 +103,7 @@ where
     writer.write_event(&Event::LifecycleSubscribe(LifecycleSubscribe {
         selectors: vec![
             EventSelector::Exact(tau_proto::EventName::ToolInvoke),
+            EventSelector::Exact(tau_proto::EventName::SessionContextRequested),
             EventSelector::Exact(tau_proto::EventName::LifecycleDisconnect),
         ],
     }))?;
@@ -312,32 +313,6 @@ where
         writer.write_event(&Event::ToolRegister(ToolRegister { tool }))?;
     }
 
-    // Discover and announce skills.
-    if announce_skills {
-        let mut skill_dirs = Vec::new();
-        if let Ok(cwd) = std::env::current_dir() {
-            skill_dirs.push(cwd.join(".agents").join("skills"));
-        }
-        if let Some(home) = dirs::home_dir() {
-            skill_dirs.push(home.join(".agents").join("skills"));
-        }
-        let result = tau_skills::load_skills_from_dirs(&skill_dirs);
-        for skill in &result.skills {
-            let file_path = skill
-                .file_path
-                .canonicalize()
-                .unwrap_or_else(|_| skill.file_path.clone())
-                .display()
-                .to_string();
-            writer.write_event(&Event::ExtSkillAvailable(tau_proto::ExtSkillAvailable {
-                name: skill.name.clone(),
-                description: skill.description.clone(),
-                file_path,
-                add_to_prompt: skill.add_to_prompt,
-            }))?;
-        }
-    }
-
     writer.write_event(&Event::LifecycleReady(LifecycleReady {
         message: Some("filesystem and shell tools ready".to_owned()),
     }))?;
@@ -375,6 +350,9 @@ where
                     dispatch_tool_invoke(invoke, include_echo, &tx);
                 });
             }
+            Event::SessionContextRequested(request) => {
+                dispatch_session_context_request(request, &tx);
+            }
             Event::LifecycleDisconnect(_) => break,
             _ => {}
         }
@@ -399,6 +377,56 @@ fn dispatch_tool_invoke(
     for event in events {
         let _ = tx.send(event);
     }
+}
+
+fn dispatch_session_context_request(request: SessionContextRequested, tx: &mpsc::Sender<Event>) {
+    for event in build_session_context_events(request) {
+        let _ = tx.send(event);
+    }
+}
+
+fn build_session_context_events(request: SessionContextRequested) -> Vec<Event> {
+    let mut events = Vec::new();
+
+    let mut skill_dirs = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        skill_dirs.push(cwd.join(".agents").join("skills"));
+    }
+    if let Some(home) = dirs::home_dir() {
+        skill_dirs.push(home.join(".agents").join("skills"));
+    }
+
+    let result = tau_skills::load_skills_from_dirs(&skill_dirs);
+    for skill in result.skills {
+        let file_path = skill
+            .file_path
+            .canonicalize()
+            .unwrap_or(skill.file_path)
+            .display()
+            .to_string();
+        events.push(Event::ExtSkillAvailable(tau_proto::ExtSkillAvailable {
+            name: skill.name,
+            description: skill.description,
+            file_path,
+            add_to_prompt: skill.add_to_prompt,
+        }));
+    }
+
+    if let Ok(cwd) = std::env::current_dir() {
+        for agents_file in discover_agents_files_from(&cwd) {
+            events.push(Event::ExtAgentsAvailable(tau_proto::ExtAgentsAvailable {
+                file_path: agents_file.file_path.display().to_string(),
+                content: agents_file.content,
+            }));
+        }
+    }
+
+    events.push(Event::ExtensionContextReady(
+        tau_proto::ExtensionContextReady {
+            session_id: request.session_id,
+        },
+    ));
+    events
 }
 
 /// Execute a tool and return the response event(s).
@@ -1085,6 +1113,49 @@ fn path_to_slash(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+fn discover_agents_files_from(cwd: &Path) -> Vec<DiscoveredAgentsFile> {
+    let mut dirs = Vec::new();
+    let mut current = cwd.to_path_buf();
+    loop {
+        dirs.push(current.clone());
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        if parent == current {
+            break;
+        }
+        current = parent.to_path_buf();
+    }
+    dirs.reverse();
+
+    let mut seen = std::collections::HashSet::new();
+    let mut discovered = Vec::new();
+    for dir in dirs {
+        let candidate = dir.join("AGENTS.md");
+        let Ok(metadata) = fs::metadata(&candidate) else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+
+        let Ok(content) = fs::read_to_string(&candidate) else {
+            continue;
+        };
+        if content.trim().is_empty() {
+            continue;
+        }
+
+        let file_path = candidate.canonicalize().unwrap_or(candidate);
+        if !seen.insert(file_path.clone()) {
+            continue;
+        }
+        discovered.push(DiscoveredAgentsFile { file_path, content });
+    }
+
+    discovered
+}
+
 fn run_ls(arguments: &CborValue) -> Result<CborValue, String> {
     let path = optional_argument_text(arguments, "path").unwrap_or_else(|| ".".to_owned());
     let limit = optional_argument_int(arguments, "limit")
@@ -1484,7 +1555,7 @@ mod tests {
             .try_clone()
             .expect("runtime reader clone should succeed");
         thread::spawn(move || {
-            run_impl(reader_stream, runtime_stream, true, false).expect("extension should run");
+            run_impl(reader_stream, runtime_stream, true).expect("extension should run");
         });
         (
             EventReader::new(BufReader::new(
@@ -1517,6 +1588,66 @@ mod tests {
                 .expect("startup event should arrive");
             assert_eq!(event.name(), expected);
         }
+    }
+
+    #[test]
+    fn discover_agents_files_walks_ancestor_chain_in_order() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let root = tempdir.path();
+        let nested = root.join("pkg/src");
+        fs::create_dir_all(&nested).expect("mkdir");
+
+        let root_agents = root.join("AGENTS.md");
+        let pkg_agents = root.join("pkg").join("AGENTS.md");
+        let empty_agents = root.join("pkg").join("src").join("AGENTS.md");
+
+        fs::write(&root_agents, "# Root\n- rule one\n").expect("write root");
+        fs::write(&pkg_agents, "# Package\n- rule two\n").expect("write pkg");
+        fs::write(&empty_agents, "   \n").expect("write empty");
+
+        let discovered = discover_agents_files_from(&nested);
+        assert_eq!(discovered.len(), 2);
+        assert_eq!(
+            discovered[0].file_path,
+            root_agents.canonicalize().expect("canonical root")
+        );
+        assert_eq!(
+            discovered[1].file_path,
+            pkg_agents.canonicalize().expect("canonical pkg")
+        );
+        assert!(discovered[0].content.contains("rule one"));
+        assert!(discovered[1].content.contains("rule two"));
+    }
+
+    #[test]
+    fn session_context_request_emits_ready_after_startup() {
+        let (mut reader, mut writer) = spawn_extension();
+        drain_startup(&mut reader);
+
+        writer
+            .write_event(&Event::SessionContextRequested(SessionContextRequested {
+                session_id: "s1".into(),
+            }))
+            .expect("request");
+        writer.flush().expect("flush");
+
+        loop {
+            let event = reader.read_event().expect("read").expect("context event");
+            if event.name() == EventName::ExtensionContextReady {
+                let Event::ExtensionContextReady(ready) = event else {
+                    unreachable!("matched on event name");
+                };
+                assert_eq!(ready.session_id, "s1");
+                break;
+            }
+        }
+
+        writer
+            .write_event(&Event::LifecycleDisconnect(
+                tau_proto::LifecycleDisconnect { reason: None },
+            ))
+            .expect("disconnect");
+        writer.flush().expect("flush");
     }
 
     #[test]

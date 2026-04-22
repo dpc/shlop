@@ -294,6 +294,13 @@ fn spawn_writer_thread(
 enum TurnState {
     /// Waiting for user input (or queued prompt dispatch).
     Idle,
+    /// Waiting for tool extensions to announce session-start context
+    /// before the first prompt of a session is sent to the agent.
+    RefreshingContext {
+        session_id: SessionId,
+        prompt_text: String,
+        waiting_on: std::collections::HashSet<tau_proto::ConnectionId>,
+    },
     /// Agent is processing a prompt; we are waiting for its response.
     AgentThinking { _session_id: SessionId },
     /// Agent requested tool calls; waiting for all results before
@@ -382,9 +389,17 @@ impl DebugEventLog {
 
 /// A skill discovered by an extension.
 struct DiscoveredSkill {
+    source_id: tau_proto::ConnectionId,
     description: String,
     file_path: std::path::PathBuf,
     add_to_prompt: bool,
+}
+
+/// One AGENTS.md file discovered by an extension.
+struct DiscoveredAgentsFile {
+    source_id: tau_proto::ConnectionId,
+    file_path: PathBuf,
+    content: String,
 }
 
 /// Connection ID used for harness-owned tools (e.g. the `skill` tool).
@@ -412,8 +427,8 @@ struct Harness {
     /// Whose turn it is in the agent interaction loop.
     turn_state: TurnState,
     /// Queued user prompts waiting for the current turn to finish.
-    /// Each entry is (session_id, text) — already persisted in the
-    /// session tree, just waiting for dispatch.
+    /// Each entry is (session_id, text) and is persisted only when it
+    /// is actually dispatched to the agent.
     //
     // Future: add a steering queue for mid-turn injection. Steering
     // messages would be injected after tool-call turns complete but
@@ -430,6 +445,10 @@ struct Harness {
     selected_model: ModelId,
     /// Skills discovered by extensions, keyed by name.
     discovered_skills: std::collections::HashMap<String, DiscoveredSkill>,
+    /// AGENTS.md files discovered by extensions, in delivery order.
+    discovered_agents_files: Vec<DiscoveredAgentsFile>,
+    /// Sessions whose startup context has already been loaded.
+    initialized_sessions: std::collections::HashSet<SessionId>,
     /// Directory layout (config + state) the harness reads and writes.
     dirs: tau_config::settings::TauDirs,
 }
@@ -529,6 +548,8 @@ impl Harness {
             available_models,
             selected_model,
             discovered_skills: std::collections::HashMap::new(),
+            discovered_agents_files: Vec::new(),
+            initialized_sessions: std::collections::HashSet::new(),
             dirs,
         };
 
@@ -608,6 +629,8 @@ impl Harness {
             available_models,
             selected_model,
             discovered_skills: std::collections::HashMap::new(),
+            discovered_agents_files: Vec::new(),
+            initialized_sessions: std::collections::HashSet::new(),
             dirs,
         };
 
@@ -841,12 +864,32 @@ impl Harness {
                 self.discovered_skills.insert(
                     skill.name.clone(),
                     DiscoveredSkill {
+                        source_id: source_id.into(),
                         description: skill.description.clone(),
                         file_path: std::path::PathBuf::from(&skill.file_path),
                         add_to_prompt: skill.add_to_prompt,
                     },
                 );
                 self.publish_event(Some(source_id), event);
+            }
+            Event::ExtAgentsAvailable(ref agents) => {
+                let file_path = PathBuf::from(&agents.file_path);
+                if let Some(existing) = self.discovered_agents_files.iter_mut().find(|existing| {
+                    existing.source_id == source_id && existing.file_path == file_path
+                }) {
+                    existing.content = agents.content.clone();
+                } else {
+                    self.discovered_agents_files.push(DiscoveredAgentsFile {
+                        source_id: source_id.into(),
+                        file_path,
+                        content: agents.content.clone(),
+                    });
+                }
+                self.publish_event(Some(source_id), event);
+            }
+            Event::ExtensionContextReady(ready) => {
+                self.publish_event(Some(source_id), Event::ExtensionContextReady(ready.clone()));
+                self.handle_extension_context_ready(source_id, ready)?;
             }
             Event::AgentPromptSubmitted(_) | Event::AgentResponseUpdated(_) => {
                 self.publish_event(Some(source_id), event);
@@ -936,12 +979,7 @@ impl Harness {
                         self.emit_info("no model selected — use /model to pick one");
                     }
                 } else {
-                    self.store
-                        .append_user_message(prompt.session_id.as_str(), prompt.text.clone())?;
-                    self.turn_state = TurnState::AgentThinking {
-                        _session_id: prompt.session_id.clone(),
-                    };
-                    self.send_prompt_to_agent(&prompt.session_id);
+                    self.dispatch_user_prompt(prompt.session_id, prompt.text)?;
                 }
                 Ok(true)
             }
@@ -954,6 +992,8 @@ impl Harness {
     }
 
     fn handle_disconnect(&mut self, connection_id: &str) {
+        self.remove_discovered_context(connection_id);
+        self.maybe_complete_context_refresh_for_disconnect(connection_id);
         let Some(meta) = self.bus.disconnect(connection_id) else {
             return;
         };
@@ -1146,9 +1186,159 @@ impl Harness {
         }
     }
 
+    fn remove_discovered_context(&mut self, source_id: &str) {
+        self.discovered_skills
+            .retain(|_, skill| skill.source_id != source_id);
+        self.discovered_agents_files
+            .retain(|file| file.source_id != source_id);
+    }
+
+    fn context_refresh_provider_ids(&self) -> std::collections::HashSet<tau_proto::ConnectionId> {
+        let event = Event::SessionContextRequested(tau_proto::SessionContextRequested {
+            session_id: "probe".into(),
+        });
+        self.bus
+            .connections()
+            .into_iter()
+            .filter(|connection| {
+                connection.kind == ClientKind::Tool
+                    && connection.origin != ConnectionOrigin::Socket
+                    && self
+                        .bus
+                        .subscriptions(connection.id.as_str())
+                        .is_some_and(|selectors| selector_matches_event(selectors, &event))
+            })
+            .map(|connection| connection.id)
+            .collect()
+    }
+
+    fn dispatch_user_prompt(
+        &mut self,
+        session_id: SessionId,
+        text: String,
+    ) -> Result<(), HarnessError> {
+        if self.initialized_sessions.contains(&session_id) {
+            self.store
+                .append_user_message(session_id.as_str(), text.clone())?;
+            self.turn_state = TurnState::AgentThinking {
+                _session_id: session_id.clone(),
+            };
+            self.send_prompt_to_agent(&session_id);
+            return Ok(());
+        }
+
+        self.start_session_context_refresh(session_id, text);
+        Ok(())
+    }
+
+    fn start_session_context_refresh(&mut self, session_id: SessionId, prompt_text: String) {
+        let waiting_on = self.context_refresh_provider_ids();
+        if waiting_on.is_empty() {
+            if let Err(error) = self.complete_session_start_prompt(session_id, prompt_text) {
+                self.emit_info(&format!("failed to dispatch session-start prompt: {error}"));
+                self.turn_state = TurnState::Idle;
+            }
+            return;
+        }
+
+        for source_id in &waiting_on {
+            self.remove_discovered_context(source_id.as_str());
+        }
+
+        self.turn_state = TurnState::RefreshingContext {
+            session_id: session_id.clone(),
+            prompt_text,
+            waiting_on,
+        };
+        self.publish_event(
+            None,
+            Event::SessionContextRequested(tau_proto::SessionContextRequested { session_id }),
+        );
+    }
+
+    fn handle_extension_context_ready(
+        &mut self,
+        source_id: &str,
+        ready: tau_proto::ExtensionContextReady,
+    ) -> Result<(), HarnessError> {
+        let completed_prompt = match &mut self.turn_state {
+            TurnState::RefreshingContext {
+                session_id,
+                prompt_text,
+                waiting_on,
+            } if *session_id == ready.session_id => {
+                waiting_on.remove(source_id);
+                waiting_on
+                    .is_empty()
+                    .then(|| (session_id.clone(), std::mem::take(prompt_text)))
+            }
+            _ => None,
+        };
+
+        if let Some((session_id, prompt_text)) = completed_prompt {
+            self.complete_session_start_prompt(session_id, prompt_text)?;
+        }
+
+        Ok(())
+    }
+
+    fn maybe_complete_context_refresh_for_disconnect(&mut self, connection_id: &str) {
+        let completed_prompt = match &mut self.turn_state {
+            TurnState::RefreshingContext {
+                session_id,
+                prompt_text,
+                waiting_on,
+            } => {
+                let removed = waiting_on.remove(connection_id);
+                if removed && waiting_on.is_empty() {
+                    Some((session_id.clone(), std::mem::take(prompt_text)))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+
+        if let Some((session_id, prompt_text)) = completed_prompt {
+            if let Err(error) = self.complete_session_start_prompt(session_id, prompt_text) {
+                self.emit_info(&format!("failed to dispatch session-start prompt: {error}"));
+                self.turn_state = TurnState::Idle;
+            }
+        }
+    }
+
+    fn complete_session_start_prompt(
+        &mut self,
+        session_id: SessionId,
+        prompt_text: String,
+    ) -> Result<(), HarnessError> {
+        self.ensure_agents_context_inserted(session_id.as_str())?;
+        self.store
+            .append_user_message(session_id.as_str(), prompt_text)?;
+        self.initialized_sessions.insert(session_id.clone());
+        self.turn_state = TurnState::AgentThinking {
+            _session_id: session_id.clone(),
+        };
+        self.send_prompt_to_agent(&session_id);
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Agent prompt assembly
     // -----------------------------------------------------------------------
+
+    fn ensure_agents_context_inserted(&mut self, session_id: &str) -> Result<(), HarnessError> {
+        if self.discovered_agents_files.is_empty() {
+            return Ok(());
+        }
+
+        let text = render_agents_context_message(self.discovered_agents_files.iter());
+        self.store
+            .append_user_message(session_id.to_owned(), text)
+            .map_err(HarnessError::from)?;
+
+        Ok(())
+    }
 
     fn send_prompt_to_agent(&mut self, session_id: &str) -> SessionPromptId {
         let tree = self.store.session(session_id);
@@ -1242,25 +1432,20 @@ impl Harness {
             return;
         }
         if let Some((session_id, text)) = self.pending_prompts.pop_front() {
-            let _ = self.store.append_user_message(&*session_id, text);
-            self.turn_state = TurnState::AgentThinking {
-                _session_id: session_id.clone(),
-            };
-            self.send_prompt_to_agent(&session_id);
+            if let Err(error) = self.dispatch_user_prompt(session_id, text) {
+                self.emit_info(&format!("failed to dispatch queued prompt: {error}"));
+                self.turn_state = TurnState::Idle;
+            }
         }
     }
 
     /// Dispatches the next queued prompt or marks the agent as idle.
     fn dispatch_next_or_idle(&mut self, _completed_session_id: &str) {
         if let Some((session_id, text)) = self.pending_prompts.pop_front() {
-            // Persist now — the user message is placed after the
-            // response from the just-finished turn, maintaining
-            // correct role alternation.
-            let _ = self.store.append_user_message(&*session_id, text);
-            self.turn_state = TurnState::AgentThinking {
-                _session_id: session_id.clone(),
-            };
-            self.send_prompt_to_agent(&session_id);
+            if let Err(error) = self.dispatch_user_prompt(session_id, text) {
+                self.emit_info(&format!("failed to dispatch queued prompt: {error}"));
+                self.turn_state = TurnState::Idle;
+            }
         } else {
             self.turn_state = TurnState::Idle;
         }
@@ -1461,12 +1646,7 @@ impl Harness {
         text: &str,
         _source_id: Option<&str>,
     ) -> Result<InteractionOutcome, HarnessError> {
-        self.store
-            .append_user_message(session_id.to_owned(), text.to_owned())?;
-        self.turn_state = TurnState::AgentThinking {
-            _session_id: session_id.to_owned().into(),
-        };
-        self.send_prompt_to_agent(session_id);
+        self.dispatch_user_prompt(session_id.into(), text.to_owned())?;
 
         let started_at = Instant::now();
         let mut progress_messages = Vec::new();
@@ -1735,6 +1915,30 @@ fn build_system_prompt(
     prompt.push_str(&format!("Current working directory: {cwd}\n"));
 
     prompt
+}
+
+fn render_agents_context_message<'a>(
+    files: impl IntoIterator<Item = &'a DiscoveredAgentsFile>,
+) -> String {
+    let mut text = String::from(
+        "# AGENTS.md instructions\n\n\
+The following instructions were loaded from AGENTS.md files.\n\
+More specific files usually override broader ones.\n\n",
+    );
+
+    for file in files {
+        text.push_str(&format!(
+            "<AGENTS_FILE path=\"{}\">\n",
+            file.file_path.display()
+        ));
+        text.push_str(&file.content);
+        if !file.content.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str("</AGENTS_FILE>\n\n");
+    }
+
+    text
 }
 
 /// Returns the current date as YYYY-MM-DD without chrono.
@@ -2787,6 +2991,151 @@ mod tests {
         server.join().expect("join");
     }
 
+    fn drive_until_final_response(harness: &mut Harness) {
+        let started = Instant::now();
+        loop {
+            let event = harness
+                .rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("should receive agent event");
+            match event {
+                HarnessEvent::FromConnection {
+                    connection_id,
+                    event,
+                } => {
+                    let is_final = matches!(
+                        &event,
+                        Event::AgentResponseFinished(response) if response.tool_calls.is_empty()
+                    );
+                    harness
+                        .handle_extension_event(&connection_id, event)
+                        .expect("event should handle");
+                    if is_final {
+                        return;
+                    }
+                }
+                HarnessEvent::Disconnected { connection_id } => {
+                    harness.handle_disconnect(&connection_id);
+                }
+                HarnessEvent::NewClient(_) => {}
+            }
+            assert!(started.elapsed() < Duration::from_secs(2), "timeout");
+        }
+    }
+
+    // -- AGENTS.md --
+
+    #[test]
+    fn agents_context_is_injected_before_first_user_message() {
+        let td = TempDir::new().expect("tempdir");
+        let sp = td.path().join("sessions.cbor");
+        let pp = td.path().join("policy.cbor");
+        let mut h = echo_harness(&sp, &pp).expect("start");
+        let tools_connection_id = h
+            .extension_connection_id("tools")
+            .expect("tools")
+            .to_owned();
+
+        h.discovered_agents_files.push(DiscoveredAgentsFile {
+            source_id: tools_connection_id.clone().into(),
+            file_path: PathBuf::from("/repo/AGENTS.md"),
+            content: "# Root\n- root rule\n".to_owned(),
+        });
+        h.discovered_agents_files.push(DiscoveredAgentsFile {
+            source_id: tools_connection_id.clone().into(),
+            file_path: PathBuf::from("/repo/pkg/AGENTS.md"),
+            content: "# Package\n- package rule\n".to_owned(),
+        });
+        h.turn_state = TurnState::RefreshingContext {
+            session_id: "s1".into(),
+            prompt_text: "hello".to_owned(),
+            waiting_on: [tools_connection_id.clone().into()].into_iter().collect(),
+        };
+        h.handle_extension_event(
+            &tools_connection_id,
+            Event::ExtensionContextReady(tau_proto::ExtensionContextReady {
+                session_id: "s1".into(),
+            }),
+        )
+        .expect("ready");
+
+        let branch = h.store.session("s1").expect("session").current_branch();
+        let SessionEntry::UserMessage { text: injected } = branch[0] else {
+            panic!("expected injected AGENTS.md user message");
+        };
+        assert!(injected.starts_with("# AGENTS.md instructions"));
+        assert!(injected.contains("<AGENTS_FILE path=\"/repo/AGENTS.md\">"));
+        assert!(injected.contains("<AGENTS_FILE path=\"/repo/pkg/AGENTS.md\">"));
+        let root_pos = injected.find("root rule").expect("root rule");
+        let pkg_pos = injected.find("package rule").expect("package rule");
+        assert!(
+            root_pos < pkg_pos,
+            "broader file should appear before nested one"
+        );
+
+        let SessionEntry::UserMessage { text: first_prompt } = branch[1] else {
+            panic!("expected first user prompt after injected AGENTS.md message");
+        };
+        assert_eq!(first_prompt, "hello");
+        assert!(h.initialized_sessions.contains("s1"));
+
+        drive_until_final_response(&mut h);
+        h.shutdown().expect("shutdown");
+    }
+
+    #[test]
+    fn agents_context_is_not_reinjected_for_same_session() {
+        let td = TempDir::new().expect("tempdir");
+        let sp = td.path().join("sessions.cbor");
+        let pp = td.path().join("policy.cbor");
+        let mut h = echo_harness(&sp, &pp).expect("start");
+        let tools_connection_id = h
+            .extension_connection_id("tools")
+            .expect("tools")
+            .to_owned();
+
+        h.discovered_agents_files.push(DiscoveredAgentsFile {
+            source_id: tools_connection_id.clone().into(),
+            file_path: PathBuf::from("/repo/AGENTS.md"),
+            content: "# Root\n- root rule\n".to_owned(),
+        });
+        h.turn_state = TurnState::RefreshingContext {
+            session_id: "s1".into(),
+            prompt_text: "hello".to_owned(),
+            waiting_on: [tools_connection_id.clone().into()].into_iter().collect(),
+        };
+        h.handle_extension_event(
+            &tools_connection_id,
+            Event::ExtensionContextReady(tau_proto::ExtensionContextReady {
+                session_id: "s1".into(),
+            }),
+        )
+        .expect("ready");
+        drive_until_final_response(&mut h);
+
+        h.dispatch_user_prompt("s1".into(), "again".to_owned())
+            .expect("second prompt");
+        drive_until_final_response(&mut h);
+
+        let branch = h.store.session("s1").expect("session").current_branch();
+        let injected_count = branch
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry,
+                    SessionEntry::UserMessage { text }
+                        if text.starts_with("# AGENTS.md instructions")
+                )
+            })
+            .count();
+        assert_eq!(
+            injected_count, 1,
+            "AGENTS.md context should only be inserted once"
+        );
+
+        h.shutdown().expect("shutdown");
+    }
+
     // -- Skills --
 
     #[test]
@@ -2795,6 +3144,7 @@ mod tests {
         skills.insert(
             "brave-search".to_owned(),
             DiscoveredSkill {
+                source_id: "skills".into(),
                 description: "Web search via Brave API".to_owned(),
                 file_path: PathBuf::from("/skills/brave-search/SKILL.md"),
                 add_to_prompt: true,
@@ -2812,6 +3162,7 @@ mod tests {
         skills.insert(
             "hidden".to_owned(),
             DiscoveredSkill {
+                source_id: "skills".into(),
                 description: "Should not appear".to_owned(),
                 file_path: PathBuf::from("/skills/hidden/SKILL.md"),
                 add_to_prompt: false,
@@ -2843,6 +3194,7 @@ mod tests {
         h.discovered_skills.insert(
             "my-skill".to_owned(),
             DiscoveredSkill {
+                source_id: "skills".into(),
                 description: "A test skill".to_owned(),
                 file_path: skill_file,
                 add_to_prompt: true,

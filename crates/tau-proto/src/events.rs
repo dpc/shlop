@@ -60,6 +60,10 @@ pub enum EventName {
     ExtensionRestarting,
     #[serde(rename = "extension.skill_available")]
     ExtSkillAvailable,
+    #[serde(rename = "extension.agents_available")]
+    ExtAgentsAvailable,
+    #[serde(rename = "extension.context_ready")]
+    ExtensionContextReady,
 
     // Harness informational messages
     #[serde(rename = "harness.info")]
@@ -78,6 +82,8 @@ pub enum EventName {
     // Session events — facts from the harness session tracker
     #[serde(rename = "session.prompt_queued")]
     SessionPromptQueued,
+    #[serde(rename = "session.context_requested")]
+    SessionContextRequested,
     #[serde(rename = "session.prompt_created")]
     SessionPromptCreated,
 
@@ -113,12 +119,15 @@ impl EventName {
             Self::ExtensionExited => "extension.exited",
             Self::ExtensionRestarting => "extension.restarting",
             Self::ExtSkillAvailable => "extension.skill_available",
+            Self::ExtAgentsAvailable => "extension.agents_available",
+            Self::ExtensionContextReady => "extension.context_ready",
             Self::HarnessInfo => "harness.info",
             Self::HarnessModelsAvailable => "harness.models_available",
             Self::HarnessModelSelected => "harness.model_selected",
             Self::UiPromptSubmitted => "ui.prompt_submitted",
             Self::UiModelSelect => "ui.model_select",
             Self::SessionPromptQueued => "session.prompt_queued",
+            Self::SessionContextRequested => "session.context_requested",
             Self::SessionPromptCreated => "session.prompt_created",
             Self::AgentPromptSubmitted => "agent.prompt_submitted",
             Self::AgentResponseUpdated => "agent.response_updated",
@@ -156,12 +165,15 @@ impl FromStr for EventName {
             "extension.exited" => Ok(Self::ExtensionExited),
             "extension.restarting" => Ok(Self::ExtensionRestarting),
             "extension.skill_available" => Ok(Self::ExtSkillAvailable),
+            "extension.agents_available" => Ok(Self::ExtAgentsAvailable),
+            "extension.context_ready" => Ok(Self::ExtensionContextReady),
             "harness.info" => Ok(Self::HarnessInfo),
             "harness.models_available" => Ok(Self::HarnessModelsAvailable),
             "harness.model_selected" => Ok(Self::HarnessModelSelected),
             "ui.prompt_submitted" => Ok(Self::UiPromptSubmitted),
             "ui.model_select" => Ok(Self::UiModelSelect),
             "session.prompt_queued" => Ok(Self::SessionPromptQueued),
+            "session.context_requested" => Ok(Self::SessionContextRequested),
             "session.prompt_created" => Ok(Self::SessionPromptCreated),
             "agent.prompt_submitted" => Ok(Self::AgentPromptSubmitted),
             "agent.response_updated" => Ok(Self::AgentResponseUpdated),
@@ -408,6 +420,23 @@ pub struct ExtSkillAvailable {
     pub add_to_prompt: bool,
 }
 
+/// An extension discovered one AGENTS.md file and is advertising it to the
+/// harness.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ExtAgentsAvailable {
+    /// Absolute path to the AGENTS.md file.
+    pub file_path: String,
+    /// Full file contents, sent eagerly so the harness can inject them
+    /// without an extra tool round trip.
+    pub content: String,
+}
+
+/// An extension finished broadcasting refreshed prompt context for one session.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ExtensionContextReady {
+    pub session_id: SessionId,
+}
+
 // ---------------------------------------------------------------------------
 // UI events — facts from the user interface
 // ---------------------------------------------------------------------------
@@ -435,6 +464,12 @@ pub struct UiModelSelect {
 pub struct SessionPromptQueued {
     pub session_id: SessionId,
     pub text: String,
+}
+
+/// The harness is asking extensions to refresh prompt context for one session.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SessionContextRequested {
+    pub session_id: SessionId,
 }
 
 /// The harness persisted a user prompt and assigned it an ID.
@@ -586,6 +621,10 @@ pub enum Event {
     ExtensionRestarting(ExtensionRestarting),
     #[serde(rename = "extension.skill_available")]
     ExtSkillAvailable(ExtSkillAvailable),
+    #[serde(rename = "extension.agents_available")]
+    ExtAgentsAvailable(ExtAgentsAvailable),
+    #[serde(rename = "extension.context_ready")]
+    ExtensionContextReady(ExtensionContextReady),
 
     // Harness info
     #[serde(rename = "harness.info")]
@@ -604,6 +643,8 @@ pub enum Event {
     // Session
     #[serde(rename = "session.prompt_queued")]
     SessionPromptQueued(SessionPromptQueued),
+    #[serde(rename = "session.context_requested")]
+    SessionContextRequested(SessionContextRequested),
     #[serde(rename = "session.prompt_created")]
     SessionPromptCreated(SessionPromptCreated),
 
@@ -639,12 +680,15 @@ impl Event {
             Self::ExtensionExited(_) => EventName::ExtensionExited,
             Self::ExtensionRestarting(_) => EventName::ExtensionRestarting,
             Self::ExtSkillAvailable(_) => EventName::ExtSkillAvailable,
+            Self::ExtAgentsAvailable(_) => EventName::ExtAgentsAvailable,
+            Self::ExtensionContextReady(_) => EventName::ExtensionContextReady,
             Self::HarnessInfo(_) => EventName::HarnessInfo,
             Self::HarnessModelsAvailable(_) => EventName::HarnessModelsAvailable,
             Self::HarnessModelSelected(_) => EventName::HarnessModelSelected,
             Self::UiPromptSubmitted(_) => EventName::UiPromptSubmitted,
             Self::UiModelSelect(_) => EventName::UiModelSelect,
             Self::SessionPromptQueued(_) => EventName::SessionPromptQueued,
+            Self::SessionContextRequested(_) => EventName::SessionContextRequested,
             Self::SessionPromptCreated(_) => EventName::SessionPromptCreated,
             Self::AgentPromptSubmitted(_) => EventName::AgentPromptSubmitted,
             Self::AgentResponseUpdated(_) => EventName::AgentResponseUpdated,

@@ -419,6 +419,9 @@ mod tests {
                 session_id: "s1".into(),
                 text: "hello".to_owned(),
             }),
+            Event::SessionContextRequested(SessionContextRequested {
+                session_id: "s1".into(),
+            }),
             Event::SessionPromptCreated(SessionPromptCreated {
                 session_prompt_id: "sp-1".into(),
                 session_id: "s1".into(),
@@ -470,6 +473,13 @@ mod tests {
                 description: "Web search via Brave API".to_owned(),
                 file_path: "/home/user/.agents/skills/brave-search/SKILL.md".to_owned(),
                 add_to_prompt: true,
+            }),
+            Event::ExtAgentsAvailable(ExtAgentsAvailable {
+                file_path: "/home/user/src/project/AGENTS.md".to_owned(),
+                content: "# Project instructions\n- Run tests".to_owned(),
+            }),
+            Event::ExtensionContextReady(ExtensionContextReady {
+                session_id: "s1".into(),
             }),
             Event::LifecycleDisconnect(LifecycleDisconnect {
                 reason: Some("shutdown".to_owned()),
