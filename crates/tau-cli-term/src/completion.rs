@@ -142,6 +142,8 @@ struct State {
     candidates: Vec<Candidate>,
     selected: Option<usize>,
     menu_block_id: Option<BlockId>,
+    original_buffer: Option<String>,
+    original_cursor: usize,
 }
 
 impl State {
@@ -150,6 +152,8 @@ impl State {
             candidates: Vec::new(),
             selected: None,
             menu_block_id: None,
+            original_buffer: None,
+            original_cursor: 0,
         }
     }
 
@@ -160,6 +164,8 @@ impl State {
     fn reset(&mut self) {
         self.candidates.clear();
         self.selected = None;
+        self.original_buffer = None;
+        self.original_cursor = 0;
     }
 }
 
@@ -207,6 +213,7 @@ impl Completer {
     /// Update completions based on the current buffer content.
     pub(crate) fn on_buffer_changed(&mut self, handle: &TermHandle) {
         let buffer = handle.get_buffer();
+        let cursor = handle.get_cursor();
 
         if !buffer.starts_with('/') {
             if self.state.is_active() {
@@ -234,6 +241,8 @@ impl Completer {
 
         self.state.candidates = candidates;
         self.state.selected = None;
+        self.state.original_buffer = Some(buffer);
+        self.state.original_cursor = cursor;
         self.render_menu(handle);
     }
 
@@ -254,6 +263,7 @@ impl Completer {
             Some(idx) => ((idx as isize + delta).rem_euclid(len as isize)) as usize,
         };
         self.state.selected = Some(new_idx);
+        self.preview_selection(handle);
         self.render_menu(handle);
     }
 
@@ -274,6 +284,11 @@ impl Completer {
 
     /// Dismiss the completion menu without accepting.
     pub(crate) fn dismiss(&mut self, handle: &TermHandle) {
+        if self.state.selected.is_some()
+            && let Some(buffer) = self.state.original_buffer.clone()
+        {
+            handle.set_buffer(buffer, self.state.original_cursor);
+        }
         self.hide_menu(handle);
         self.state.reset();
     }
@@ -410,5 +425,84 @@ impl Completer {
             handle.remove_suggestions(id);
             handle.remove_block(id);
         }
+    }
+
+    fn preview_selection(&self, handle: &TermHandle) {
+        let Some(idx) = self.state.selected else {
+            return;
+        };
+        let buffer_text = self.state.candidates[idx].buffer_text.clone();
+        let cursor = buffer_text.len();
+        handle.set_buffer(buffer_text, cursor);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn new_test_handle() -> (tau_cli_term_raw::Term, TermHandle) {
+        let (term, handle, _input_tx) =
+            tau_cli_term_raw::Term::new_virtual(80, 24, "> ", Box::new(std::io::sink()));
+        (term, handle)
+    }
+
+    #[test]
+    fn cycling_previews_selection_and_escape_restores_original_buffer() {
+        let (_term, handle) = new_test_handle();
+        let mut completer = Completer::new(
+            vec![
+                SlashCommand::new("/model", "Switch model"),
+                SlashCommand::new("/quit", "Exit"),
+            ],
+            CompletionData::new(),
+            Theme::builtin(),
+        );
+
+        handle.set_buffer("/m".to_owned(), 2);
+        completer.on_buffer_changed(&handle);
+
+        assert!(completer.is_active());
+        assert!(!completer.has_selection());
+        assert_eq!(handle.get_buffer(), "/m");
+        assert_eq!(handle.get_cursor(), 2);
+
+        completer.cycle_selection(1, &handle);
+
+        assert!(completer.has_selection());
+        assert_eq!(handle.get_buffer(), "/model");
+        assert_eq!(handle.get_cursor(), "/model".len());
+
+        completer.dismiss(&handle);
+
+        assert!(!completer.is_active());
+        assert_eq!(handle.get_buffer(), "/m");
+        assert_eq!(handle.get_cursor(), 2);
+    }
+
+    #[test]
+    fn accept_selection_keeps_previewed_buffer() {
+        let (_term, handle) = new_test_handle();
+        let data = CompletionData::new();
+        data.set_arg_completions(
+            CommandName::new("/model"),
+            vec![CompletionItem::new("openai/gpt-5", "Latest")],
+        );
+        let mut completer = Completer::new(
+            vec![SlashCommand::new("/model", "Switch model")],
+            data,
+            Theme::builtin(),
+        );
+
+        handle.set_buffer("/model op".to_owned(), "/model op".len());
+        completer.on_buffer_changed(&handle);
+        completer.cycle_selection(1, &handle);
+
+        assert_eq!(handle.get_buffer(), "/model openai/gpt-5");
+
+        assert!(completer.accept_selection(&handle));
+        assert!(!completer.is_active());
+        assert_eq!(handle.get_buffer(), "/model openai/gpt-5");
+        assert_eq!(handle.get_cursor(), "/model openai/gpt-5".len());
     }
 }
