@@ -245,6 +245,11 @@ impl TermHandle {
         self.lock().buffer.clone()
     }
 
+    /// Returns the current cursor position in bytes.
+    pub fn get_cursor(&self) -> usize {
+        self.lock().cursor
+    }
+
     /// Replaces the input buffer and cursor position.
     pub fn set_buffer(&self, text: String, cursor: usize) {
         let mut st = self.lock();
