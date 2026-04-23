@@ -93,6 +93,8 @@ string_newtype!(/// Qualified model identifier (e.g. `"openai/gpt-4o"`).
     ModelId);
 string_newtype!(/// Provider name (e.g. `"openai"`, `"anthropic"`).
     ProviderName);
+string_newtype!(/// Skill name (e.g. `"jujutsu"`, `"preview-site"`).
+    SkillName);
 
 // ---------------------------------------------------------------------------
 // ToolName (validated newtype)
@@ -455,7 +457,7 @@ mod tests {
         vec![
             Event::LifecycleHello(LifecycleHello {
                 protocol_version: PROTOCOL_VERSION,
-                client_name: "agent".to_owned(),
+                client_name: "agent".into(),
                 client_kind: ClientKind::Agent,
             }),
             Event::LifecycleSubscribe(LifecycleSubscribe {
@@ -559,13 +561,13 @@ mod tests {
                 reason: Some("hot reload".to_owned()),
             }),
             Event::ExtSkillAvailable(ExtSkillAvailable {
-                name: "brave-search".to_owned(),
+                name: "brave-search".into(),
                 description: "Web search via Brave API".to_owned(),
-                file_path: "/home/user/.agents/skills/brave-search/SKILL.md".to_owned(),
+                file_path: "/home/user/.agents/skills/brave-search/SKILL.md".into(),
                 add_to_prompt: true,
             }),
             Event::ExtAgentsMdAvailable(ExtAgentsMdAvailable {
-                file_path: "/home/user/src/project/AGENTS.md".to_owned(),
+                file_path: "/home/user/src/project/AGENTS.md".into(),
                 content: "# Project instructions\n- Run tests".to_owned(),
             }),
             Event::ExtensionContextReady(ExtensionContextReady {

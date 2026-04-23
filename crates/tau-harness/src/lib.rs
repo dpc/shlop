@@ -480,7 +480,7 @@ struct Harness {
     /// Currently selected model as `"provider/model_id"`.
     selected_model: ModelId,
     /// Skills discovered by extensions, keyed by name.
-    discovered_skills: std::collections::HashMap<String, DiscoveredSkill>,
+    discovered_skills: std::collections::HashMap<tau_proto::SkillName, DiscoveredSkill>,
     /// AGENTS.md files discovered by extensions, in delivery order.
     discovered_agents_files: Vec<DiscoveredAgentsFile>,
     /// Sessions whose AGENTS/skill discovery has completed.
@@ -2274,7 +2274,7 @@ fn save_last_selected_model(dirs: &tau_config::settings::TauDirs, model: &str) {
 /// Builds the system prompt from available tools, skills, and environment.
 fn build_system_prompt(
     tools: &[ToolDefinition],
-    skills: &std::collections::HashMap<String, DiscoveredSkill>,
+    skills: &std::collections::HashMap<tau_proto::SkillName, DiscoveredSkill>,
 ) -> String {
     let mut prompt = String::from(
         "You are an expert coding assistant operating inside tau, \
@@ -2437,7 +2437,7 @@ fn assemble_conversation(tree: &tau_core::SessionTree) -> Vec<ConversationMessag
                     }
                     if let Some(last) = messages.last_mut() {
                         last.content.push(ContentBlock::ToolUse {
-                            id: activity.call_id.to_string(),
+                            id: activity.call_id.clone(),
                             name: activity.tool_name.clone().into(),
                             input: arguments.clone(),
                         });
@@ -2447,7 +2447,7 @@ fn assemble_conversation(tree: &tau_core::SessionTree) -> Vec<ConversationMessag
                     messages.push(ConversationMessage {
                         role: ConversationRole::User,
                         content: vec![ContentBlock::ToolResult {
-                            tool_use_id: activity.call_id.to_string(),
+                            tool_use_id: activity.call_id.clone(),
                             content: cbor_to_text(result),
                             is_error: false,
                         }],
@@ -2457,7 +2457,7 @@ fn assemble_conversation(tree: &tau_core::SessionTree) -> Vec<ConversationMessag
                     messages.push(ConversationMessage {
                         role: ConversationRole::User,
                         content: vec![ContentBlock::ToolResult {
-                            tool_use_id: activity.call_id.to_string(),
+                            tool_use_id: activity.call_id.clone(),
                             content: message.clone(),
                             is_error: true,
                         }],
@@ -2819,7 +2819,7 @@ pub fn send_daemon_message_with_trace(
     let mut peer = SocketPeer::connect(socket_path)?;
     peer.send(&Event::LifecycleHello(LifecycleHello {
         protocol_version: PROTOCOL_VERSION,
-        client_name: "tau-cli".to_owned(),
+        client_name: "tau-cli".into(),
         client_kind: ClientKind::Ui,
     }))?;
     peer.send(&Event::LifecycleSubscribe(LifecycleSubscribe {
@@ -3506,7 +3506,7 @@ mod tests {
         h.handle_extension_event(
             &tools_connection_id,
             Event::ExtAgentsMdAvailable(tau_proto::ExtAgentsMdAvailable {
-                file_path: "/repo/AGENTS.md".to_owned(),
+                file_path: "/repo/AGENTS.md".into(),
                 content: "# Root\n- root rule\n".to_owned(),
             }),
         )
@@ -3587,7 +3587,7 @@ mod tests {
         h.publish_event(
             Some(&tools_conn),
             Event::ExtAgentsMdAvailable(tau_proto::ExtAgentsMdAvailable {
-                file_path: "/test/AGENTS.md".to_owned(),
+                file_path: "/test/AGENTS.md".into(),
                 content: "# test\n".to_owned(),
             }),
         );
@@ -3638,7 +3638,9 @@ mod tests {
             };
             let (_log_id, inner) = event.peel_log();
             match inner {
-                Event::ExtAgentsMdAvailable(a) if a.file_path == "/test/AGENTS.md" => {
+                Event::ExtAgentsMdAvailable(a)
+                    if a.file_path == std::path::Path::new("/test/AGENTS.md") =>
+                {
                     got_agents_md = true;
                 }
                 Event::ExtensionContextReady(_) => {
@@ -3925,7 +3927,7 @@ mod tests {
     fn build_system_prompt_includes_skills() {
         let mut skills = std::collections::HashMap::new();
         skills.insert(
-            "brave-search".to_owned(),
+            tau_proto::SkillName::from("brave-search"),
             DiscoveredSkill {
                 source_id: "skills".into(),
                 description: "Web search via Brave API".to_owned(),
@@ -3943,7 +3945,7 @@ mod tests {
     fn build_system_prompt_excludes_hidden_skills() {
         let mut skills = std::collections::HashMap::new();
         skills.insert(
-            "hidden".to_owned(),
+            tau_proto::SkillName::from("hidden"),
             DiscoveredSkill {
                 source_id: "skills".into(),
                 description: "Should not appear".to_owned(),
@@ -3975,7 +3977,7 @@ mod tests {
 
         // Manually insert a discovered skill.
         h.discovered_skills.insert(
-            "my-skill".to_owned(),
+            tau_proto::SkillName::from("my-skill"),
             DiscoveredSkill {
                 source_id: "skills".into(),
                 description: "A test skill".to_owned(),
@@ -3993,7 +3995,7 @@ mod tests {
             remaining_calls: vec!["call-skill".into()],
         };
         let call = AgentToolCall {
-            id: "call-skill".to_owned(),
+            id: "call-skill".into(),
             name: "skill".into(),
             arguments: CborValue::Map(vec![(
                 CborValue::Text("name".to_owned()),
@@ -4031,7 +4033,7 @@ mod tests {
             remaining_calls: vec!["call-missing".into()],
         };
         let call = AgentToolCall {
-            id: "call-missing".to_owned(),
+            id: "call-missing".into(),
             name: "skill".into(),
             arguments: CborValue::Map(vec![(
                 CborValue::Text("name".to_owned()),

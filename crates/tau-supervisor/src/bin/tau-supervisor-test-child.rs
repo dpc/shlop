@@ -14,7 +14,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     writer.write_event(&Event::LifecycleHello(LifecycleHello {
         protocol_version: PROTOCOL_VERSION,
-        client_name: "test-child".to_owned(),
+        client_name: "test-child".into(),
         client_kind: ClientKind::Tool,
     }))?;
     writer.flush()?;

@@ -46,7 +46,7 @@ fn forbidden_socket_subscription_disconnects_client_without_killing_daemon() {
     denied_client
         .send(&Event::LifecycleHello(LifecycleHello {
             protocol_version: PROTOCOL_VERSION,
-            client_name: "denied-client".to_owned(),
+            client_name: "denied-client".into(),
             client_kind: ClientKind::Ui,
         }))
         .expect("hello should send");

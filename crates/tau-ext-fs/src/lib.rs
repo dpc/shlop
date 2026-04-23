@@ -97,7 +97,7 @@ where
 
     writer.write_event(&Event::LifecycleHello(LifecycleHello {
         protocol_version: PROTOCOL_VERSION,
-        client_name: "tau-ext-fs".to_owned(),
+        client_name: "tau-ext-fs".into(),
         client_kind: ClientKind::Tool,
     }))?;
     writer.write_event(&Event::LifecycleSubscribe(LifecycleSubscribe {
@@ -422,14 +422,9 @@ fn build_session_started_events(started: SessionStarted) -> Vec<Event> {
 
     let result = tau_skills::load_skills_from_dirs(&skill_dirs);
     for skill in result.skills {
-        let file_path = skill
-            .file_path
-            .canonicalize()
-            .unwrap_or(skill.file_path)
-            .display()
-            .to_string();
+        let file_path = skill.file_path.canonicalize().unwrap_or(skill.file_path);
         events.push(Event::ExtSkillAvailable(tau_proto::ExtSkillAvailable {
-            name: skill.name,
+            name: skill.name.into(),
             description: skill.description,
             file_path,
             add_to_prompt: skill.add_to_prompt,
@@ -439,7 +434,7 @@ fn build_session_started_events(started: SessionStarted) -> Vec<Event> {
     for agents_file in discover_session_agents_files() {
         events.push(Event::ExtAgentsMdAvailable(
             tau_proto::ExtAgentsMdAvailable {
-                file_path: agents_file.file_path.display().to_string(),
+                file_path: agents_file.file_path,
                 content: agents_file.content,
             },
         ));

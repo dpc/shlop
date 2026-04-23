@@ -335,15 +335,16 @@ fn convert_message(msg: &ConversationMessage, out: &mut Vec<serde_json::Value>) 
                             text_parts.clear();
                         }
                         let args_json = cbor_to_json(input);
-                        let fc_id = if id.starts_with("fc_") {
-                            id.clone()
+                        let id_str = id.as_str();
+                        let fc_id = if id_str.starts_with("fc_") {
+                            id_str.to_owned()
                         } else {
-                            format!("fc_{id}")
+                            format!("fc_{id_str}")
                         };
                         out.push(serde_json::json!({
                             "type": "function_call",
                             "id": fc_id,
-                            "call_id": id,
+                            "call_id": id_str,
                             "name": encode_tool_name(name.as_str()),
                             "arguments": serde_json::to_string(&args_json).unwrap_or_default(),
                         }));

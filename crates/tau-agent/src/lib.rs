@@ -35,7 +35,7 @@ where
 
     writer.write_event(&Event::LifecycleHello(LifecycleHello {
         protocol_version: PROTOCOL_VERSION,
-        client_name: "tau-agent".to_owned(),
+        client_name: "tau-agent".into(),
         client_kind: ClientKind::Agent,
     }))?;
     writer.write_event(&Event::LifecycleSubscribe(LifecycleSubscribe {
@@ -310,7 +310,7 @@ where
 
     writer.write_event(&Event::LifecycleHello(LifecycleHello {
         protocol_version: PROTOCOL_VERSION,
-        client_name: "tau-agent-echo".to_owned(),
+        client_name: "tau-agent-echo".into(),
         client_kind: ClientKind::Agent,
     }))?;
     writer.write_event(&Event::LifecycleSubscribe(LifecycleSubscribe {
@@ -381,7 +381,7 @@ where
 
                     let tool_call = if let Some(path) = user_text.strip_prefix("read ") {
                         AgentToolCall {
-                            id: call_id,
+                            id: call_id.into(),
                             name: "read".into(),
                             arguments: CborValue::Map(vec![(
                                 CborValue::Text("path".to_owned()),
@@ -390,7 +390,7 @@ where
                         }
                     } else if let Some(cmd) = user_text.strip_prefix("shell ") {
                         AgentToolCall {
-                            id: call_id,
+                            id: call_id.into(),
                             name: "shell".into(),
                             arguments: CborValue::Map(vec![(
                                 CborValue::Text("command".to_owned()),
@@ -399,7 +399,7 @@ where
                         }
                     } else {
                         AgentToolCall {
-                            id: call_id,
+                            id: call_id.into(),
                             name: "echo".into(),
                             arguments: CborValue::Text(user_text),
                         }

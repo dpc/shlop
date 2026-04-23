@@ -227,7 +227,7 @@ mod tests {
                 client
                     .send(&Event::LifecycleHello(LifecycleHello {
                         protocol_version: PROTOCOL_VERSION,
-                        client_name: "client".to_owned(),
+                        client_name: "client".into(),
                         client_kind: ClientKind::Ui,
                     }))
                     .expect("client hello should send");
@@ -247,14 +247,14 @@ mod tests {
             hello,
             Event::LifecycleHello(LifecycleHello {
                 protocol_version: PROTOCOL_VERSION,
-                client_name: "client".to_owned(),
+                client_name: "client".into(),
                 client_kind: ClientKind::Ui,
             })
         );
         server
             .send(&Event::LifecycleHello(LifecycleHello {
                 protocol_version: PROTOCOL_VERSION,
-                client_name: "server".to_owned(),
+                client_name: "server".into(),
                 client_kind: ClientKind::Core,
             }))
             .expect("server hello should send");
@@ -264,7 +264,7 @@ mod tests {
             response,
             Event::LifecycleHello(LifecycleHello {
                 protocol_version: PROTOCOL_VERSION,
-                client_name: "server".to_owned(),
+                client_name: "server".into(),
                 client_kind: ClientKind::Core,
             })
         );

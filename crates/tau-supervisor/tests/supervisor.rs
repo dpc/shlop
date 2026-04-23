@@ -39,7 +39,7 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
         hello,
         Event::LifecycleHello(LifecycleHello {
             protocol_version: PROTOCOL_VERSION,
-            client_name: "test-child".to_owned(),
+            client_name: "test-child".into(),
             client_kind: ClientKind::Tool,
         })
     );
@@ -47,7 +47,7 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
     child
         .send(&Event::LifecycleHello(LifecycleHello {
             protocol_version: PROTOCOL_VERSION,
-            client_name: "parent".to_owned(),
+            client_name: "parent".into(),
             client_kind: ClientKind::Core,
         }))
         .expect("hello should be sent");
@@ -146,7 +146,7 @@ fn disconnect_cleanup_removes_registered_tools_after_child_exit() {
     child
         .send(&Event::LifecycleHello(LifecycleHello {
             protocol_version: PROTOCOL_VERSION,
-            client_name: "parent".to_owned(),
+            client_name: "parent".into(),
             client_kind: ClientKind::Core,
         }))
         .expect("hello should be sent");
@@ -209,7 +209,7 @@ fn restarted_child_can_reregister_after_disconnect_cleanup() {
         child
             .send(&Event::LifecycleHello(LifecycleHello {
                 protocol_version: PROTOCOL_VERSION,
-                client_name: "parent".to_owned(),
+                client_name: "parent".into(),
                 client_kind: ClientKind::Core,
             }))
             .expect("hello should be sent");

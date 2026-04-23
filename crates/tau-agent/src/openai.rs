@@ -79,7 +79,7 @@ impl StreamState {
                 let args: serde_json::Value =
                     serde_json::from_str(&tc.arguments_json).unwrap_or(serde_json::Value::Null);
                 AgentToolCall {
-                    id: tc.id,
+                    id: tc.id.into(),
                     name: tc.name.into(),
                     arguments: json_to_cbor(&args),
                 }
@@ -297,7 +297,7 @@ fn convert_message(msg: &ConversationMessage, out: &mut Vec<ApiMessage>) {
                             role: "tool".to_owned(),
                             content: Some(content.clone()),
                             tool_calls: None,
-                            tool_call_id: Some(tool_use_id.clone()),
+                            tool_call_id: Some(tool_use_id.to_string()),
                             name: None,
                         });
                     }
@@ -319,7 +319,7 @@ fn convert_message(msg: &ConversationMessage, out: &mut Vec<ApiMessage>) {
                     } => {
                         let args_json = cbor_to_json(input);
                         tool_calls.push(ApiToolCall {
-                            id: id.clone(),
+                            id: id.to_string(),
                             r#type: "function".to_owned(),
                             function: ApiFunction {
                                 name: name.as_str().to_owned(),

@@ -11,7 +11,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CborValue, ExtensionName, ModelId, SessionId, SessionPromptId, ToolCallId, ToolName,
+    CborValue, ExtensionName, ModelId, SessionId, SessionPromptId, SkillName, ToolCallId, ToolName,
     ToolNameMaybe,
 };
 
@@ -246,7 +246,7 @@ pub enum EventSelector {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct LifecycleHello {
     pub protocol_version: u32,
-    pub client_name: String,
+    pub client_name: ExtensionName,
     pub client_kind: ClientKind,
 }
 
@@ -449,10 +449,10 @@ pub struct ExtensionRestarting {
 /// An extension discovered a skill and is advertising it to the harness.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExtSkillAvailable {
-    pub name: String,
+    pub name: SkillName,
     pub description: String,
     /// Absolute path to the skill file so the harness can read it.
-    pub file_path: String,
+    pub file_path: std::path::PathBuf,
     /// When true the harness should include this skill in the system prompt.
     pub add_to_prompt: bool,
 }
@@ -462,7 +462,7 @@ pub struct ExtSkillAvailable {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExtAgentsMdAvailable {
     /// Absolute path to the AGENTS.md file.
-    pub file_path: String,
+    pub file_path: std::path::PathBuf,
     /// Full file contents, sent eagerly so the harness can inject them
     /// without an extra tool round trip.
     pub content: String,
@@ -598,7 +598,7 @@ pub struct AgentResponseUpdated {
 /// One tool call the agent wants to make.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AgentToolCall {
-    pub id: String,
+    pub id: ToolCallId,
     /// Model-produced name. Kept as [`ToolNameMaybe`] so that a
     /// single hallucinated / malformed name doesn't fail decode of
     /// the entire batch; the harness matches on the variant at
@@ -638,14 +638,14 @@ pub enum ContentBlock {
         text: String,
     },
     ToolUse {
-        id: String,
+        id: ToolCallId,
         /// Same untrusted-LLM-output contract as
         /// `AgentToolCall::name`. See [`ToolNameMaybe`].
         name: ToolNameMaybe,
         input: CborValue,
     },
     ToolResult {
-        tool_use_id: String,
+        tool_use_id: ToolCallId,
         content: String,
         #[serde(default)]
         is_error: bool,

@@ -170,7 +170,7 @@ fn run_chat(session_id: &str) -> Result<(), CliError> {
     writer
         .write_event(&Event::LifecycleHello(LifecycleHello {
             protocol_version: PROTOCOL_VERSION,
-            client_name: "tau-chat".to_owned(),
+            client_name: "tau-chat".into(),
             client_kind: ClientKind::Ui,
         }))
         .map_err(CliError::Encode)?;
@@ -697,7 +697,7 @@ impl EventRenderer {
                     let block = themed_block(&self.theme, names::TOOL_RUNNING, label);
                     let id = self.handle.new_block(block);
                     self.handle.push_above_active(id);
-                    self.tool_blocks.insert(call.id.clone(), id);
+                    self.tool_blocks.insert(call.id.to_string(), id);
                 }
                 if !finished.tool_calls.is_empty() {
                     self.handle.redraw();
@@ -777,14 +777,15 @@ impl EventRenderer {
                 ));
             }
             Event::ExtAgentsMdAvailable(agents) => {
-                let file_name = std::path::Path::new(agents.file_path.as_str())
+                let file_name = agents
+                    .file_path
                     .file_name()
                     .and_then(|name| name.to_str())
                     .unwrap_or("AGENTS.md");
                 self.handle.print_output(themed_block(
                     &self.theme,
                     names::SYSTEM_INFO,
-                    format!("loaded {file_name}: {}", agents.file_path),
+                    format!("loaded {file_name}: {}", agents.file_path.display()),
                 ));
             }
             Event::ExtensionContextReady(_) => {
