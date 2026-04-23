@@ -121,16 +121,14 @@ where
         ToolSpec {
             name: READ_TOOL_NAME.into(),
             description: Some(
-                "Read the contents of a file. Returns the file path and text content. \
-                 Use this instead of shell commands like cat or head."
-                    .to_owned(),
+                "Read the contents of a file. Returns the file path and text content.".to_owned(),
             ),
             parameters: Some(serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Absolute or relative path to the file to read"
+                        "description": "Path to the file"
                     }
                 },
                 "required": ["path"]
@@ -149,11 +147,11 @@ where
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Absolute or relative path to the file to write"
+                        "description": "Path to the file"
                     },
                     "content": {
                         "type": "string",
-                        "description": "The text content to write to the file"
+                        "description": "File contents, written verbatim. Embed real newlines directly — do NOT use backslash-n escape sequences."
                     }
                 },
                 "required": ["path", "content"]
@@ -173,7 +171,7 @@ where
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Path to the file to edit (relative or absolute)"
+                        "description": "Path to the file"
                     },
                     "edits": {
                         "type": "array",
@@ -183,11 +181,11 @@ where
                             "properties": {
                                 "oldText": {
                                     "type": "string",
-                                    "description": "Exact text to find. Must be unique in the file."
+                                    "description": "Exact text to find, matched verbatim. Must be unique in the file. Embed real newlines directly — do NOT use backslash-n escape sequences."
                                 },
                                 "newText": {
                                     "type": "string",
-                                    "description": "Replacement text."
+                                    "description": "Replacement text, written verbatim. Embed real newlines directly — do NOT use backslash-n escape sequences."
                                 }
                             },
                             "required": ["oldText", "newText"]
@@ -202,8 +200,8 @@ where
             name: GREP_TOOL_NAME.into(),
             description: Some(
                 "Search file contents for a pattern using ripgrep. Returns matching lines with \
-                 file paths and line numbers. Respects .gitignore. Output is truncated to 100 \
-                 matches or 50KB (whichever is hit first). Long lines are truncated to 500 chars."
+                 file paths and line numbers. Respects .gitignore. Output is truncated at \
+                 `limit` matches or 50KB. Long lines are truncated to 500 chars."
                     .to_owned(),
             ),
             parameters: Some(serde_json::json!({
@@ -247,8 +245,8 @@ where
             description: Some(
                 "Search for files by glob pattern. Returns only file paths (directories are \
                  never included, even with '**/*') relative to the search directory. Respects \
-                 .gitignore. Output is truncated to 1000 results or 50KB (whichever is hit \
-                 first). Use the ls tool if you want to see directory entries."
+                 .gitignore. Output is truncated at `limit` results or 50KB. Use the ls tool \
+                 if you want to see directory entries."
                     .to_owned(),
             ),
             parameters: Some(serde_json::json!({
@@ -275,8 +273,7 @@ where
             name: LS_TOOL_NAME.into(),
             description: Some(
                 "List directory contents. Returns entries sorted alphabetically, with '/' suffix \
-                 for directories. Includes dotfiles. Output is truncated to 500 entries or 50KB \
-                 (whichever is hit first)."
+                 for directories. Includes dotfiles. Output is truncated at `limit` entries or 50KB."
                     .to_owned(),
             ),
             parameters: Some(serde_json::json!({
@@ -298,8 +295,7 @@ where
             name: SHELL_TOOL_NAME.into(),
             description: Some(
                 "Execute a shell command via `sh -c`. Returns stdout, stderr, and \
-                 exit status. Use this for running builds, tests, git commands, and \
-                 other shell operations."
+                 exit status."
                     .to_owned(),
             ),
             parameters: Some(serde_json::json!({
