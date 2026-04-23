@@ -383,6 +383,15 @@ fn format_tool_call(tool_name: &str, arguments: &CborValue) -> String {
             let path = cbor_text_field(arguments, "path").unwrap_or_else(|| ".".to_owned());
             format!("find {pattern} in {path}")
         }
+        "grep" => {
+            let pattern = cbor_text_field(arguments, "pattern").unwrap_or_default();
+            let path = cbor_text_field(arguments, "path").unwrap_or_else(|| ".".to_owned());
+            let mut label = format!("grep {pattern:?} in {path}");
+            if let Some(glob) = cbor_text_field(arguments, "glob") {
+                label.push_str(&format!(" [{glob}]"));
+            }
+            label
+        }
         "ls" => {
             let path = cbor_text_field(arguments, "path").unwrap_or_else(|| ".".to_owned());
             format!("ls {path}")
@@ -484,6 +493,40 @@ fn format_tool_completion(
             let output = cbor_text_field(details, "output").and_then(|text| {
                 let trimmed = text.trim().to_owned();
                 if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                }
+            });
+            ToolCompletionDisplay { label, output }
+        }
+        "grep" => {
+            // Arguments get echoed back on the tool-result event when
+            // the harness persists them, so `pattern` / `path` / `glob`
+            // come from `details`. Match count comes from the tool's
+            // own response. Output is the ripgrep text body.
+            let pattern = cbor_text_field(details, "pattern");
+            let path = cbor_text_field(details, "path");
+            let glob = cbor_text_field(details, "glob");
+            let label = if let Some(msg) = error_message {
+                match (&pattern, &path) {
+                    (Some(p), Some(dir)) => format!("grep {p:?} in {dir}: {msg}"),
+                    (Some(p), None) => format!("grep {p:?}: {msg}"),
+                    _ => format!("grep: {msg}"),
+                }
+            } else {
+                let path = path.unwrap_or_else(|| ".".to_owned());
+                let pattern = pattern.unwrap_or_default();
+                let count = cbor_int_field(details, "matches").unwrap_or(0);
+                let suffix = if count == 1 { "match" } else { "matches" };
+                match glob {
+                    Some(g) => format!("grep {pattern:?} in {path} [{g}] ({count} {suffix})"),
+                    None => format!("grep {pattern:?} in {path} ({count} {suffix})"),
+                }
+            };
+            let output = cbor_text_field(details, "output").and_then(|text| {
+                let trimmed = text.trim().to_owned();
+                if trimmed.is_empty() || trimmed == "no matches found" {
                     None
                 } else {
                     Some(trimmed)

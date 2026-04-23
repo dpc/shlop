@@ -927,16 +927,13 @@ fn run_grep(arguments: &CborValue) -> Result<CborValue, String> {
 
     let raw_output = String::from_utf8_lossy(&output.stdout);
     if raw_output.trim().is_empty() {
-        return Ok(CborValue::Map(vec![
-            (
-                CborValue::Text("matches".to_owned()),
-                CborValue::Integer(0.into()),
-            ),
-            (
-                CborValue::Text("output".to_owned()),
-                CborValue::Text("no matches found".to_owned()),
-            ),
-        ]));
+        return Ok(grep_result_map(
+            &pattern,
+            search_path,
+            glob.as_deref(),
+            0,
+            "no matches found".to_owned(),
+        ));
     }
 
     // Process lines: count matches, truncate long lines, enforce match limit.
@@ -998,16 +995,50 @@ fn run_grep(arguments: &CborValue) -> Result<CborValue, String> {
         output_text.push(']');
     }
 
-    Ok(CborValue::Map(vec![
+    Ok(grep_result_map(
+        &pattern,
+        search_path,
+        glob.as_deref(),
+        match_count,
+        output_text,
+    ))
+}
+
+/// Build the CBOR result map for `grep`. Echoes `pattern`/`path`/`glob`
+/// alongside the match count and output so UI renderers have enough
+/// context to label the call without re-reading the request arguments.
+fn grep_result_map(
+    pattern: &str,
+    search_path: &str,
+    glob: Option<&str>,
+    matches: usize,
+    output_text: String,
+) -> CborValue {
+    let mut fields = vec![
+        (
+            CborValue::Text("pattern".to_owned()),
+            CborValue::Text(pattern.to_owned()),
+        ),
+        (
+            CborValue::Text("path".to_owned()),
+            CborValue::Text(search_path.to_owned()),
+        ),
         (
             CborValue::Text("matches".to_owned()),
-            CborValue::Integer((match_count as i64).into()),
+            CborValue::Integer((matches as i64).into()),
         ),
         (
             CborValue::Text("output".to_owned()),
             CborValue::Text(output_text),
         ),
-    ]))
+    ];
+    if let Some(glob) = glob {
+        fields.push((
+            CborValue::Text("glob".to_owned()),
+            CborValue::Text(glob.to_owned()),
+        ));
+    }
+    CborValue::Map(fields)
 }
 
 fn run_find(arguments: &CborValue) -> Result<CborValue, String> {
@@ -2084,6 +2115,26 @@ mod tests {
         assert!(result.was_truncated);
         assert!(result.content.starts_with("first"));
         assert!(result.content.contains("[Showing lines 1-"));
+    }
+
+    #[test]
+    fn grep_result_map_echoes_request_context_for_ui() {
+        // The CLI renders grep completions using fields read back from
+        // the tool result (pattern/path/glob/matches/output). Lock the
+        // wire contract so a future shape change doesn't silently
+        // regress the UI back to "grep: done".
+        let with_glob = grep_result_map("foo", "src", Some("*.rs"), 3, "src/a.rs:1:foo".to_owned());
+        assert_eq!(cbor_map_text(&with_glob, "pattern"), Some("foo"));
+        assert_eq!(cbor_map_text(&with_glob, "path"), Some("src"));
+        assert_eq!(cbor_map_text(&with_glob, "glob"), Some("*.rs"));
+        assert_eq!(cbor_int_field(&with_glob, "matches"), Some(3));
+        assert_eq!(cbor_map_text(&with_glob, "output"), Some("src/a.rs:1:foo"));
+
+        // No-glob form omits the field entirely rather than emitting
+        // an empty string.
+        let no_glob = grep_result_map("foo", ".", None, 0, "no matches found".to_owned());
+        assert!(cbor_map_text(&no_glob, "glob").is_none());
+        assert_eq!(cbor_int_field(&no_glob, "matches"), Some(0));
     }
 
     #[test]
