@@ -7,7 +7,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::io::{self, BufReader, BufWriter};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -65,6 +65,7 @@ pub enum CliError {
     Harness(tau_harness::HarnessError),
     DaemonStartTimeout,
     DaemonExited(String),
+    NoRunningDaemon,
     Participant(String),
 }
 
@@ -78,6 +79,10 @@ impl fmt::Display for CliError {
                 f.write_str("timed out waiting for harness daemon to start")
             }
             Self::DaemonExited(msg) => write!(f, "harness daemon exited: {msg}"),
+            Self::NoRunningDaemon => f.write_str(
+                "no harness daemon running for this project — \
+                 drop `--attach` to spawn one",
+            ),
             Self::Participant(msg) => write!(f, "participant error: {msg}"),
         }
     }
@@ -101,29 +106,82 @@ impl From<tau_harness::HarnessError> for CliError {
 // Daemon lifecycle
 // ---------------------------------------------------------------------------
 
-struct DaemonHandle {
-    child: std::process::Child,
-    daemon_dir: PathBuf,
+/// How this CLI invocation is related to its harness daemon.
+///
+/// - `Owned`: we spawned the daemon; Drop kills it unless the UI detached
+///   (calls [`DaemonHandle::leak`]), in which case we forget the `Child` so the
+///   daemon outlives us.
+/// - `Attached`: we joined a daemon someone else owns. Drop never touches it.
+enum DaemonHandle {
+    /// `child` is `Some` until [`leak`] pulls it out.
+    Owned {
+        child: Option<std::process::Child>,
+        daemon_dir: PathBuf,
+    },
+    Attached {
+        daemon_dir: PathBuf,
+    },
 }
 
 impl DaemonHandle {
     fn socket_path(&self) -> PathBuf {
-        runtime_dir::socket_path(&self.daemon_dir)
+        runtime_dir::socket_path(self.daemon_dir())
+    }
+
+    fn daemon_dir(&self) -> &Path {
+        match self {
+            Self::Owned { daemon_dir, .. } | Self::Attached { daemon_dir } => daemon_dir,
+        }
+    }
+
+    /// Consume the handle without killing the child.
+    ///
+    /// Used by `/detach`: we want the daemon to outlive this CLI,
+    /// whether we spawned it or attached to it. For `Owned` this
+    /// `mem::forget`s the `Child` — on Linux its parent becomes init
+    /// on our exit, which is exactly what we want for a long-lived
+    /// daemon.
+    fn leak(mut self) {
+        if let Self::Owned { child, .. } = &mut self {
+            if let Some(child) = child.take() {
+                std::mem::forget(child);
+            }
+        }
     }
 }
 
 impl Drop for DaemonHandle {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if let Self::Owned {
+            child: Some(child), ..
+        } = self
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        // Attached, or Owned-after-leak: do nothing. The daemon keeps
+        // running so other UIs can still use it, or this same UI can
+        // `tau run -a` back in later.
     }
+}
+
+/// Resolves a harness daemon to talk to, either by attaching to an
+/// existing one for this project or by spawning a fresh one.
+fn resolve_daemon(attach: bool) -> Result<DaemonHandle, CliError> {
+    let project_root = std::env::current_dir()?;
+    if attach {
+        let daemon_dir =
+            runtime_dir::find_harness_for_dir(&project_root).ok_or(CliError::NoRunningDaemon)?;
+        return Ok(DaemonHandle::Attached { daemon_dir });
+    }
+    start_daemon()
 }
 
 /// Spawns a new harness daemon and waits for its socket to be ready.
 fn start_daemon() -> Result<DaemonHandle, CliError> {
     let tau_binary = std::env::current_exe()?;
 
-    let child = Command::new(&tau_binary)
+    let mut child = Command::new(&tau_binary)
         .arg("component")
         .arg("harness")
         .stdin(Stdio::null())
@@ -134,16 +192,20 @@ fn start_daemon() -> Result<DaemonHandle, CliError> {
     let daemon_dir = runtime_dir::root_runtime_dir().join(child.id().to_string());
     let dir_marker = daemon_dir.join("tau.dir");
     let started_at = Instant::now();
-    let mut handle = DaemonHandle { child, daemon_dir };
 
     loop {
         if dir_marker.exists() {
-            return Ok(handle);
+            return Ok(DaemonHandle::Owned {
+                child: Some(child),
+                daemon_dir,
+            });
         }
-        if let Some(status) = handle.child.try_wait()? {
+        if let Some(status) = child.try_wait()? {
             return Err(CliError::DaemonExited(format!("exit status: {status}")));
         }
         if DAEMON_START_TIMEOUT <= started_at.elapsed() {
+            let _ = child.kill();
+            let _ = child.wait();
             return Err(CliError::DaemonStartTimeout);
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -154,10 +216,10 @@ fn start_daemon() -> Result<DaemonHandle, CliError> {
 // Chat as socket client
 // ---------------------------------------------------------------------------
 
-fn run_chat(session_id: &str) -> Result<(), CliError> {
+fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
     use tau_cli_term::{HighTerm, SlashCommand};
 
-    let daemon = start_daemon()?;
+    let daemon = resolve_daemon(attach)?;
     let socket_path = daemon.socket_path();
 
     // Connect and split into independent reader/writer — no mutex
@@ -212,6 +274,10 @@ fn run_chat(session_id: &str) -> Result<(), CliError> {
     // Terminal setup.
     let commands = vec![
         SlashCommand::new("/quit", "Exit the chat session"),
+        SlashCommand::new(
+            "/detach",
+            "Leave the UI but keep the harness running for later reattach",
+        ),
         SlashCommand::new("/model", "Switch model (e.g. /model provider/model-id)"),
     ];
     let theme = tau_themes::Theme::builtin();
@@ -250,11 +316,16 @@ fn run_chat(session_id: &str) -> Result<(), CliError> {
     });
 
     // Terminal input loop — owns the writer, no locking needed.
-    let result = terminal_input_loop(&mut term, &mut writer, session_id);
+    let exit = terminal_input_loop(&mut term, &mut writer, session_id)?;
 
-    // Send disconnect (best effort).
+    // Send disconnect (best effort). Reason differs so the daemon's
+    // debug log makes the distinction visible.
+    let reason = match exit {
+        InputLoopExit::Quit => "quit",
+        InputLoopExit::Detach => "detach",
+    };
     let _ = writer.write_event(&Event::LifecycleDisconnect(LifecycleDisconnect {
-        reason: Some("quit".to_owned()),
+        reason: Some(reason.to_owned()),
     }));
     let _ = writer.flush();
 
@@ -262,9 +333,17 @@ fn run_chat(session_id: &str) -> Result<(), CliError> {
     // socket reader to get EOF and exit. The renderer drains remaining
     // events and exits when the channel closes.
     drop(writer);
-    drop(daemon);
 
-    result
+    // On detach, we explicitly leak the daemon child (if we own one)
+    // so it outlives this process. `DaemonHandle::Drop` would otherwise
+    // kill the child we spawned; `/detach` is exactly the case where
+    // we want it to keep running.
+    match exit {
+        InputLoopExit::Quit => drop(daemon),
+        InputLoopExit::Detach => daemon.leak(),
+    }
+
+    Ok(())
 }
 
 fn random_startup_pun() -> &'static str {
@@ -275,11 +354,22 @@ fn random_startup_pun() -> &'static str {
     STARTUP_PUNS[idx]
 }
 
+/// How the input loop ended. Controls daemon disposition on exit.
+enum InputLoopExit {
+    /// User typed `/quit`, hit Ctrl-D, or the socket dropped. The
+    /// daemon should be killed (if we own it) or just disconnected
+    /// from (if we were attached).
+    Quit,
+    /// User typed `/detach`. We leave the daemon running whether we
+    /// spawned it or attached to it.
+    Detach,
+}
+
 fn terminal_input_loop(
     term: &mut tau_cli_term::HighTerm,
     writer: &mut EventWriter<BufWriter<UnixStream>>,
     session_id: &str,
-) -> Result<(), CliError> {
+) -> Result<InputLoopExit, CliError> {
     use tau_cli_term::Event as TermEvent;
 
     loop {
@@ -290,7 +380,17 @@ fn terminal_input_loop(
                     continue;
                 }
                 if text == "/quit" {
-                    break;
+                    return Ok(InputLoopExit::Quit);
+                }
+                if text == "/detach" {
+                    // Tell the harness to stay alive after we leave,
+                    // then exit the UI. If the write fails we still
+                    // exit — the daemon will notice the disconnect
+                    // and fall back to its default behavior.
+                    let _ =
+                        writer.write_event(&Event::UiDetachRequest(tau_proto::UiDetachRequest {}));
+                    let _ = writer.flush();
+                    return Ok(InputLoopExit::Detach);
                 }
                 if let Some(model) = text.strip_prefix("/model ") {
                     let model = model.trim();
@@ -315,18 +415,16 @@ fn terminal_input_loop(
                     }))
                     .is_err()
                 {
-                    break;
+                    return Ok(InputLoopExit::Quit);
                 }
                 if writer.flush().is_err() {
-                    break;
+                    return Ok(InputLoopExit::Quit);
                 }
             }
-            TermEvent::Eof => break,
+            TermEvent::Eof => return Ok(InputLoopExit::Quit),
             TermEvent::Resize { .. } | TermEvent::BufferChanged => {}
         }
     }
-
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -924,21 +1022,23 @@ pub fn main_with_args() -> std::process::ExitCode {
     fn run() -> Result<(), CliError> {
         let parsed = cli::Cli::parse();
 
-        let command = parsed.command.unwrap_or(cli::Command::Chat {
+        let command = parsed.command.unwrap_or(cli::Command::Run {
             session_id: tau_harness::default_session_id().to_owned(),
             config: None,
+            attach: false,
         });
 
         match command {
-            cli::Command::Chat {
+            cli::Command::Run {
                 session_id,
                 config: _config,
+                attach,
             } => {
                 // The UI attaches to a session the harness already
                 // owns; it does not mint its own. Use whatever id the
                 // user passed (default: `default_session_id()`), which
                 // the harness has eagerly initialized at startup.
-                run_chat(&session_id)
+                run_chat(&session_id, attach)
             }
 
             cli::Command::SessionList { session_store } => {

@@ -12,8 +12,14 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Interactive chat session
-    Chat {
+    /// Run an interactive agent session.
+    ///
+    /// By default, `tau run` spawns a new harness daemon and attaches
+    /// to it for the duration of the session. Pass `--attach` (or
+    /// `-a`) to connect to an already-running daemon for the current
+    /// project instead — useful for a second UI, or for reconnecting
+    /// after `/detach`.
+    Run {
         /// Session identifier
         #[arg(long, default_value_t = default_session_id().to_owned())]
         session_id: String,
@@ -21,6 +27,12 @@ pub enum Command {
         /// Path to extension configuration file
         #[arg(long)]
         config: Option<PathBuf>,
+
+        /// Attach to an existing harness daemon for this project
+        /// instead of spawning a new one. Errors if no daemon is
+        /// running.
+        #[arg(short = 'a', long)]
+        attach: bool,
     },
 
     /// List all sessions

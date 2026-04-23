@@ -81,6 +81,8 @@ pub enum EventName {
     UiPromptSubmitted,
     #[serde(rename = "ui.model_select")]
     UiModelSelect,
+    #[serde(rename = "ui.detach_request")]
+    UiDetachRequest,
 
     // Session events — facts from the harness session tracker
     #[serde(rename = "session.prompt_queued")]
@@ -135,6 +137,7 @@ impl EventName {
             Self::HarnessModelSelected => "harness.model_selected",
             Self::UiPromptSubmitted => "ui.prompt_submitted",
             Self::UiModelSelect => "ui.model_select",
+            Self::UiDetachRequest => "ui.detach_request",
             Self::SessionPromptQueued => "session.prompt_queued",
             Self::SessionStarted => "session.started",
             Self::SessionPromptCreated => "session.prompt_created",
@@ -183,6 +186,7 @@ impl FromStr for EventName {
             "harness.model_selected" => Ok(Self::HarnessModelSelected),
             "ui.prompt_submitted" => Ok(Self::UiPromptSubmitted),
             "ui.model_select" => Ok(Self::UiModelSelect),
+            "ui.detach_request" => Ok(Self::UiDetachRequest),
             "session.prompt_queued" => Ok(Self::SessionPromptQueued),
             "session.started" => Ok(Self::SessionStarted),
             "session.prompt_created" => Ok(Self::SessionPromptCreated),
@@ -544,6 +548,13 @@ pub struct UiModelSelect {
     pub model: ModelId,
 }
 
+/// The UI is detaching and wants the daemon to stay alive after it
+/// leaves, so a later `tau run --attach` can pick up the same
+/// session. The harness flips its `exit_on_disconnect` flag to
+/// `false` on receipt.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UiDetachRequest {}
+
 // ---------------------------------------------------------------------------
 // Session events — facts from the harness session tracker
 // ---------------------------------------------------------------------------
@@ -740,6 +751,8 @@ pub enum Event {
     UiPromptSubmitted(UiPromptSubmitted),
     #[serde(rename = "ui.model_select")]
     UiModelSelect(UiModelSelect),
+    #[serde(rename = "ui.detach_request")]
+    UiDetachRequest(UiDetachRequest),
 
     // Session
     #[serde(rename = "session.prompt_queued")]
@@ -794,6 +807,7 @@ impl Event {
             Self::HarnessModelSelected(_) => EventName::HarnessModelSelected,
             Self::UiPromptSubmitted(_) => EventName::UiPromptSubmitted,
             Self::UiModelSelect(_) => EventName::UiModelSelect,
+            Self::UiDetachRequest(_) => EventName::UiDetachRequest,
             Self::SessionPromptQueued(_) => EventName::SessionPromptQueued,
             Self::SessionStarted(_) => EventName::SessionStarted,
             Self::SessionPromptCreated(_) => EventName::SessionPromptCreated,

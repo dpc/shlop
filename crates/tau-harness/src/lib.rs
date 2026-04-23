@@ -49,7 +49,18 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 /// Serve-loop options for daemon mode.
 #[derive(Clone, Debug, Default, Eq, PartialEq, bon::Builder)]
 pub struct ServeOptions {
+    /// Hard cap on total served clients before the serve loop exits.
+    /// Used mainly in tests to bound a run. `None` = unbounded.
     pub max_clients: Option<usize>,
+    /// When set, the daemon exits as soon as the last attached UI
+    /// socket disconnects. When clear, the daemon keeps running with
+    /// no attached UIs — a later `tau run --attach` can pick up the
+    /// session. The `ui.detach_request` event flips this at runtime.
+    ///
+    /// Default `false`: daemon is long-lived unless explicitly told
+    /// otherwise.
+    #[builder(default)]
+    pub exit_on_disconnect: bool,
     pub policy_store_path: Option<PathBuf>,
     /// Directory layout (config + state) the harness reads. Defaults to
     /// [`tau_config::settings::TauDirs::default()`] on the call site.
@@ -893,10 +904,23 @@ impl Harness {
     // Main event loop (daemon mode)
     // -----------------------------------------------------------------------
 
-    fn run_event_loop(&mut self, max_clients: Option<usize>) -> Result<(), HarnessError> {
+    fn run_event_loop(
+        &mut self,
+        max_clients: Option<usize>,
+        mut exit_on_disconnect: bool,
+    ) -> Result<(), HarnessError> {
         let mut served_clients = 0_usize;
+        let mut ever_attached = false;
         loop {
             if max_clients.is_some_and(|max| served_clients >= max) {
+                break;
+            }
+            // `exit_on_disconnect`: once at least one UI has been
+            // attached, exiting the moment the last one leaves lets
+            // `tau run` behave like a normal foreground command.
+            // Before any UI attaches we wait — otherwise a slightly
+            // late first connect would race us into immediate exit.
+            if exit_on_disconnect && ever_attached && self.client_writers.is_empty() {
                 break;
             }
             let Ok(event) = self.rx.recv() else { break };
@@ -912,6 +936,12 @@ impl Harness {
                         .map(|m| m.origin.clone());
                     match origin {
                         Some(ConnectionOrigin::Socket) => {
+                            // `/detach` → stay alive even after this
+                            // UI leaves; a later `tau run --attach`
+                            // can pick up right here.
+                            if matches!(event, Event::UiDetachRequest(_)) {
+                                exit_on_disconnect = false;
+                            }
                             let keep = self.handle_client_event(&connection_id, event)?;
                             if !keep {
                                 let _ = self.bus.disconnect(&connection_id);
@@ -938,6 +968,7 @@ impl Harness {
                 }
                 HarnessEvent::NewClient(stream) => {
                     self.accept_client(stream)?;
+                    ever_attached = true;
                 }
             }
         }
@@ -1190,6 +1221,8 @@ impl Harness {
         self.remove_discovered_context(connection_id);
         self.maybe_complete_session_init_for_disconnect(connection_id);
         self.set_extension_state(connection_id, ExtensionState::Disconnected);
+        self.client_writers
+            .remove(&tau_proto::ConnectionId::from(connection_id));
         let Some(meta) = self.bus.disconnect(connection_id) else {
             return;
         };
@@ -2832,7 +2865,7 @@ pub fn run_daemon(
         }
     });
 
-    let result = harness.run_event_loop(options.max_clients);
+    let result = harness.run_event_loop(options.max_clients, options.exit_on_disconnect);
     let _ = harness.shutdown();
     let _ = std::fs::remove_file(&socket_path);
     result
@@ -2865,7 +2898,7 @@ pub fn run_daemon_with_config(
         }
     });
 
-    let result = harness.run_event_loop(options.max_clients);
+    let result = harness.run_event_loop(options.max_clients, options.exit_on_disconnect);
     let _ = harness.shutdown();
     let _ = std::fs::remove_file(&socket_path);
     result
@@ -2996,7 +3029,7 @@ pub fn run_harness_daemon(
         }
     });
 
-    let result = harness.run_event_loop(options.max_clients);
+    let result = harness.run_event_loop(options.max_clients, options.exit_on_disconnect);
     let _ = harness.shutdown();
     daemon_dir.cleanup();
     result
@@ -3009,8 +3042,11 @@ pub fn run_component() -> Result<(), Box<dyn std::error::Error>> {
     run_harness_daemon(
         &project_root,
         &config,
+        // Exit once the spawning UI leaves. A UI that wants the
+        // daemon to outlive it sends `ui.detach_request`, which
+        // flips this to `false` at runtime.
         ServeOptions {
-            max_clients: Some(1),
+            exit_on_disconnect: true,
             ..Default::default()
         },
     )
