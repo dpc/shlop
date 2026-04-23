@@ -2360,7 +2360,7 @@ fn build_system_prompt(
          - Be concise in your responses.\n\
          - Show file paths clearly when working with files.\n\
          - When asked to read a file, use the read tool.\n\
-         - When asked to run a command, use the bash tool.\n",
+         - When asked to run a command, use the shell tool.\n",
     );
 
     // Available skills section.

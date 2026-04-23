@@ -1,6 +1,7 @@
 //! Filesystem and shell tool extension.
 //!
-//! Provides `read`, `write`, and `bash` tools.
+//! Provides `read`, `write`, `edit`, `grep`, `find`, `ls`, and
+//! `shell` tools.
 //!
 //! The `echo` tool is available for testing via `include_echo: true`.
 
@@ -254,7 +255,7 @@ where
                 "properties": {
                     "pattern": {
                         "type": "string",
-                        "description": "Glob pattern matched against file paths relative to `path`. Examples: '*.rs' (top-level Rust files), '**/*.md' (all Markdown files, any depth). Directories are not returned."
+                        "description": "Glob pattern matched against file paths relative to `path`. `**` matches any number of intermediate directories, including zero — so `**/*.rs` finds both top-level `a.rs` and nested `src/a.rs`. Directories are not returned, even with `**/*`."
                     },
                     "path": {
                         "type": "string",
@@ -2213,6 +2214,42 @@ mod tests {
         let content = cbor_map_text(&result, "content").expect("content field");
         assert!(content.contains("line 1\n"));
         assert!(content.contains("[Showing lines 1-"));
+    }
+
+    #[test]
+    fn run_find_double_star_matches_top_level_files() {
+        // Regression: `**/*.rs` should match both nested AND
+        // top-level Rust files. `globset`'s native `**` requires one
+        // path separator; we work around that in `compile_find_glob`.
+        let tempdir = TempDir::new().expect("tempdir");
+        fs::create_dir_all(tempdir.path().join("src")).expect("mkdir");
+        fs::write(tempdir.path().join("top.rs"), "fn top() {}\n").expect("write top");
+        fs::write(tempdir.path().join("src/lib.rs"), "fn nested() {}\n").expect("write nested");
+        fs::write(tempdir.path().join("README.md"), "# hi\n").expect("write readme");
+
+        let args = CborValue::Map(vec![
+            (
+                CborValue::Text("pattern".to_owned()),
+                CborValue::Text("**/*.rs".to_owned()),
+            ),
+            (
+                CborValue::Text("path".to_owned()),
+                CborValue::Text(tempdir.path().display().to_string()),
+            ),
+        ]);
+        let result = run_find(&args).expect("find");
+
+        assert_eq!(cbor_int_field(&result, "matches"), Some(2));
+        let output = cbor_map_text(&result, "output").expect("output");
+        assert!(
+            output.contains("top.rs"),
+            "top-level match missing: {output}"
+        );
+        assert!(
+            output.contains("src/lib.rs"),
+            "nested match missing: {output}"
+        );
+        assert!(!output.contains("README.md"));
     }
 
     #[test]
