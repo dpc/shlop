@@ -11,9 +11,15 @@ pub const AGENT_RESPONSE: &str = "agent.response";
 pub const AGENT_PENDING: &str = "agent.pending";
 
 // -- Tool execution --
-pub const TOOL_RUNNING: &str = "tool.running";
-pub const TOOL_RESULT: &str = "tool.result";
-pub const TOOL_ERROR: &str = "tool.error";
+//
+// Tool-call blocks are composed of three spans: the tool name at the
+// start, its arguments in the middle, and a status suffix at the end.
+// Each span has its own style so a theme can paint them differently.
+pub const TOOL_NAME: &str = "tool.name";
+pub const TOOL_ARGS: &str = "tool.args";
+pub const TOOL_STATUS_SUCCESS: &str = "tool.status.success";
+pub const TOOL_STATUS_ERROR: &str = "tool.status.error";
+pub const TOOL_STATUS_INFO: &str = "tool.status.info";
 pub const TOOL_PROGRESS: &str = "tool.progress";
 
 // -- Extensions --

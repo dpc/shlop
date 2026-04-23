@@ -360,58 +360,64 @@ fn cbor_int_field(value: &CborValue, key: &str) -> Option<i128> {
 }
 
 /// Formats a tool call for display while it is running.
-fn format_tool_call(tool_name: &str, arguments: &CborValue) -> String {
-    match tool_name {
-        "shell" => {
-            let cmd = cbor_text_field(arguments, "command").unwrap_or_default();
-            format!("shell {cmd}")
-        }
-        "read" => {
-            let path = cbor_text_field(arguments, "path").unwrap_or_default();
-            format!("read {path}")
-        }
-        "write" => {
-            let path = cbor_text_field(arguments, "path").unwrap_or_default();
-            format!("write {path}")
-        }
-        "edit" => {
-            let path = cbor_text_field(arguments, "path").unwrap_or_default();
-            format!("edit {path}")
-        }
+/// Which status-suffix style the completion block should use.
+#[derive(Clone, Copy)]
+enum ToolStatus {
+    Success,
+    Error,
+    Info,
+}
+
+/// Decomposed tool-call label, painted as three themed spans:
+/// `<tool_name> <args> <suffix>`. `suffix` is `None` while the tool is
+/// still running (nothing to say yet about the outcome).
+struct ToolCallDisplay {
+    tool_name: String,
+    args: String,
+    suffix: Option<String>,
+    status: ToolStatus,
+}
+
+/// Builds the display record for a tool call that is still running.
+fn format_tool_call(tool_name: &str, arguments: &CborValue) -> ToolCallDisplay {
+    let args = match tool_name {
+        "shell" => cbor_text_field(arguments, "command").unwrap_or_default(),
+        "read" | "write" | "edit" => cbor_text_field(arguments, "path").unwrap_or_default(),
         "find" => {
             let pattern = cbor_text_field(arguments, "pattern").unwrap_or_default();
             let path = cbor_text_field(arguments, "path").unwrap_or_else(|| ".".to_owned());
-            format!("find {pattern} in {path}")
+            format!("{pattern} in {path}")
         }
         "grep" => {
             let pattern = cbor_text_field(arguments, "pattern").unwrap_or_default();
             let path = cbor_text_field(arguments, "path").unwrap_or_else(|| ".".to_owned());
-            let mut label = format!("grep {pattern:?} in {path}");
+            let mut args = format!("{pattern:?} in {path}");
             if let Some(glob) = cbor_text_field(arguments, "glob") {
-                label.push_str(&format!(" [{glob}]"));
+                args.push_str(&format!(" [{glob}]"));
             }
-            label
+            args
         }
-        "ls" => {
-            let path = cbor_text_field(arguments, "path").unwrap_or_else(|| ".".to_owned());
-            format!("ls {path}")
-        }
-        "skill" => {
-            let name = cbor_text_field(arguments, "name").unwrap_or_default();
-            format!("skill {name}")
-        }
-        _ => tool_name.to_owned(),
+        "ls" => cbor_text_field(arguments, "path").unwrap_or_else(|| ".".to_owned()),
+        "skill" => cbor_text_field(arguments, "name").unwrap_or_default(),
+        _ => String::new(),
+    };
+    ToolCallDisplay {
+        tool_name: tool_name.to_owned(),
+        args,
+        suffix: None,
+        status: ToolStatus::Success,
     }
 }
 
-/// Completed tool display: a styled label and optional unstyled output.
-struct ToolCompletionDisplay {
-    /// Summary line (e.g. `shell ls [0]`, `read foo.rs (42 lines, 1200
-    /// bytes)`).
-    label: String,
-    /// Optional output text shown below the label in default style
-    /// (e.g. shell stdout/stderr).
-    output: Option<String>,
+/// Error-path display: `<tool_name> <args>` with a `": <msg>"`
+/// status suffix in the error style. Shared by every tool.
+fn format_tool_error(tool_name: &str, args: String, error_message: &str) -> ToolCallDisplay {
+    ToolCallDisplay {
+        tool_name: tool_name.to_owned(),
+        args,
+        suffix: Some(format!(": {error_message}")),
+        status: ToolStatus::Error,
+    }
 }
 
 /// Formats a completed tool call for display.
@@ -419,181 +425,200 @@ fn format_tool_completion(
     tool_name: &str,
     details: &CborValue,
     error_message: Option<&str>,
-) -> ToolCompletionDisplay {
+) -> ToolCallDisplay {
     match tool_name {
-        "shell" => format_shell_completion(details),
+        "shell" => format_shell_completion(details, error_message),
         "read" => {
-            let path = cbor_text_field(details, "path");
-            let label = if let Some(msg) = error_message {
-                match path {
-                    Some(p) => format!("read {p}: {msg}"),
-                    None => format!("read: {msg}"),
-                }
+            let path = cbor_text_field(details, "path").unwrap_or_default();
+            if let Some(msg) = error_message {
+                format_tool_error("read", path, msg)
             } else {
-                let path = path.unwrap_or_default();
                 let content = cbor_text_field(details, "content").unwrap_or_default();
                 let line_count = content.lines().count();
                 let byte_count = content.len();
-                format!("read {path} ({line_count} lines, {byte_count} bytes)")
-            };
-            ToolCompletionDisplay {
-                label,
-                output: None,
+                ToolCallDisplay {
+                    tool_name: "read".into(),
+                    args: path,
+                    suffix: Some(format!("({line_count} lines, {byte_count} bytes)")),
+                    status: ToolStatus::Success,
+                }
             }
         }
         "write" => {
-            let path = cbor_text_field(details, "path");
-            let label = if let Some(msg) = error_message {
-                match path {
-                    Some(p) => format!("write {p}: {msg}"),
-                    None => format!("write: {msg}"),
-                }
+            let path = cbor_text_field(details, "path").unwrap_or_default();
+            if let Some(msg) = error_message {
+                format_tool_error("write", path, msg)
             } else {
-                let path = path.unwrap_or_default();
                 let bytes = cbor_int_field(details, "bytes_written").unwrap_or(0);
-                format!("write {path} ({bytes} bytes)")
-            };
-            ToolCompletionDisplay {
-                label,
-                output: None,
+                ToolCallDisplay {
+                    tool_name: "write".into(),
+                    args: path,
+                    suffix: Some(format!("({bytes} bytes)")),
+                    status: ToolStatus::Success,
+                }
             }
         }
         "edit" => {
-            let path = cbor_text_field(details, "path");
-            let label = if let Some(msg) = error_message {
-                match path {
-                    Some(p) => format!("edit {p}: {msg}"),
-                    None => format!("edit: {msg}"),
-                }
+            let path = cbor_text_field(details, "path").unwrap_or_default();
+            if let Some(msg) = error_message {
+                format_tool_error("edit", path, msg)
             } else {
-                let path = path.unwrap_or_default();
                 let count = cbor_int_field(details, "edits_applied").unwrap_or(0);
-                format!("edit {path} ({count} edits applied)")
-            };
-            ToolCompletionDisplay {
-                label,
-                output: None,
+                ToolCallDisplay {
+                    tool_name: "edit".into(),
+                    args: path,
+                    suffix: Some(format!("({count} edits applied)")),
+                    status: ToolStatus::Success,
+                }
             }
         }
         "find" => {
-            // Like `ls` / `shell`: the label alone (pattern + path +
-            // match count) is the useful summary in the UI; the actual
-            // list of matching paths tends to be long and the agent
-            // already has it in its conversation history.
-            let path = cbor_text_field(details, "path");
-            let pattern = cbor_text_field(details, "pattern");
-            let label = if let Some(msg) = error_message {
-                match (pattern, path) {
-                    (Some(pattern), Some(path)) => format!("find {pattern} in {path}: {msg}"),
-                    (Some(pattern), None) => format!("find {pattern}: {msg}"),
-                    _ => format!("find: {msg}"),
-                }
+            let path = cbor_text_field(details, "path").unwrap_or_else(|| ".".to_owned());
+            let pattern = cbor_text_field(details, "pattern").unwrap_or_default();
+            let args = format!("{pattern} in {path}");
+            if let Some(msg) = error_message {
+                format_tool_error("find", args, msg)
             } else {
-                let path = path.unwrap_or_else(|| ".".to_owned());
-                let pattern = pattern.unwrap_or_default();
                 let count = cbor_int_field(details, "matches").unwrap_or(0);
-                format!("find {pattern} in {path} ({count} matches)")
-            };
-            ToolCompletionDisplay {
-                label,
-                output: None,
+                ToolCallDisplay {
+                    tool_name: "find".into(),
+                    args,
+                    suffix: Some(format!("({count} matches)")),
+                    // Zero matches is neutral informational, not a failure.
+                    status: if count == 0 {
+                        ToolStatus::Info
+                    } else {
+                        ToolStatus::Success
+                    },
+                }
             }
         }
         "grep" => {
-            // Like `ls` / `find` / `shell`: only the one-line summary
-            // in the UI. The full ripgrep body can be very long and
-            // the agent already has it in its conversation history.
-            let pattern = cbor_text_field(details, "pattern");
-            let path = cbor_text_field(details, "path");
+            let path = cbor_text_field(details, "path").unwrap_or_else(|| ".".to_owned());
+            let pattern = cbor_text_field(details, "pattern").unwrap_or_default();
             let glob = cbor_text_field(details, "glob");
-            let label = if let Some(msg) = error_message {
-                match (&pattern, &path) {
-                    (Some(p), Some(dir)) => format!("grep {p:?} in {dir}: {msg}"),
-                    (Some(p), None) => format!("grep {p:?}: {msg}"),
-                    _ => format!("grep: {msg}"),
-                }
-            } else {
-                let path = path.unwrap_or_else(|| ".".to_owned());
-                let pattern = pattern.unwrap_or_default();
-                let count = cbor_int_field(details, "matches").unwrap_or(0);
-                let suffix = if count == 1 { "match" } else { "matches" };
-                match glob {
-                    Some(g) => format!("grep {pattern:?} in {path} [{g}] ({count} {suffix})"),
-                    None => format!("grep {pattern:?} in {path} ({count} {suffix})"),
-                }
+            let args = match glob {
+                Some(g) => format!("{pattern:?} in {path} [{g}]"),
+                None => format!("{pattern:?} in {path}"),
             };
-            ToolCompletionDisplay {
-                label,
-                output: None,
+            if let Some(msg) = error_message {
+                format_tool_error("grep", args, msg)
+            } else {
+                let count = cbor_int_field(details, "matches").unwrap_or(0);
+                let suffix_word = if count == 1 { "match" } else { "matches" };
+                ToolCallDisplay {
+                    tool_name: "grep".into(),
+                    args,
+                    suffix: Some(format!("({count} {suffix_word})")),
+                    status: if count == 0 {
+                        ToolStatus::Info
+                    } else {
+                        ToolStatus::Success
+                    },
+                }
             }
         }
         "ls" => {
-            // The label alone (path + entry count) is the useful
-            // summary in the UI; the actual listing tends to be long
-            // and the agent already has it in its conversation
-            // history.
-            let path = cbor_text_field(details, "path");
-            let label = if let Some(msg) = error_message {
-                match path {
-                    Some(p) => format!("ls {p}: {msg}"),
-                    None => format!("ls: {msg}"),
-                }
+            let path = cbor_text_field(details, "path").unwrap_or_else(|| ".".to_owned());
+            if let Some(msg) = error_message {
+                format_tool_error("ls", path, msg)
             } else {
-                let path = path.unwrap_or_else(|| ".".to_owned());
                 let count = cbor_int_field(details, "entries").unwrap_or(0);
-                format!("ls {path} ({count} entries)")
-            };
-            ToolCompletionDisplay {
-                label,
-                output: None,
+                ToolCallDisplay {
+                    tool_name: "ls".into(),
+                    args: path,
+                    suffix: Some(format!("({count} entries)")),
+                    status: ToolStatus::Success,
+                }
             }
         }
         "skill" => {
-            let name = cbor_text_field(details, "name");
-            let label = if let Some(msg) = error_message {
-                match name {
-                    Some(n) => format!("skill {n}: {msg}"),
-                    None => format!("skill: {msg}"),
+            let name = cbor_text_field(details, "name").unwrap_or_default();
+            if let Some(msg) = error_message {
+                format_tool_error("skill", name, msg)
+            } else {
+                ToolCallDisplay {
+                    tool_name: "skill".into(),
+                    args: name,
+                    suffix: Some("loaded".to_owned()),
+                    status: ToolStatus::Success,
                 }
-            } else {
-                let name = name.unwrap_or_default();
-                format!("skill {name} loaded")
-            };
-            ToolCompletionDisplay {
-                label,
-                output: None,
             }
         }
-        _ => {
-            let label = if let Some(msg) = error_message {
-                format!("{tool_name}: {msg}")
-            } else {
-                format!("{tool_name}: done")
-            };
-            ToolCompletionDisplay {
-                label,
-                output: None,
-            }
-        }
+        _ => ToolCallDisplay {
+            tool_name: tool_name.to_owned(),
+            args: String::new(),
+            suffix: Some(match error_message {
+                Some(msg) => format!(": {msg}"),
+                None => "done".to_owned(),
+            }),
+            status: match error_message {
+                Some(_) => ToolStatus::Error,
+                None => ToolStatus::Info,
+            },
+        },
     }
 }
 
-fn format_shell_completion(details: &CborValue) -> ToolCompletionDisplay {
-    // The label alone (command + exit status) is usually enough in the
-    // UI transcript — stdout / stderr tend to be long and noisy and
-    // the agent already has the full body in its conversation history.
+fn format_shell_completion(details: &CborValue, error_message: Option<&str>) -> ToolCallDisplay {
     let cmd = cbor_text_field(details, "command").unwrap_or_default();
+    if let Some(msg) = error_message {
+        return format_tool_error("shell", cmd, msg);
+    }
     let status = cbor_int_field(details, "status");
-
-    let mut label = format!("shell {cmd}");
-    if let Some(code) = status {
-        label.push_str(&format!(" [{code}]"));
+    let (suffix, outcome) = match status {
+        Some(code) => (
+            format!("[{code}]"),
+            if code == 0 {
+                ToolStatus::Success
+            } else {
+                ToolStatus::Error
+            },
+        ),
+        None => ("[?]".to_owned(), ToolStatus::Info),
+    };
+    ToolCallDisplay {
+        tool_name: "shell".into(),
+        args: cmd,
+        suffix: Some(suffix),
+        status: outcome,
     }
+}
 
-    ToolCompletionDisplay {
-        label,
-        output: None,
+/// Paints a [`ToolCallDisplay`] onto a three-span styled block:
+/// tool name in the name style, args in the args style, trailing
+/// status suffix (if any) in the success/error/info style.
+fn render_tool_block(
+    theme: &tau_themes::Theme,
+    display: &ToolCallDisplay,
+) -> tau_cli_term::StyledBlock {
+    use tau_cli_term::resolve::resolve;
+    use tau_cli_term::{Span, StyledBlock, StyledText};
+    use tau_themes::names;
+
+    let name_style = resolve(theme, names::TOOL_NAME);
+    let args_style = resolve(theme, names::TOOL_ARGS);
+    let status_name = match display.status {
+        ToolStatus::Success => names::TOOL_STATUS_SUCCESS,
+        ToolStatus::Error => names::TOOL_STATUS_ERROR,
+        ToolStatus::Info => names::TOOL_STATUS_INFO,
+    };
+    let status_style = resolve(theme, status_name);
+
+    let mut spans = vec![Span::new(display.tool_name.clone(), name_style)];
+    if !display.args.is_empty() {
+        spans.push(Span::new(" ", args_style));
+        spans.push(Span::new(display.args.clone(), args_style));
     }
+    if let Some(ref suffix) = display.suffix {
+        // The error prefix `": "` hugs the args, everything else gets
+        // a single space gap.
+        if !suffix.starts_with(':') {
+            spans.push(Span::new(" ", args_style));
+        }
+        spans.push(Span::new(suffix.clone(), status_style));
+    }
+    StyledBlock::new(StyledText::from(spans))
 }
 
 /// Event renderer. Maps session_prompt_id → block_id for in-place
@@ -710,8 +735,8 @@ impl EventRenderer {
                 }
 
                 for call in &finished.tool_calls {
-                    let label = format_tool_call(call.name.as_str(), &call.arguments);
-                    let block = themed_block(&self.theme, names::TOOL_RUNNING, label);
+                    let display = format_tool_call(call.name.as_str(), &call.arguments);
+                    let block = render_tool_block(&self.theme, &display);
                     let id = self.handle.new_block(block);
                     self.handle.push_above_active(id);
                     self.tool_blocks.insert(call.id.to_string(), id);
@@ -732,15 +757,8 @@ impl EventRenderer {
                     self.handle.remove_block(bid);
                 }
                 let display = format_tool_completion(&result.tool_name, &result.result, None);
-                self.handle.print_output(themed_block(
-                    &self.theme,
-                    names::TOOL_RESULT,
-                    display.label,
-                ));
-                if let Some(output) = display.output {
-                    self.handle
-                        .print_output(tau_cli_term::StyledBlock::new(output));
-                }
+                self.handle
+                    .print_output(render_tool_block(&self.theme, &display));
             }
             Event::ToolError(error) => {
                 if let Some(bid) = self.tool_blocks.remove(error.call_id.as_str()) {
@@ -752,15 +770,8 @@ impl EventRenderer {
                     cbor.unwrap_or(&CborValue::Null),
                     Some(&error.message),
                 );
-                self.handle.print_output(themed_block(
-                    &self.theme,
-                    names::TOOL_ERROR,
-                    display.label,
-                ));
-                if let Some(output) = display.output {
-                    self.handle
-                        .print_output(tau_cli_term::StyledBlock::new(output));
-                }
+                self.handle
+                    .print_output(render_tool_block(&self.theme, &display));
             }
             Event::ExtensionStarting(starting) => {
                 let block = themed_block(

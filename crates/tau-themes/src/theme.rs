@@ -239,8 +239,11 @@ mod tests {
         assert!(prompt.bold);
         assert!(prompt.fg.is_none());
 
-        let tool_err = theme.resolve_style(&StyleName::new("tool.error"));
-        assert_eq!(tool_err.fg, Some(Color::DarkRed));
+        let tool_err = theme.resolve_style(&StyleName::new("tool.status.error"));
+        assert_eq!(tool_err.fg, Some(Color::Red));
+
+        let tool_ok = theme.resolve_style(&StyleName::new("tool.status.success"));
+        assert_eq!(tool_ok.fg, Some(Color::Green));
 
         let selected = theme.resolve_style(&StyleName::new("completion.selected"));
         assert!(selected.bold);

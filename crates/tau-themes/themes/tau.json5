@@ -13,9 +13,14 @@
     "agent.pending":        { fg: "dark_grey" },
 
     // -- Tool execution --
-    "tool.running":         { fg: "yellow" },
-    "tool.result":          { fg: "yellow" },
-    "tool.error":           { fg: "dark_red" },
+    // A tool-call block is composed of three spans: name, args, status.
+    // The name is colored; args are left unstyled; status is tinted
+    // based on outcome.
+    "tool.name":            { fg: "yellow" },
+    "tool.args":            { },
+    "tool.status.success":  { fg: "green" },
+    "tool.status.error":    { fg: "red" },
+    "tool.status.info":     { fg: "blue" },
     "tool.progress":        { fg: "dark_yellow" },
 
     // -- Extensions --
