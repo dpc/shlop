@@ -628,6 +628,33 @@ impl Harness {
         harness.wait_for_extensions_ready()?;
         harness.register_harness_tools();
         harness.check_config_exists();
+
+        // Eager session init for the default session. INTENTIONAL —
+        // do NOT "simplify" this to lazy-on-first-prompt.
+        //
+        // Reasons this is a design choice, not dead weight:
+        //
+        // 1. **Pre-warm AGENTS.md and skill discovery.** The default session is the
+        //    fallback when a caller (embedded or socket) doesn't specify one, and even
+        //    when callers pick their own `chat-<ts>` id they still benefit: ext-fs has
+        //    already walked `~/.agents/` + the cwd ancestor chain once, so the second
+        //    init is cache-warm.
+        //
+        // 2. **Surface discovery before the first prompt.** The CLI prints "loaded
+        //    AGENTS.md: …" as events arrive; doing this at startup gives the user
+        //    visible confirmation that their AGENTS.md was found — before they type
+        //    anything — instead of bundling that feedback into the first agent
+        //    response.
+        //
+        // 3. **Fail loudly at startup, not mid-first-turn.** If a provider hangs or the
+        //    discovery logic panics, the process hits `StartupTimeout` here rather than
+        //    appearing to accept the first prompt and then silently stalling.
+        //
+        // Every past agent that touched this code has "noticed" that
+        // the CLI uses `chat-<ts>` session ids and concluded the eager
+        // init is wasted work. It isn't. Please resist the urge.
+        harness.start_session_init(default_session_id().into());
+        harness.wait_for_session_init()?;
         Ok(harness)
     }
 
@@ -718,6 +745,33 @@ impl Harness {
         harness.wait_for_extensions_ready()?;
         harness.register_harness_tools();
         harness.check_config_exists();
+
+        // Eager session init for the default session. INTENTIONAL —
+        // do NOT "simplify" this to lazy-on-first-prompt.
+        //
+        // Reasons this is a design choice, not dead weight:
+        //
+        // 1. **Pre-warm AGENTS.md and skill discovery.** The default session is the
+        //    fallback when a caller (embedded or socket) doesn't specify one, and even
+        //    when callers pick their own `chat-<ts>` id they still benefit: ext-fs has
+        //    already walked `~/.agents/` + the cwd ancestor chain once, so the second
+        //    init is cache-warm.
+        //
+        // 2. **Surface discovery before the first prompt.** The CLI prints "loaded
+        //    AGENTS.md: …" as events arrive; doing this at startup gives the user
+        //    visible confirmation that their AGENTS.md was found — before they type
+        //    anything — instead of bundling that feedback into the first agent
+        //    response.
+        //
+        // 3. **Fail loudly at startup, not mid-first-turn.** If a provider hangs or the
+        //    discovery logic panics, the process hits `StartupTimeout` here rather than
+        //    appearing to accept the first prompt and then silently stalling.
+        //
+        // Every past agent that touched this code has "noticed" that
+        // the CLI uses `chat-<ts>` session ids and concluded the eager
+        // init is wasted work. It isn't. Please resist the urge.
+        harness.start_session_init(default_session_id().into());
+        harness.wait_for_session_init()?;
         Ok(harness)
     }
 
@@ -752,6 +806,40 @@ impl Harness {
     // -----------------------------------------------------------------------
     // Startup
     // -----------------------------------------------------------------------
+
+    /// Drives the event loop until the in-flight session initialization
+    /// completes (turn state returns to `Idle`). Called at harness
+    /// startup after the eager `start_session_init` for the default
+    /// session — see that call site for the design rationale.
+    fn wait_for_session_init(&mut self) -> Result<(), HarnessError> {
+        if self.turn_state.is_idle() {
+            return Ok(());
+        }
+        let started_at = Instant::now();
+        while !self.turn_state.is_idle() {
+            let remaining = STARTUP_TIMEOUT
+                .checked_sub(started_at.elapsed())
+                .unwrap_or(Duration::ZERO);
+            let event = self
+                .rx
+                .recv_timeout(remaining)
+                .map_err(|_| HarnessError::StartupTimeout)?;
+            self.log_event(&event);
+            match event {
+                HarnessEvent::FromConnection {
+                    connection_id,
+                    event,
+                } => {
+                    self.handle_extension_event(&connection_id, event)?;
+                }
+                HarnessEvent::Disconnected { connection_id } => {
+                    self.handle_disconnect(&connection_id);
+                }
+                HarnessEvent::NewClient(_) => {}
+            }
+        }
+        Ok(())
+    }
 
     /// Drives the event loop until every configured extension reaches
     /// `ExtensionState::Ready`. Replaces the old `wait_for_startup(n)`:
@@ -1253,8 +1341,15 @@ impl Harness {
         );
     }
 
-    /// Replays harness info and extension lifecycle events from the log
-    /// to a late-joining client.
+    /// Replays harness info, extension lifecycle events, and the
+    /// results of eager session discovery to a late-joining client.
+    ///
+    /// `ExtAgentsMdAvailable` and `ExtensionContextReady` are replayed
+    /// so that the CLI — which connects after the daemon's eager
+    /// default-session init has already fired — still gets to render
+    /// the "loaded AGENTS.md: …" / "session context ready" lines.
+    /// Without replay the events arrive before the subscriber exists
+    /// and would be silently dropped.
     fn replay_harness_info(&mut self, client_id: &str, selectors: &[EventSelector]) {
         let mut cursor = 0;
         while let Some(entry) = self.event_log.get_next_from(cursor) {
@@ -1265,6 +1360,8 @@ impl Harness {
                     | Event::ExtensionStarting(_)
                     | Event::ExtensionReady(_)
                     | Event::ExtensionExited(_)
+                    | Event::ExtAgentsMdAvailable(_)
+                    | Event::ExtensionContextReady(_)
             );
             if dominated && selector_matches_event(selectors, &entry.event) {
                 let _ = self
@@ -3385,6 +3482,127 @@ mod tests {
             panic!("expected queued user prompt after AGENTS.md");
         };
         assert_eq!(prompt, "hello");
+
+        h.shutdown().expect("shutdown");
+    }
+
+    // -- Eager default-session init --
+
+    #[test]
+    fn harness_startup_eagerly_initializes_default_session() {
+        // Guards against the recurring "this looks like redundant work"
+        // urge to lazy-ify session init. `echo_harness` calls
+        // `Harness::new_with_agent`, which must eagerly initialize the
+        // default session before returning — see the design-choice
+        // comment in the constructor for why.
+        let td = TempDir::new().expect("tempdir");
+        let sp = td.path().join("sessions.cbor");
+        let pp = td.path().join("policy.cbor");
+        let h = echo_harness(&sp, &pp).expect("start");
+
+        assert!(
+            h.initialized_sessions.contains(default_session_id()),
+            "eager init should mark default session as initialized at startup; \
+             `initialized_sessions` was {:?}",
+            h.initialized_sessions
+        );
+        assert!(
+            matches!(h.turn_state, TurnState::Idle),
+            "turn state should be Idle after eager init completes"
+        );
+    }
+
+    #[test]
+    fn late_joining_ui_client_receives_replayed_agents_md_and_context_ready() {
+        // The CLI connects after the daemon's eager init has already
+        // fired, so live subscription would miss `ExtAgentsMdAvailable`
+        // and `ExtensionContextReady`. `replay_harness_info` must
+        // replay them from the event log at subscribe time so the UI
+        // still renders the "loaded AGENTS.md: …" / "session context
+        // ready" lines.
+        let td = TempDir::new().expect("tempdir");
+        let sp = td.path().join("sessions.cbor");
+        let pp = td.path().join("policy.cbor");
+        let mut h = echo_harness(&sp, &pp).expect("start");
+        let tools_conn = h
+            .extension_connection_id("tools")
+            .expect("tools")
+            .to_owned();
+
+        // Inject synthetic discovery events as if ext-fs had reported
+        // them during eager init. publish_event appends to the log,
+        // which is what `replay_harness_info` walks.
+        h.publish_event(
+            Some(&tools_conn),
+            Event::ExtAgentsMdAvailable(tau_proto::ExtAgentsMdAvailable {
+                file_path: "/test/AGENTS.md".to_owned(),
+                content: "# test\n".to_owned(),
+            }),
+        );
+        h.publish_event(
+            Some(&tools_conn),
+            Event::ExtensionContextReady(tau_proto::ExtensionContextReady {
+                session_id: default_session_id().into(),
+            }),
+        );
+
+        // Hook up a fake UI client via a UnixStream pair.
+        let (server_end, client_end) = UnixStream::pair().expect("pair");
+        client_end
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("read timeout");
+        h.accept_client(server_end).expect("accept");
+
+        // Find the UI connection the bus assigned. `accept_client`
+        // gives it name "socket-ui".
+        let ui_conn = h
+            .bus
+            .connections()
+            .into_iter()
+            .find(|c| c.name == "socket-ui")
+            .expect("ui connection")
+            .id
+            .to_string();
+
+        // Trigger subscribe + replay via the normal client-event path.
+        h.handle_client_event(
+            &ui_conn,
+            Event::LifecycleSubscribe(LifecycleSubscribe {
+                selectors: vec![EventSelector::Prefix("extension.".to_owned())],
+            }),
+        )
+        .expect("subscribe");
+
+        // Read from the client side and collect the replayed discovery
+        // events. Other `extension.*` events (starting/ready for fs +
+        // agent extensions) also replay — we ignore them.
+        let mut reader = EventReader::new(BufReader::new(client_end));
+        let mut got_agents_md = false;
+        let mut got_context_ready = false;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline && !(got_agents_md && got_context_ready) {
+            let Ok(Some(event)) = reader.read_event() else {
+                break;
+            };
+            let (_log_id, inner) = event.peel_log();
+            match inner {
+                Event::ExtAgentsMdAvailable(a) if a.file_path == "/test/AGENTS.md" => {
+                    got_agents_md = true;
+                }
+                Event::ExtensionContextReady(_) => {
+                    got_context_ready = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            got_agents_md,
+            "late UI client should replay ExtAgentsMdAvailable"
+        );
+        assert!(
+            got_context_ready,
+            "late UI client should replay ExtensionContextReady"
+        );
 
         h.shutdown().expect("shutdown");
     }
