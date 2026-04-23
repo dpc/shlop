@@ -344,7 +344,7 @@ fn convert_message(msg: &ConversationMessage, out: &mut Vec<serde_json::Value>) 
                             "type": "function_call",
                             "id": fc_id,
                             "call_id": id,
-                            "name": encode_tool_name(name),
+                            "name": encode_tool_name(name.as_str()),
                             "arguments": serde_json::to_string(&args_json).unwrap_or_default(),
                         }));
                     }

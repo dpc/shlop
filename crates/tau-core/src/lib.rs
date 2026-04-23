@@ -2109,7 +2109,7 @@ mod tests {
                 }],
             }],
             tools: vec![ToolDefinition {
-                name: "echo".to_owned(),
+                name: "echo".into(),
                 description: None,
                 parameters: None,
             }],

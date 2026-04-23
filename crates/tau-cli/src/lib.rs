@@ -693,7 +693,7 @@ impl EventRenderer {
                 }
 
                 for call in &finished.tool_calls {
-                    let label = format_tool_call(&call.name, &call.arguments);
+                    let label = format_tool_call(call.name.as_str(), &call.arguments);
                     let block = themed_block(&self.theme, names::TOOL_RUNNING, label);
                     let id = self.handle.new_block(block);
                     self.handle.push_above_active(id);

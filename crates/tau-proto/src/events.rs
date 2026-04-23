@@ -10,7 +10,10 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{CborValue, ExtensionName, ModelId, SessionId, SessionPromptId, ToolCallId, ToolName};
+use crate::{
+    CborValue, ExtensionName, ModelId, SessionId, SessionPromptId, ToolCallId, ToolName,
+    ToolNameMaybe,
+};
 
 // ---------------------------------------------------------------------------
 // Event names
@@ -596,7 +599,12 @@ pub struct AgentResponseUpdated {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AgentToolCall {
     pub id: String,
-    pub name: String,
+    /// Model-produced name. Kept as [`ToolNameMaybe`] so that a
+    /// single hallucinated / malformed name doesn't fail decode of
+    /// the entire batch; the harness matches on the variant at
+    /// dispatch time and rejects `Invalid` with a synthetic
+    /// `ToolError` while letting sibling calls run.
+    pub name: ToolNameMaybe,
     pub arguments: CborValue,
 }
 
@@ -631,7 +639,9 @@ pub enum ContentBlock {
     },
     ToolUse {
         id: String,
-        name: String,
+        /// Same untrusted-LLM-output contract as
+        /// `AgentToolCall::name`. See [`ToolNameMaybe`].
+        name: ToolNameMaybe,
         input: CborValue,
     },
     ToolResult {
@@ -650,9 +660,12 @@ pub struct ConversationMessage {
 }
 
 /// A tool definition available for the agent to use.
+///
+/// This is outbound (harness → LLM in the prompt), so the harness
+/// controls the string and we enforce the `ToolName` invariant.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolDefinition {
-    pub name: String,
+    pub name: ToolName,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// JSON Schema describing the tool's input parameters.

@@ -382,7 +382,7 @@ where
                     let tool_call = if let Some(path) = user_text.strip_prefix("read ") {
                         AgentToolCall {
                             id: call_id,
-                            name: "read".to_owned(),
+                            name: "read".into(),
                             arguments: CborValue::Map(vec![(
                                 CborValue::Text("path".to_owned()),
                                 CborValue::Text(path.trim().to_owned()),
@@ -391,7 +391,7 @@ where
                     } else if let Some(cmd) = user_text.strip_prefix("shell ") {
                         AgentToolCall {
                             id: call_id,
-                            name: "shell".to_owned(),
+                            name: "shell".into(),
                             arguments: CborValue::Map(vec![(
                                 CborValue::Text("command".to_owned()),
                                 CborValue::Text(cmd.trim().to_owned()),
@@ -400,7 +400,7 @@ where
                     } else {
                         AgentToolCall {
                             id: call_id,
-                            name: "echo".to_owned(),
+                            name: "echo".into(),
                             arguments: CborValue::Text(user_text),
                         }
                     };

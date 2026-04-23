@@ -1583,7 +1583,7 @@ impl Harness {
             .all_tools()
             .into_iter()
             .map(|spec| ToolDefinition {
-                name: spec.name.to_string(),
+                name: spec.name.clone(),
                 description: spec.description.clone(),
                 parameters: spec.parameters.clone(),
             })
@@ -1640,7 +1640,7 @@ impl Harness {
             // emitted them. Dispatch is done by `drain_pending_tool_invocations`,
             // which respects the pure-vs-mutating ordering rule.
             for call in &response.tool_calls {
-                let kind = self.resolve_tool_kind(&call.name);
+                let kind = self.resolve_tool_kind(call.name.as_str());
                 self.pending_tool_invocations
                     .push_back((session_id.clone(), call.clone(), kind));
             }
@@ -1835,18 +1835,20 @@ impl Harness {
     ) -> Result<(), HarnessError> {
         // Agent output is untrusted — hallucinated or streaming-
         // artifact tool calls can arrive with empty or otherwise
-        // invalid names. Reject cleanly with a ToolError instead of
-        // panicking inside `ToolName::new`.
-        let Some(tool_name) = ToolName::try_new(call.name.clone()) else {
-            self.reject_invalid_tool_call(
-                session_id,
-                &call.id,
-                format!(
-                    "invalid tool name {:?}: must be non-empty and match [a-zA-Z0-9_]+",
-                    call.name
-                ),
-            )?;
-            return Ok(());
+        // invalid names. The wire type `ToolNameMaybe` preserves both
+        // classes; here we pick the validated arm for the happy path
+        // and route everything else to `reject_invalid_tool_call` with
+        // a synthetic error the agent sees on its next turn.
+        let tool_name = match &call.name {
+            tau_proto::ToolNameMaybe::Valid(name) => name.clone(),
+            tau_proto::ToolNameMaybe::Invalid(raw) => {
+                self.reject_invalid_tool_call(
+                    session_id,
+                    &call.id,
+                    format!("invalid tool name {raw:?}: must be non-empty and match [a-zA-Z0-9_]+"),
+                )?;
+                return Ok(());
+            }
         };
 
         // Handle harness-owned tools directly.
@@ -2436,7 +2438,7 @@ fn assemble_conversation(tree: &tau_core::SessionTree) -> Vec<ConversationMessag
                     if let Some(last) = messages.last_mut() {
                         last.content.push(ContentBlock::ToolUse {
                             id: activity.call_id.to_string(),
-                            name: activity.tool_name.to_string(),
+                            name: activity.tool_name.clone().into(),
                             input: arguments.clone(),
                         });
                     }
@@ -3683,7 +3685,9 @@ mod tests {
             text: None,
             tool_calls: vec![AgentToolCall {
                 id: "c1".into(),
-                name: String::new(),
+                // Intentionally an empty raw string to exercise the
+                // `Invalid` arm of `ToolNameMaybe`.
+                name: "".into(),
                 arguments: CborValue::Map(Vec::new()),
             }],
         };
@@ -3990,7 +3994,7 @@ mod tests {
         };
         let call = AgentToolCall {
             id: "call-skill".to_owned(),
-            name: "skill".to_owned(),
+            name: "skill".into(),
             arguments: CborValue::Map(vec![(
                 CborValue::Text("name".to_owned()),
                 CborValue::Text("my-skill".to_owned()),
@@ -4028,7 +4032,7 @@ mod tests {
         };
         let call = AgentToolCall {
             id: "call-missing".to_owned(),
-            name: "skill".to_owned(),
+            name: "skill".into(),
             arguments: CborValue::Map(vec![(
                 CborValue::Text("name".to_owned()),
                 CborValue::Text("nonexistent".to_owned()),

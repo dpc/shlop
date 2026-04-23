@@ -212,6 +212,95 @@ impl<'de> serde::Deserialize<'de> for ToolName {
     }
 }
 
+// ---------------------------------------------------------------------------
+// ToolNameMaybe (LLM-boundary tool name)
+// ---------------------------------------------------------------------------
+
+/// Tool name at the LLM boundary: either a validated [`ToolName`] or
+/// the raw string the model produced.
+///
+/// LLM output is untrusted: models hallucinate, stream partial tokens,
+/// and occasionally emit empty or structurally wrong tool names.
+/// `ToolNameMaybe` preserves those values through deserialization
+/// instead of rejecting the whole event so a single bad tool call
+/// doesn't kill a batch of good ones. Consumers match on the enum
+/// before dispatching, which makes it syntactically impossible to
+/// accidentally `.into()`-panic a raw model string into a `ToolName`.
+///
+/// The wire encoding is a transparent string — same bytes on the wire
+/// as a plain `String` field, so this can be introduced without
+/// breaking format compatibility.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub enum ToolNameMaybe {
+    Valid(ToolName),
+    Invalid(String),
+}
+
+impl ToolNameMaybe {
+    /// The underlying string, whether or not it was validated.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Valid(name) => name.as_str(),
+            Self::Invalid(raw) => raw.as_str(),
+        }
+    }
+
+    /// Classify an arbitrary string into Valid or Invalid.
+    pub fn from_raw(s: impl Into<String>) -> Self {
+        let s = s.into();
+        match ToolName::try_new(s.clone()) {
+            Some(name) => Self::Valid(name),
+            None => Self::Invalid(s),
+        }
+    }
+}
+
+impl From<String> for ToolNameMaybe {
+    fn from(s: String) -> Self {
+        Self::from_raw(s)
+    }
+}
+
+impl From<&str> for ToolNameMaybe {
+    fn from(s: &str) -> Self {
+        Self::from_raw(s)
+    }
+}
+
+impl From<ToolName> for ToolNameMaybe {
+    fn from(name: ToolName) -> Self {
+        Self::Valid(name)
+    }
+}
+
+impl std::fmt::Display for ToolNameMaybe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl serde::Serialize for ToolNameMaybe {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // Transparent: emit the inner string unchanged for both
+        // variants. Round-tripping Invalid through deserialize will
+        // produce Invalid again, round-tripping Valid will re-validate.
+        self.as_str().serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ToolNameMaybe {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Ok(Self::from_raw(s))
+    }
+}
+
 /// Unique identifier for one extension instance (monotonic counter).
 #[derive(
     Clone, Copy, Debug, Default, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize,
@@ -434,7 +523,7 @@ mod tests {
                     }],
                 }],
                 tools: vec![ToolDefinition {
-                    name: "read".to_owned(),
+                    name: "read".into(),
                     description: Some("Read a file".to_owned()),
                     parameters: None,
                 }],
@@ -559,5 +648,45 @@ mod tests {
     #[should_panic(expected = "invalid tool name")]
     fn tool_name_new_panics_on_invalid() {
         let _ = ToolName::new("bad.name");
+    }
+
+    #[test]
+    fn tool_name_maybe_classifies_inputs() {
+        assert!(matches!(
+            ToolNameMaybe::from("read"),
+            ToolNameMaybe::Valid(_)
+        ));
+        assert!(matches!(
+            ToolNameMaybe::from(""),
+            ToolNameMaybe::Invalid(ref s) if s.is_empty()
+        ));
+        assert!(matches!(
+            ToolNameMaybe::from("fs.read"),
+            ToolNameMaybe::Invalid(ref s) if s == "fs.read"
+        ));
+    }
+
+    #[test]
+    fn tool_name_maybe_serializes_as_transparent_string() {
+        // The wire format must be a plain string — same bytes as if
+        // the field were declared `String`. That's what lets us
+        // introduce `ToolNameMaybe` without a protocol bump.
+        let valid = ToolNameMaybe::from("read");
+        let invalid = ToolNameMaybe::from("bad.name");
+        assert_eq!(
+            serde_json::to_string(&valid).expect("serialize valid"),
+            "\"read\""
+        );
+        assert_eq!(
+            serde_json::to_string(&invalid).expect("serialize invalid"),
+            "\"bad.name\""
+        );
+
+        // Round-trip via JSON picks the right variant.
+        let reparsed: ToolNameMaybe = serde_json::from_str("\"read\"").expect("deserialize valid");
+        assert!(matches!(reparsed, ToolNameMaybe::Valid(_)));
+        let reparsed: ToolNameMaybe =
+            serde_json::from_str("\"bad.name\"").expect("deserialize invalid");
+        assert!(matches!(reparsed, ToolNameMaybe::Invalid(_)));
     }
 }
