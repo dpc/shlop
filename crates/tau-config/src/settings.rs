@@ -8,11 +8,10 @@
 //! Uses the `config` crate for layered JSON5 loading.
 
 use std::collections::HashMap;
-
-use serde::Deserialize;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use serde::Deserialize;
 
 // ---------------------------------------------------------------------------
 // CLI settings

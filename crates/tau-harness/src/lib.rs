@@ -1227,9 +1227,11 @@ impl Harness {
                     );
                     self.publish_event(
                         None,
-                        Event::HarnessThinkingLevelChanged(tau_proto::HarnessThinkingLevelChanged {
-                            level: self.selected_thinking_level,
-                        }),
+                        Event::HarnessThinkingLevelChanged(
+                            tau_proto::HarnessThinkingLevelChanged {
+                                level: self.selected_thinking_level,
+                            },
+                        ),
                     );
                     // Levels depend on the new model's provider.
                     let levels = thinking_levels_for_model(
@@ -2665,7 +2667,10 @@ fn clamp_thinking_level(
     if allowed.iter().any(|level| *level == requested) {
         return requested;
     }
-    if allowed.iter().any(|level| *level == tau_proto::ThinkingLevel::Off) {
+    if allowed
+        .iter()
+        .any(|level| *level == tau_proto::ThinkingLevel::Off)
+    {
         return tau_proto::ThinkingLevel::Off;
     }
     allowed
@@ -2681,7 +2686,11 @@ fn parse_thinking_level(value: &str) -> Option<tau_proto::ThinkingLevel> {
 fn load_last_thinking_levels(
     dirs: &tau_config::settings::TauDirs,
 ) -> std::collections::HashMap<String, tau_proto::ThinkingLevel> {
-    let Some(path) = dirs.state_dir.as_ref().map(|d| d.join("harness-state.json")) else {
+    let Some(path) = dirs
+        .state_dir
+        .as_ref()
+        .map(|d| d.join("harness-state.json"))
+    else {
         return std::collections::HashMap::new();
     };
     let Ok(text) = std::fs::read_to_string(path) else {
@@ -2703,7 +2712,9 @@ fn load_last_thinking_levels(
 
     if levels.is_empty() {
         if let Some(model) = json["last_selected_model"].as_str() {
-            if let Some(level) = json["last_thinking_level"].as_str().and_then(parse_thinking_level)
+            if let Some(level) = json["last_thinking_level"]
+                .as_str()
+                .and_then(parse_thinking_level)
             {
                 levels.insert(model.to_owned(), level);
             }
@@ -4605,7 +4616,12 @@ mod tests {
             tau_proto::ThinkingLevel::High
         );
         assert_eq!(
-            selected_thinking_level_for_model(&dirs, &harness_settings, &model_registry, "local/llama"),
+            selected_thinking_level_for_model(
+                &dirs,
+                &harness_settings,
+                &model_registry,
+                "local/llama"
+            ),
             tau_proto::ThinkingLevel::Off
         );
     }
