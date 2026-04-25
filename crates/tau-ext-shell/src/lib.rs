@@ -1878,6 +1878,7 @@ mod tests {
         writer
             .write_event(&Event::SessionStarted(SessionStarted {
                 session_id: "s1".into(),
+                reason: tau_proto::SessionStartReason::Initial,
             }))
             .expect("request");
         writer.flush().expect("flush");

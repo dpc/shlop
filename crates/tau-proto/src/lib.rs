@@ -516,6 +516,7 @@ mod tests {
             }),
             Event::SessionStarted(SessionStarted {
                 session_id: "s1".into(),
+                reason: SessionStartReason::Initial,
             }),
             Event::SessionPromptCreated(SessionPromptCreated {
                 session_prompt_id: "sp-1".into(),
@@ -580,6 +581,7 @@ mod tests {
                 id: LogEventId::new(42),
                 event: Box::new(Event::SessionStarted(SessionStarted {
                     session_id: "s1".into(),
+                    reason: SessionStartReason::Initial,
                 })),
             }),
             Event::Ack(Ack {

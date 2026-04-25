@@ -325,6 +325,10 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
             "Leave the UI but keep the harness running for later reattach",
         ),
         SlashCommand::new("/model", "Switch model (e.g. /model provider/model-id)"),
+        SlashCommand::new(
+            "/new",
+            "Start a fresh session in this harness (current session is left as-is on disk)",
+        ),
     ];
     let theme = tau_themes::Theme::builtin();
     let prompt_style = tau_cli_term::resolve::resolve(&theme, tau_themes::names::PROMPT_MARKER);
@@ -362,7 +366,8 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
     });
 
     // Terminal input loop — owns the writer, no locking needed.
-    let exit = terminal_input_loop(&mut term, &mut writer, session_id)?;
+    let mut active_session_id = session_id.to_owned();
+    let exit = terminal_input_loop(&mut term, &mut writer, &mut active_session_id)?;
 
     // Send disconnect (best effort). Reason differs so the daemon's
     // debug log makes the distinction visible.
@@ -414,7 +419,7 @@ enum InputLoopExit {
 fn terminal_input_loop(
     term: &mut tau_cli_term::HighTerm,
     writer: &mut EventWriter<BufWriter<UnixStream>>,
-    session_id: &str,
+    session_id: &mut String,
 ) -> Result<InputLoopExit, CliError> {
     use tau_cli_term::Event as TermEvent;
 
@@ -437,6 +442,18 @@ fn terminal_input_loop(
                         writer.write_event(&Event::UiDetachRequest(tau_proto::UiDetachRequest {}));
                     let _ = writer.flush();
                     return Ok(InputLoopExit::Detach);
+                }
+                if text == "/new" {
+                    let cwd = std::env::current_dir()?;
+                    let new_id = mint_session_id(&cwd);
+                    let _ =
+                        writer.write_event(&Event::UiSwitchSession(tau_proto::UiSwitchSession {
+                            new_session_id: new_id.as_str().into(),
+                            reason: tau_proto::SessionStartReason::New,
+                        }));
+                    let _ = writer.flush();
+                    *session_id = new_id;
+                    continue;
                 }
                 if let Some(model) = text.strip_prefix("/model ") {
                     let model = model.trim();
@@ -474,7 +491,7 @@ fn terminal_input_loop(
 
                 if writer
                     .write_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
-                        session_id: session_id.into(),
+                        session_id: session_id.as_str().into(),
                         text: text.to_owned(),
                     }))
                     .is_err()

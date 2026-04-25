@@ -688,7 +688,10 @@ impl Harness {
         // Every past agent that touched this code has "noticed" that
         // the CLI uses `chat-<ts>` session ids and concluded the eager
         // init is wasted work. It isn't. Please resist the urge.
-        harness.start_session_init(eager_session_id.into());
+        harness.start_session_init(
+            eager_session_id.into(),
+            tau_proto::SessionStartReason::Initial,
+        );
         harness.wait_for_session_init()?;
         Ok(harness)
     }
@@ -782,7 +785,10 @@ impl Harness {
         harness.register_harness_tools();
         harness.check_config_exists();
 
-        harness.start_session_init(eager_session_id.into());
+        harness.start_session_init(
+            eager_session_id.into(),
+            tau_proto::SessionStartReason::Initial,
+        );
         harness.wait_for_session_init()?;
         Ok(harness)
     }
@@ -1205,7 +1211,7 @@ impl Harness {
 
                 let submission =
                     self.submit_user_prompt(prompt.session_id.clone(), prompt.text.clone())?;
-                if submission == PromptSubmission::Queued {
+                if matches!(submission, PromptSubmission::Queued) {
                     self.publish_event(
                         None,
                         Event::SessionPromptQueued(SessionPromptQueued {
@@ -1217,6 +1223,11 @@ impl Harness {
                         self.emit_info("no model selected — use /model to pick one");
                     }
                 }
+                Ok(true)
+            }
+            Event::UiSwitchSession(req) => {
+                self.publish_event(Some(client_id), Event::UiSwitchSession(req.clone()));
+                self.switch_session(req.new_session_id, req.reason)?;
                 Ok(true)
             }
             Event::LifecycleDisconnect(_) => Ok(false),
@@ -1444,6 +1455,7 @@ impl Harness {
     fn session_init_provider_ids(&self) -> std::collections::HashSet<tau_proto::ConnectionId> {
         let event = Event::SessionStarted(tau_proto::SessionStarted {
             session_id: "probe".into(),
+            reason: tau_proto::SessionStartReason::Initial,
         });
         self.bus
             .connections()
@@ -1517,7 +1529,60 @@ impl Harness {
     /// disconnected). When the wait set drains, AGENTS.md content is
     /// injected into the session log and any queued user prompts are
     /// dispatched.
-    fn start_session_init(&mut self, session_id: SessionId) {
+    /// Tear down the current session and bind the harness to a new one.
+    ///
+    /// Pi-style: emit `SessionShutdown` for the old, drop in-flight
+    /// prompts, swap the bound id, then run a fresh `start_session_init`
+    /// for the new id with the given reason. Extension processes are
+    /// kept across sessions (they're not respawned); extensions that
+    /// hold per-session state subscribe to `session.shutdown` to
+    /// flush/clean up.
+    fn switch_session(
+        &mut self,
+        new_session_id: SessionId,
+        reason: tau_proto::SessionStartReason,
+    ) -> Result<(), HarnessError> {
+        if new_session_id == self.current_session_id {
+            self.emit_info(&format!("already on session `{}`", new_session_id.as_str()));
+            return Ok(());
+        }
+
+        let old_id = self.current_session_id.clone();
+        self.publish_event(
+            None,
+            Event::SessionShutdown(tau_proto::SessionShutdown { session_id: old_id }),
+        );
+
+        // Drop in-flight work bound to the old session. Pending prompts
+        // for it are abandoned (the user explicitly switched away).
+        self.turn_state = TurnState::Idle;
+        self.pending_prompts.clear();
+        self.pending_request_sessions.clear();
+        self.pending_tool_invocations.clear();
+
+        self.current_session_id = new_session_id.clone();
+
+        // Record cwd + acquire flock on the new session dir before
+        // anyone tries to write to its log.
+        self.store
+            .record_session_meta(new_session_id.as_str(), std::env::current_dir().ok())?;
+
+        // Send the new debug log to the new session's dir, so each
+        // session is self-contained.
+        let _ = self.enable_debug_log(&self.dirs_state_dir().join(new_session_id.as_str()));
+
+        self.start_session_init(new_session_id, reason);
+        Ok(())
+    }
+
+    fn dirs_state_dir(&self) -> PathBuf {
+        // The harness doesn't currently store the state dir directly;
+        // derive it from the session store's location. SessionStore
+        // exposes its root via the existing `state_dir()` accessor.
+        self.store.state_dir().to_path_buf()
+    }
+
+    fn start_session_init(&mut self, session_id: SessionId, reason: tau_proto::SessionStartReason) {
         let waiting_on = self.session_init_provider_ids();
         if waiting_on.is_empty() {
             if let Err(error) = self.complete_session_init(session_id) {
@@ -1537,7 +1602,7 @@ impl Harness {
         };
         self.publish_event(
             None,
-            Event::SessionStarted(tau_proto::SessionStarted { session_id }),
+            Event::SessionStarted(tau_proto::SessionStarted { session_id, reason }),
         );
     }
 
@@ -1778,7 +1843,9 @@ impl Harness {
         let session_id = session_id.clone();
 
         if !self.session_initialized(&session_id) {
-            self.start_session_init(session_id);
+            // Reachable only if the bound session somehow lost its
+            // `initialized_sessions` entry; treat as a re-init.
+            self.start_session_init(session_id, tau_proto::SessionStartReason::Initial);
             return;
         }
 

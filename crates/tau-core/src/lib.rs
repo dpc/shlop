@@ -1426,6 +1426,12 @@ impl SessionStore {
         self.append(&session_id.into(), SessionEntry::ToolActivity(activity))
     }
 
+    /// Returns the state dir this store is rooted at.
+    #[must_use]
+    pub fn state_dir(&self) -> &Path {
+        &self.state_dir
+    }
+
     /// Returns one session tree if it exists.
     #[must_use]
     pub fn session(&self, session_id: &str) -> Option<&SessionTree> {

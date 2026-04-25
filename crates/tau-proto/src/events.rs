@@ -217,6 +217,7 @@ impl EventName {
     pub const UI_MODEL_SELECT: Self = Self::from_static(EventCategory::Ui, "model_select");
     pub const UI_DETACH_REQUEST: Self = Self::from_static(EventCategory::Ui, "detach_request");
     pub const UI_SHELL_COMMAND: Self = Self::from_static(EventCategory::Ui, "shell_command");
+    pub const UI_SWITCH_SESSION: Self = Self::from_static(EventCategory::Ui, "switch_session");
 
     pub const SHELL_COMMAND_PROGRESS: Self =
         Self::from_static(EventCategory::Shell, "command_progress");
@@ -226,6 +227,7 @@ impl EventName {
     pub const SESSION_PROMPT_QUEUED: Self =
         Self::from_static(EventCategory::Session, "prompt_queued");
     pub const SESSION_STARTED: Self = Self::from_static(EventCategory::Session, "started");
+    pub const SESSION_SHUTDOWN: Self = Self::from_static(EventCategory::Session, "shutdown");
     pub const SESSION_PROMPT_CREATED: Self =
         Self::from_static(EventCategory::Session, "prompt_created");
 
@@ -637,6 +639,18 @@ pub struct UiModelSelect {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiDetachRequest {}
 
+/// The user requests switching to a different session within the same
+/// daemon. Harness emits `SessionShutdown` for the current session,
+/// then `SessionStarted { reason: New | Resume }` for the new one,
+/// and waits for extensions to acknowledge re-init.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UiSwitchSession {
+    pub new_session_id: SessionId,
+    /// `New` if the id was just minted, `Resume` if it points at an
+    /// existing session on disk.
+    pub reason: SessionStartReason,
+}
+
 /// Which stream a [`ShellCommandProgress`] chunk came from.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -701,11 +715,39 @@ pub struct SessionPromptQueued {
     pub text: String,
 }
 
-/// The harness created a new session. Extensions that subscribe react by
-/// performing per-session setup (e.g. discovering AGENTS.md) and signal
-/// completion with `ExtensionContextReady`.
+/// Why a `SessionStarted` was published. Lets extensions distinguish
+/// "first session of this harness's life" from "user switched to a new
+/// session" (e.g. so they can clear caches).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionStartReason {
+    /// The harness eagerly initialized this session at startup.
+    Initial,
+    /// The user requested a fresh session via `/session new`.
+    New,
+    /// The user resumed an existing session by id.
+    Resume,
+}
+
+/// The harness created or switched to a session. Extensions that
+/// subscribe react by performing per-session setup (e.g. discovering
+/// AGENTS.md) and signal completion with `ExtensionContextReady`.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SessionStarted {
+    pub session_id: SessionId,
+    #[serde(default = "default_session_start_reason")]
+    pub reason: SessionStartReason,
+}
+
+fn default_session_start_reason() -> SessionStartReason {
+    SessionStartReason::Initial
+}
+
+/// The harness is leaving the current session. Fired before
+/// `SessionStarted` for the next one when the user switches sessions.
+/// Extensions that hold per-session state subscribe to flush or drop it.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SessionShutdown {
     pub session_id: SessionId,
 }
 
@@ -890,6 +932,8 @@ pub enum Event {
     UiDetachRequest(UiDetachRequest),
     #[serde(rename = "ui.shell_command")]
     UiShellCommand(UiShellCommand),
+    #[serde(rename = "ui.switch_session")]
+    UiSwitchSession(UiSwitchSession),
 
     // Shell (user-initiated)
     #[serde(rename = "shell.command_progress")]
@@ -902,6 +946,8 @@ pub enum Event {
     SessionPromptQueued(SessionPromptQueued),
     #[serde(rename = "session.started")]
     SessionStarted(SessionStarted),
+    #[serde(rename = "session.shutdown")]
+    SessionShutdown(SessionShutdown),
     #[serde(rename = "session.prompt_created")]
     SessionPromptCreated(SessionPromptCreated),
 
@@ -952,10 +998,12 @@ impl Event {
             Self::UiModelSelect(_) => EventName::UI_MODEL_SELECT,
             Self::UiDetachRequest(_) => EventName::UI_DETACH_REQUEST,
             Self::UiShellCommand(_) => EventName::UI_SHELL_COMMAND,
+            Self::UiSwitchSession(_) => EventName::UI_SWITCH_SESSION,
             Self::ShellCommandProgress(_) => EventName::SHELL_COMMAND_PROGRESS,
             Self::ShellCommandFinished(_) => EventName::SHELL_COMMAND_FINISHED,
             Self::SessionPromptQueued(_) => EventName::SESSION_PROMPT_QUEUED,
             Self::SessionStarted(_) => EventName::SESSION_STARTED,
+            Self::SessionShutdown(_) => EventName::SESSION_SHUTDOWN,
             Self::SessionPromptCreated(_) => EventName::SESSION_PROMPT_CREATED,
             Self::AgentPromptSubmitted(_) => EventName::AGENT_PROMPT_SUBMITTED,
             Self::AgentResponseUpdated(_) => EventName::AGENT_RESPONSE_UPDATED,
