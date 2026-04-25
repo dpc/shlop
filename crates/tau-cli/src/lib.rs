@@ -805,7 +805,11 @@ fn info_suffix(text: String) -> ToolSuffixSegment {
 }
 
 fn output_stats_suffix(text: &str) -> ToolSuffixSegment {
-    info_suffix(format!("({} lines, {} bytes)", text.lines().count(), text.len()))
+    info_suffix(format!(
+        "({} lines, {} bytes)",
+        text.lines().count(),
+        text.len()
+    ))
 }
 
 /// Error-path display: `<tool_name> <args>` with a `": <msg>"`
@@ -899,16 +903,24 @@ fn format_tool_completion(
             if let Some(msg) = error_message {
                 format_tool_error("grep", args, msg)
             } else {
-                let count = cbor_int_field(details, "matches").unwrap_or(0);
                 let output = cbor_text_field(details, "output").unwrap_or_default();
-                let suffix_word = if count == 1 { "match" } else { "matches" };
+                let status = cbor_int_field(details, "status");
+                let mut suffixes = vec![output_stats_suffix(&output)];
+                suffixes.push(match status {
+                    Some(code) => tool_suffix(
+                        format!("[{code}]"),
+                        if code == 0 {
+                            ToolStatus::Success
+                        } else {
+                            ToolStatus::Info
+                        },
+                    ),
+                    None => info_suffix("[?]".to_owned()),
+                });
                 ToolCallDisplay {
                     tool_name: "grep".into(),
                     args,
-                    suffixes: vec![
-                        info_suffix(format!("({count} {suffix_word})")),
-                        output_stats_suffix(&output),
-                    ],
+                    suffixes,
                 }
             }
         }
@@ -2109,14 +2121,17 @@ mod tests {
     }
 
     #[test]
-    fn grep_completion_uses_info_stats_and_shell_status_uses_exit_color() {
+    fn grep_completion_uses_output_stats_and_status_chip() {
         let grep_details = CborValue::Map(vec![
             (
                 CborValue::Text("pattern".into()),
                 CborValue::Text("foo".into()),
             ),
             (CborValue::Text("path".into()), CborValue::Text(".".into())),
-            (CborValue::Text("matches".into()), CborValue::Integer(3.into())),
+            (
+                CborValue::Text("status".into()),
+                CborValue::Integer(1.into()),
+            ),
             (
                 CborValue::Text("output".into()),
                 CborValue::Text("a\nb\n".into()),
@@ -2124,11 +2139,36 @@ mod tests {
         ]);
         let grep = super::format_tool_completion("grep", &grep_details, None);
         assert_eq!(grep.suffixes.len(), 2);
-        assert_eq!(grep.suffixes[0].text, "(3 matches)");
+        assert_eq!(grep.suffixes[0].text, "(2 lines, 4 bytes)");
         assert!(matches!(grep.suffixes[0].status, super::ToolStatus::Info));
-        assert_eq!(grep.suffixes[1].text, "(2 lines, 4 bytes)");
+        assert_eq!(grep.suffixes[1].text, "[1]");
         assert!(matches!(grep.suffixes[1].status, super::ToolStatus::Info));
 
+        let grep_ok_details = CborValue::Map(vec![
+            (
+                CborValue::Text("pattern".into()),
+                CborValue::Text("foo".into()),
+            ),
+            (CborValue::Text("path".into()), CborValue::Text(".".into())),
+            (
+                CborValue::Text("status".into()),
+                CborValue::Integer(0.into()),
+            ),
+            (
+                CborValue::Text("output".into()),
+                CborValue::Text("a\n".into()),
+            ),
+        ]);
+        let grep_ok = super::format_tool_completion("grep", &grep_ok_details, None);
+        assert_eq!(grep_ok.suffixes[1].text, "[0]");
+        assert!(matches!(
+            grep_ok.suffixes[1].status,
+            super::ToolStatus::Success
+        ));
+    }
+
+    #[test]
+    fn shell_completion_uses_output_stats_and_exit_color() {
         let shell_details = CborValue::Map(vec![
             (
                 CborValue::Text("command".into()),
@@ -2138,8 +2178,14 @@ mod tests {
                 CborValue::Text("stdout".into()),
                 CborValue::Text("hi\n".into()),
             ),
-            (CborValue::Text("stderr".into()), CborValue::Text(String::new())),
-            (CborValue::Text("status".into()), CborValue::Integer(7.into())),
+            (
+                CborValue::Text("stderr".into()),
+                CborValue::Text(String::new()),
+            ),
+            (
+                CborValue::Text("status".into()),
+                CborValue::Integer(7.into()),
+            ),
         ]);
         let shell = super::format_tool_completion("shell", &shell_details, None);
         assert_eq!(shell.suffixes.len(), 2);
@@ -2148,6 +2194,10 @@ mod tests {
         assert_eq!(shell.suffixes[1].text, "[7]");
         assert!(matches!(shell.suffixes[1].status, super::ToolStatus::Error));
 
+    }
+
+    #[test]
+    fn edit_completion_uses_diff_chip() {
         let edit_details = CborValue::Map(vec![
             (
                 CborValue::Text("path".into()),
@@ -2156,8 +2206,14 @@ mod tests {
             (
                 CborValue::Text("diff".into()),
                 CborValue::Map(vec![
-                    (CborValue::Text("added".into()), CborValue::Integer(2.into())),
-                    (CborValue::Text("removed".into()), CborValue::Integer(1.into())),
+                    (
+                        CborValue::Text("added".into()),
+                        CborValue::Integer(2.into()),
+                    ),
+                    (
+                        CborValue::Text("removed".into()),
+                        CborValue::Integer(1.into()),
+                    ),
                 ]),
             ),
         ]);

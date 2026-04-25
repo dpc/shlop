@@ -1264,7 +1264,8 @@ fn run_grep(arguments: &CborValue) -> Result<CborValue, String> {
         .map_err(|e| format!("failed to wait for ripgrep: {e}"))?;
 
     // rg exit codes: 0=matches found, 1=no matches, 2=error
-    if output.status.code() == Some(2) {
+    let status = output.status.code();
+    if status == Some(2) {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("ripgrep error: {}", stderr.trim()));
     }
@@ -1275,6 +1276,7 @@ fn run_grep(arguments: &CborValue) -> Result<CborValue, String> {
             &pattern,
             search_path,
             glob.as_deref(),
+            status,
             0,
             "no matches found".to_owned(),
         ));
@@ -1292,7 +1294,7 @@ fn run_grep(arguments: &CborValue) -> Result<CborValue, String> {
         let is_match = is_grep_match_line(line);
         if is_match {
             match_count += 1;
-            if match_count > limit {
+            if limit < match_count {
                 match_limit_reached = true;
                 break;
             }
@@ -1343,6 +1345,7 @@ fn run_grep(arguments: &CborValue) -> Result<CborValue, String> {
         &pattern,
         search_path,
         glob.as_deref(),
+        status,
         match_count,
         output_text,
     ))
@@ -1355,6 +1358,7 @@ fn grep_result_map(
     pattern: &str,
     search_path: &str,
     glob: Option<&str>,
+    status: Option<i32>,
     matches: usize,
     output_text: String,
 ) -> CborValue {
@@ -1366,6 +1370,12 @@ fn grep_result_map(
         (
             CborValue::Text("path".to_owned()),
             CborValue::Text(search_path.to_owned()),
+        ),
+        (
+            CborValue::Text("status".to_owned()),
+            status
+                .map(|code| CborValue::Integer((code as i64).into()))
+                .unwrap_or(CborValue::Null),
         ),
         (
             CborValue::Text("matches".to_owned()),
@@ -2468,7 +2478,11 @@ mod tests {
         assert!(result.was_truncated);
         assert!(result.content.contains("line 1\n"));
         assert!(result.content.contains("[Showing lines 1-"));
-        assert!(result.content.contains("Use offset to continue reading."));
+        assert!(
+            result
+                .content
+                .contains("Use start_line and line_count to continue reading.")
+        );
         // Should not contain lines beyond the limit.
         let content_before_notice = result.content.split("\n\n[").next().unwrap_or("");
         let kept_count = content_before_notice.lines().count();
@@ -2496,12 +2510,14 @@ mod tests {
             "foo",
             "src",
             Some("*.rs"),
+            Some(0),
             3,
             "src/a.rs:1:foo".to_owned(),
         );
         assert_eq!(cbor_map_text(&with_glob, "pattern"), Some("foo"));
         assert_eq!(cbor_map_text(&with_glob, "path"), Some("src"));
         assert_eq!(cbor_map_text(&with_glob, "glob"), Some("*.rs"));
+        assert_eq!(cbor_int_field(&with_glob, "status"), Some(0));
         assert_eq!(cbor_int_field(&with_glob, "matches"), Some(3));
         assert_eq!(cbor_map_text(&with_glob, "output"), Some("src/a.rs:1:foo"));
         assert_eq!(cbor_int_field(&with_glob, "output_lines"), Some(1));
@@ -2509,8 +2525,9 @@ mod tests {
 
         // No-glob form omits the field entirely rather than emitting
         // an empty string.
-        let no_glob = grep_result_map("foo", ".", None, 0, "no matches found".to_owned());
+        let no_glob = grep_result_map("foo", ".", None, Some(1), 0, "no matches found".to_owned());
         assert!(cbor_map_text(&no_glob, "glob").is_none());
+        assert_eq!(cbor_int_field(&no_glob, "status"), Some(1));
         assert_eq!(cbor_int_field(&no_glob, "matches"), Some(0));
         assert_eq!(cbor_int_field(&no_glob, "output_lines"), Some(1));
         assert_eq!(cbor_int_field(&no_glob, "output_bytes"), Some(16));
@@ -2628,7 +2645,10 @@ mod tests {
             ),
         ]);
         let result = read_file(&args).expect("read");
-        assert_eq!(cbor_map_text(&result, "content"), Some("line 2\nline 3\nline 4"));
+        assert_eq!(
+            cbor_map_text(&result, "content"),
+            Some("line 2\nline 3\nline 4")
+        );
         assert_eq!(cbor_int_field(&result, "start_line"), Some(2));
         assert_eq!(cbor_int_field(&result, "line_count"), Some(3));
         assert_eq!(cbor_int_field(&result, "total_lines"), Some(5));
@@ -2637,7 +2657,10 @@ mod tests {
     #[test]
     fn read_file_rejects_invalid_line_arguments() {
         let args = CborValue::Map(vec![
-            (CborValue::Text("path".to_owned()), CborValue::Text("x".to_owned())),
+            (
+                CborValue::Text("path".to_owned()),
+                CborValue::Text("x".to_owned()),
+            ),
             (
                 CborValue::Text("start_line".to_owned()),
                 CborValue::Integer(0.into()),
@@ -2646,7 +2669,10 @@ mod tests {
         assert_eq!(read_file(&args).unwrap_err(), "start_line must be >= 1");
 
         let args = CborValue::Map(vec![
-            (CborValue::Text("path".to_owned()), CborValue::Text("x".to_owned())),
+            (
+                CborValue::Text("path".to_owned()),
+                CborValue::Text("x".to_owned()),
+            ),
             (
                 CborValue::Text("line_count".to_owned()),
                 CborValue::Integer(0.into()),
