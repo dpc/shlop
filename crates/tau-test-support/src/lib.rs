@@ -65,15 +65,18 @@ impl TestRuntime {
         .response)
     }
 
-    /// Starts a foreground daemon in a background thread.
-    pub fn spawn_daemon(&self, max_clients: Option<usize>) -> DaemonHandle {
+    /// Starts a foreground daemon in a background thread, eager-initing
+    /// the given session id (typically what test code will then send a
+    /// message to).
+    pub fn spawn_daemon(&self, eager_session_id: &str, max_clients: Option<usize>) -> DaemonHandle {
         let socket_path = self.socket_path.clone();
         let state_dir = self.state_dir.clone();
         let dirs = self.dirs.clone();
+        let eager_session_id = eager_session_id.to_owned();
         let join_handle = thread::spawn(move || {
             let mut options = ServeOptions::builder().dirs(dirs).build();
             options.max_clients = max_clients;
-            run_daemon(socket_path, state_dir, options)
+            run_daemon(socket_path, state_dir, &eager_session_id, options)
         });
         DaemonHandle { join_handle }
     }
@@ -168,7 +171,7 @@ mod tests {
             .expect("embedded run should succeed");
         assert!(!embedded.is_empty(), "response should not be empty");
 
-        let daemon = runtime.spawn_daemon(Some(1));
+        let daemon = runtime.spawn_daemon("session-2", Some(1));
         runtime
             .wait_until_ready(Duration::from_secs(2))
             .expect("daemon socket should appear");

@@ -11,6 +11,7 @@ workspace = true
 [dependencies]
 clap.workspace = true
 dirs.workspace = true
+rand.workspace = true
 tau-cli-term.workspace = true
 tau-themes.workspace = true
 tau-config.workspace = true

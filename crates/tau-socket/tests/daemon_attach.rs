@@ -10,7 +10,7 @@ use tau_test_support::TestRuntime;
 #[ignore = "needs echo agent wired into run_daemon"]
 fn socket_transport_supports_later_attached_end_to_end_clients() {
     let runtime = TestRuntime::new().expect("runtime should be created");
-    let daemon = runtime.spawn_daemon(Some(2));
+    let daemon = runtime.spawn_daemon("session-1", Some(2));
     runtime
         .wait_until_ready(Duration::from_secs(2))
         .expect("daemon socket should appear");
@@ -36,7 +36,7 @@ fn socket_transport_supports_later_attached_end_to_end_clients() {
 #[test]
 fn forbidden_socket_subscription_disconnects_client_without_killing_daemon() {
     let runtime = TestRuntime::new().expect("runtime should be created");
-    let daemon = runtime.spawn_daemon(Some(2));
+    let daemon = runtime.spawn_daemon("session-1", Some(2));
     runtime
         .wait_until_ready(Duration::from_secs(2))
         .expect("daemon socket should appear");

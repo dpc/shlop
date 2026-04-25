@@ -20,9 +20,14 @@ pub enum Command {
     /// project instead — useful for a second UI, or for reconnecting
     /// after `/detach`.
     Run {
-        /// Session identifier
-        #[arg(long, default_value_t = default_session_id().to_owned())]
-        session_id: String,
+        /// Resume an existing session.
+        ///
+        /// Bare `-r` resumes the most recent session whose `meta.json.cwd`
+        /// matches the current working directory. `-r <id>` resumes that
+        /// specific session id. Without `-r`, a fresh session id is minted
+        /// (`<basename(cwd)>-<rand6>`).
+        #[arg(short = 'r', long = "resume", num_args = 0..=1, default_missing_value = "")]
+        resume: Option<String>,
 
         /// Path to extension configuration file
         #[arg(long)]

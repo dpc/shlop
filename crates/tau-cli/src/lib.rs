@@ -164,23 +164,71 @@ impl Drop for DaemonHandle {
 
 /// Resolves a harness daemon to talk to, either by attaching to an
 /// existing one for this project or by spawning a fresh one.
-fn resolve_daemon(attach: bool) -> Result<DaemonHandle, CliError> {
+///
+/// The fresh-spawn path passes `session_id` to the daemon via the
+/// `TAU_SESSION_ID` env var, so its eager-init targets the right session.
+/// Resolves the session id for one `tau run` invocation.
+///
+/// - `None` → mint `<basename(cwd)>-<rand6>`.
+/// - `Some("")` (bare `-r`) → resume the most recent session whose
+///   `meta.json.cwd` matches cwd; if none, mint fresh.
+/// - `Some(id)` → resume that explicit id.
+fn resolve_run_session_id(resume: Option<&str>) -> Result<String, CliError> {
+    let cwd = std::env::current_dir()?;
+    match resume {
+        None => Ok(mint_session_id(&cwd)),
+        Some("") => Ok(find_most_recent_session(&cwd).unwrap_or_else(|| mint_session_id(&cwd))),
+        Some(id) => Ok(id.to_owned()),
+    }
+}
+
+fn mint_session_id(cwd: &Path) -> String {
+    use rand::Rng;
+    let basename = cwd
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("session");
+    let suffix: String = (0..6)
+        .map(|_| {
+            let n: u8 = rand::thread_rng().gen_range(0..36);
+            if n < 10 {
+                (b'0' + n) as char
+            } else {
+                (b'a' + (n - 10)) as char
+            }
+        })
+        .collect();
+    format!("{basename}-{suffix}")
+}
+
+fn find_most_recent_session(cwd: &Path) -> Option<String> {
+    let state_dir = tau_harness::default_state_dir();
+    let metas = tau_harness::list_session_metas(&state_dir).ok()?;
+    metas
+        .into_iter()
+        .filter(|(_, meta): &(_, tau_harness::SessionMeta)| meta.cwd.as_deref() == Some(cwd))
+        .max_by_key(|(_, meta)| meta.last_touched)
+        .map(|(sid, _)| sid.as_str().to_owned())
+}
+
+fn resolve_daemon(attach: bool, session_id: &str) -> Result<DaemonHandle, CliError> {
     let project_root = std::env::current_dir()?;
     if attach {
         let daemon_dir =
             runtime_dir::find_harness_for_dir(&project_root).ok_or(CliError::NoRunningDaemon)?;
         return Ok(DaemonHandle::Attached { daemon_dir });
     }
-    start_daemon()
+    start_daemon(session_id)
 }
 
 /// Spawns a new harness daemon and waits for its socket to be ready.
-fn start_daemon() -> Result<DaemonHandle, CliError> {
+fn start_daemon(session_id: &str) -> Result<DaemonHandle, CliError> {
     let tau_binary = std::env::current_exe()?;
 
     let mut child = Command::new(&tau_binary)
         .arg("component")
         .arg("harness")
+        .env("TAU_SESSION_ID", session_id)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
@@ -216,7 +264,7 @@ fn start_daemon() -> Result<DaemonHandle, CliError> {
 fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
     use tau_cli_term::{HighTerm, SlashCommand};
 
-    let daemon = resolve_daemon(attach)?;
+    let daemon = resolve_daemon(attach, session_id)?;
     let socket_path = daemon.socket_path();
 
     // Connect and split into independent reader/writer — no mutex
@@ -1192,21 +1240,18 @@ pub fn main_with_args() -> std::process::ExitCode {
         let parsed = cli::Cli::parse();
 
         let command = parsed.command.unwrap_or(cli::Command::Run {
-            session_id: tau_harness::default_session_id().to_owned(),
+            resume: None,
             config: None,
             attach: false,
         });
 
         match command {
             cli::Command::Run {
-                session_id,
+                resume,
                 config: _config,
                 attach,
             } => {
-                // The UI attaches to a session the harness already
-                // owns; it does not mint its own. Use whatever id the
-                // user passed (default: `default_session_id()`), which
-                // the harness has eagerly initialized at startup.
+                let session_id = resolve_run_session_id(resume.as_deref())?;
                 run_chat(&session_id, attach)
             }
 

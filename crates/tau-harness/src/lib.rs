@@ -28,6 +28,7 @@ use tau_core::{
     SessionStore, SessionStoreError, ToolActivityOutcome, ToolActivityRecord, ToolRegistry,
     ToolRouteError,
 };
+pub use tau_core::{SessionMeta, list_session_metas};
 use tau_proto::{
     AgentResponseFinished, AgentToolCall, CborValue, ClientKind, ContentBlock, ConversationMessage,
     ConversationRole, DecodeError, Event, EventReader, EventSelector, EventWriter,
@@ -530,11 +531,22 @@ fn default_agent_runner(r: UnixStream, w: UnixStream) -> Result<(), String> {
 
 impl Harness {
     /// Creates a harness with in-process extensions (agent, fs, shell).
+    ///
+    /// `eager_session_id` is the session that pre-warm (AGENTS.md + skill
+    /// discovery) targets, and is also where `events.jsonl` lands. Subsequent
+    /// prompts for *other* session ids lazy-init.
     fn new(
         state_dir: impl Into<PathBuf>,
         dirs: tau_config::settings::TauDirs,
+        eager_session_id: &str,
     ) -> Result<Self, HarnessError> {
-        Self::new_with_agent(state_dir, dirs, default_agent_runner, false)
+        Self::new_with_agent(
+            state_dir,
+            dirs,
+            default_agent_runner,
+            false,
+            eager_session_id,
+        )
     }
 
     fn new_with_agent(
@@ -542,6 +554,7 @@ impl Harness {
         dirs: tau_config::settings::TauDirs,
         agent_runner: AgentRunner,
         include_echo: bool,
+        eager_session_id: &str,
     ) -> Result<Self, HarnessError> {
         let state_dir = state_dir.into();
         let (tx, rx) = mpsc::channel();
@@ -627,8 +640,13 @@ impl Harness {
         // Debug log lives next to the eager-init session's log so a
         // session dir is self-contained: `log.cbor` + `events.jsonl` +
         // `meta.json` + `lock`.
-        let session_id = default_session_id();
-        let _ = harness.enable_debug_log(&state_dir.join(session_id))?;
+        let _ = harness.enable_debug_log(&state_dir.join(eager_session_id))?;
+        // Record cwd in meta.json so `-r` (resume most recent for this
+        // cwd) can find this session even before it has any log entries.
+        // Also acquires the flock on `<state_dir>/<eager_session_id>/lock`.
+        harness
+            .store
+            .record_session_meta(eager_session_id, std::env::current_dir().ok())?;
 
         for i in 0..harness.extensions.len() {
             let name = harness.extensions[i].name.clone();
@@ -661,7 +679,7 @@ impl Harness {
         // Every past agent that touched this code has "noticed" that
         // the CLI uses `chat-<ts>` session ids and concluded the eager
         // init is wasted work. It isn't. Please resist the urge.
-        harness.start_session_init(session_id.into());
+        harness.start_session_init(eager_session_id.into());
         harness.wait_for_session_init()?;
         Ok(harness)
     }
@@ -671,6 +689,7 @@ impl Harness {
         config: &Config,
         state_dir: impl Into<PathBuf>,
         dirs: tau_config::settings::TauDirs,
+        eager_session_id: &str,
     ) -> Result<Self, HarnessError> {
         let state_dir = state_dir.into();
         let (tx, rx) = mpsc::channel();
@@ -743,8 +762,7 @@ impl Harness {
             dirs,
         };
 
-        let session_id = default_session_id();
-        let _ = harness.enable_debug_log(&state_dir.join(session_id))?;
+        let _ = harness.enable_debug_log(&state_dir.join(eager_session_id))?;
 
         for i in 0..harness.extensions.len() {
             let name = harness.extensions[i].name.clone();
@@ -754,7 +772,7 @@ impl Harness {
         harness.register_harness_tools();
         harness.check_config_exists();
 
-        harness.start_session_init(session_id.into());
+        harness.start_session_init(eager_session_id.into());
         harness.wait_for_session_init()?;
         Ok(harness)
     }
@@ -2847,7 +2865,7 @@ fn run_embedded_message_impl(
 ) -> Result<InteractionOutcome, HarnessError> {
     let state_dir = state_dir.into();
     let dirs = options.dirs.unwrap_or_default();
-    let mut harness = Harness::new_with_agent(state_dir, dirs, agent_runner, true)?;
+    let mut harness = Harness::new_with_agent(state_dir, dirs, agent_runner, true, session_id)?;
     let mut outcome = harness.send_user_message(session_id, message, None)?;
     harness.shutdown()?;
     outcome.lifecycle_messages = harness.lifecycle_messages;
@@ -2859,16 +2877,21 @@ fn run_embedded_message_impl(
 // ---------------------------------------------------------------------------
 
 /// Runs a foreground daemon that accepts socket clients.
+///
+/// `eager_session_id` is the session the harness pre-warms (AGENTS.md +
+/// skill discovery) and where `events.jsonl` lands. Subsequent prompts for
+/// other session ids lazy-init.
 pub fn run_daemon(
     socket_path: impl Into<PathBuf>,
     state_dir: impl Into<PathBuf>,
+    eager_session_id: &str,
     options: ServeOptions,
 ) -> Result<(), HarnessError> {
     let socket_path = socket_path.into();
     let state_dir = state_dir.into();
     let listener = bind_listener(&socket_path)?;
     let dirs = options.dirs.clone().unwrap_or_default();
-    let mut harness = Harness::new(state_dir, dirs)?;
+    let mut harness = Harness::new(state_dir, dirs, eager_session_id)?;
 
     let tx = harness.tx.clone();
     thread::spawn(move || {
@@ -2890,13 +2913,14 @@ pub fn run_daemon_with_config(
     config: &Config,
     socket_path: impl Into<PathBuf>,
     state_dir: impl Into<PathBuf>,
+    eager_session_id: &str,
     options: ServeOptions,
 ) -> Result<(), HarnessError> {
     let socket_path = socket_path.into();
     let state_dir = state_dir.into();
     let listener = bind_listener(&socket_path)?;
     let dirs = options.dirs.clone().unwrap_or_default();
-    let mut harness = Harness::from_config(config, state_dir, dirs)?;
+    let mut harness = Harness::from_config(config, state_dir, dirs, eager_session_id)?;
 
     let tx = harness.tx.clone();
     thread::spawn(move || {
@@ -3000,6 +3024,7 @@ pub fn send_daemon_message(
 pub fn run_harness_daemon(
     project_root: &Path,
     config: &Config,
+    eager_session_id: &str,
     options: ServeOptions,
 ) -> Result<(), HarnessError> {
     let daemon_dir = runtime_dir::prepare_daemon_dir(project_root)?;
@@ -3007,11 +3032,13 @@ pub fn run_harness_daemon(
 
     let state_dir = default_state_dir();
     let dirs = options.dirs.clone().unwrap_or_default();
-    let mut harness = Harness::from_config(config, &state_dir, dirs)?;
-    let session_id = default_session_id();
+    let mut harness = Harness::from_config(config, &state_dir, dirs, eager_session_id)?;
     harness.emit_info(&format!(
         "event log: {}",
-        state_dir.join(session_id).join("events.jsonl").display()
+        state_dir
+            .join(eager_session_id)
+            .join("events.jsonl")
+            .display()
     ));
 
     // Write marker AFTER extensions are ready.
@@ -3037,9 +3064,16 @@ pub fn run_harness_daemon(
 pub fn run_component() -> Result<(), Box<dyn std::error::Error>> {
     let project_root = std::env::current_dir()?;
     let config = resolve_config(None)?;
+    // The CLI passes the minted/resumed session id via the harness's
+    // SESSION_ID env var when spawning a daemon. Fallback to
+    // `default_session_id()` covers a bare `tau component harness`
+    // launched without a CLI in front of it.
+    let eager_session_id =
+        std::env::var("TAU_SESSION_ID").unwrap_or_else(|_| default_session_id().to_owned());
     run_harness_daemon(
         &project_root,
         &config,
+        &eager_session_id,
         // Exit once the spawning UI leaves. A UI that wants the
         // daemon to outlive it sends `ui.detach_request`, which
         // flips this to `false` at runtime.
@@ -3194,6 +3228,7 @@ mod tests {
             tau_config::settings::TauDirs::default(),
             echo_runner,
             true,
+            default_session_id(),
         )
     }
 
@@ -3224,7 +3259,14 @@ mod tests {
         let server = thread::spawn({
             let sock = sock.clone();
             let sp = sp.clone();
-            move || run_daemon(sock, sp, ServeOptions::builder().max_clients(2).build())
+            move || {
+                run_daemon(
+                    sock,
+                    sp,
+                    "default",
+                    ServeOptions::builder().max_clients(2).build(),
+                )
+            }
         });
 
         let started = Instant::now();
@@ -3368,7 +3410,14 @@ mod tests {
         let server = thread::spawn({
             let sock = sock.clone();
             let sp = sp.clone();
-            move || run_daemon(sock, sp, ServeOptions::builder().max_clients(1).build())
+            move || {
+                run_daemon(
+                    sock,
+                    sp,
+                    "default",
+                    ServeOptions::builder().max_clients(1).build(),
+                )
+            }
         });
 
         let started = Instant::now();
@@ -3425,7 +3474,14 @@ mod tests {
         let server = thread::spawn({
             let sock = sock.clone();
             let sp = sp.clone();
-            move || run_daemon(sock, sp, ServeOptions::builder().max_clients(1).build())
+            move || {
+                run_daemon(
+                    sock,
+                    sp,
+                    "default",
+                    ServeOptions::builder().max_clients(1).build(),
+                )
+            }
         });
 
         let started = Instant::now();
