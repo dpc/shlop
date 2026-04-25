@@ -329,6 +329,10 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
             "/new",
             "Start a fresh session in this harness (current session is left as-is on disk)",
         ),
+        SlashCommand::new(
+            "/tree",
+            "Print the session tree (`/tree <id>` rewinds head to that node)",
+        ),
     ];
     let theme = tau_themes::Theme::builtin();
     let prompt_style = tau_cli_term::resolve::resolve(&theme, tau_themes::names::PROMPT_MARKER);
@@ -453,6 +457,30 @@ fn terminal_input_loop(
                         }));
                     let _ = writer.flush();
                     *session_id = new_id;
+                    continue;
+                }
+                if text == "/tree" {
+                    let _ = writer.write_event(&Event::UiTreeRequest(tau_proto::UiTreeRequest {
+                        session_id: session_id.as_str().into(),
+                    }));
+                    let _ = writer.flush();
+                    continue;
+                }
+                if let Some(arg) = text.strip_prefix("/tree ") {
+                    match arg.trim().parse::<u64>() {
+                        Ok(node_id) => {
+                            let _ = writer.write_event(&Event::UiNavigateTree(
+                                tau_proto::UiNavigateTree {
+                                    session_id: session_id.as_str().into(),
+                                    node_id,
+                                },
+                            ));
+                            let _ = writer.flush();
+                        }
+                        Err(_) => {
+                            eprintln!("`/tree <id>`: id must be a non-negative integer");
+                        }
+                    }
                     continue;
                 }
                 if let Some(model) = text.strip_prefix("/model ") {

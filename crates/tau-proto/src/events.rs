@@ -218,6 +218,8 @@ impl EventName {
     pub const UI_DETACH_REQUEST: Self = Self::from_static(EventCategory::Ui, "detach_request");
     pub const UI_SHELL_COMMAND: Self = Self::from_static(EventCategory::Ui, "shell_command");
     pub const UI_SWITCH_SESSION: Self = Self::from_static(EventCategory::Ui, "switch_session");
+    pub const UI_TREE_REQUEST: Self = Self::from_static(EventCategory::Ui, "tree_request");
+    pub const UI_NAVIGATE_TREE: Self = Self::from_static(EventCategory::Ui, "navigate_tree");
 
     pub const SHELL_COMMAND_PROGRESS: Self =
         Self::from_static(EventCategory::Shell, "command_progress");
@@ -651,6 +653,21 @@ pub struct UiSwitchSession {
     pub reason: SessionStartReason,
 }
 
+/// The user typed `/tree`: render the session's branching tree (one
+/// `harness.info` line per node) to the chat output.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UiTreeRequest {
+    pub session_id: SessionId,
+}
+
+/// The user typed `/tree <id>`: move the session's head pointer to the
+/// given node, so the next prompt branches off there.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UiNavigateTree {
+    pub session_id: SessionId,
+    pub node_id: u64,
+}
+
 /// Which stream a [`ShellCommandProgress`] chunk came from.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -934,6 +951,10 @@ pub enum Event {
     UiShellCommand(UiShellCommand),
     #[serde(rename = "ui.switch_session")]
     UiSwitchSession(UiSwitchSession),
+    #[serde(rename = "ui.tree_request")]
+    UiTreeRequest(UiTreeRequest),
+    #[serde(rename = "ui.navigate_tree")]
+    UiNavigateTree(UiNavigateTree),
 
     // Shell (user-initiated)
     #[serde(rename = "shell.command_progress")]
@@ -999,6 +1020,8 @@ impl Event {
             Self::UiDetachRequest(_) => EventName::UI_DETACH_REQUEST,
             Self::UiShellCommand(_) => EventName::UI_SHELL_COMMAND,
             Self::UiSwitchSession(_) => EventName::UI_SWITCH_SESSION,
+            Self::UiTreeRequest(_) => EventName::UI_TREE_REQUEST,
+            Self::UiNavigateTree(_) => EventName::UI_NAVIGATE_TREE,
             Self::ShellCommandProgress(_) => EventName::SHELL_COMMAND_PROGRESS,
             Self::ShellCommandFinished(_) => EventName::SHELL_COMMAND_FINISHED,
             Self::SessionPromptQueued(_) => EventName::SESSION_PROMPT_QUEUED,

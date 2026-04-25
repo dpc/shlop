@@ -1230,6 +1230,16 @@ impl Harness {
                 self.switch_session(req.new_session_id, req.reason)?;
                 Ok(true)
             }
+            Event::UiTreeRequest(req) => {
+                self.publish_event(Some(client_id), Event::UiTreeRequest(req.clone()));
+                self.handle_tree_request(&req.session_id);
+                Ok(true)
+            }
+            Event::UiNavigateTree(req) => {
+                self.publish_event(Some(client_id), Event::UiNavigateTree(req.clone()));
+                self.handle_navigate_tree(&req.session_id, req.node_id)?;
+                Ok(true)
+            }
             Event::LifecycleDisconnect(_) => Ok(false),
             other => {
                 self.publish_event(Some(client_id), other);
@@ -1529,6 +1539,75 @@ impl Harness {
     /// disconnected). When the wait set drains, AGENTS.md content is
     /// injected into the session log and any queued user prompts are
     /// dispatched.
+    /// Renders the session tree as one `harness.info` line per node.
+    /// Bound-session-only: refuses if `session_id` doesn't match.
+    fn handle_tree_request(&mut self, session_id: &SessionId) {
+        if session_id != &self.current_session_id {
+            self.emit_info(&format!(
+                "tree request for `{}` ignored; harness is bound to `{}`",
+                session_id.as_str(),
+                self.current_session_id.as_str()
+            ));
+            return;
+        }
+        let lines: Vec<String> = match self.store.session(session_id.as_str()) {
+            Some(tree) if !tree.nodes().is_empty() => {
+                let head = tree.head();
+                tree.nodes()
+                    .iter()
+                    .map(|node| {
+                        let marker = if Some(node.id) == head { '*' } else { ' ' };
+                        let parent = node
+                            .parent_id
+                            .map(|p| format!("<- {}", p.0))
+                            .unwrap_or_else(|| "(root)".to_owned());
+                        let preview = render_entry_preview(&node.entry);
+                        format!("  {:>3} {} {:>8}  {}", node.id.0, marker, parent, preview)
+                    })
+                    .collect()
+            }
+            _ => {
+                self.emit_info(&format!(
+                    "session `{}` has no entries yet",
+                    session_id.as_str()
+                ));
+                return;
+            }
+        };
+        for line in lines {
+            self.emit_info(&line);
+        }
+    }
+
+    /// Sets the head pointer to `node_id`. Bound-session-only.
+    fn handle_navigate_tree(
+        &mut self,
+        session_id: &SessionId,
+        node_id: u64,
+    ) -> Result<(), HarnessError> {
+        if session_id != &self.current_session_id {
+            self.emit_info(&format!(
+                "navigate ignored: harness is bound to `{}`",
+                self.current_session_id.as_str()
+            ));
+            return Ok(());
+        }
+        // Validate the node exists in this session.
+        let valid = self
+            .store
+            .session(session_id.as_str())
+            .and_then(|t| t.node(tau_core::NodeId(node_id)))
+            .is_some();
+        if !valid {
+            self.emit_info(&format!("no node `{node_id}` in session"));
+            return Ok(());
+        }
+        self.store
+            .set_head(session_id.as_str(), tau_core::NodeId(node_id))?;
+        self.emit_info(&format!("navigated to node {node_id}"));
+        Ok(())
+    }
+
     /// Tear down the current session and bind the harness to a new one.
     ///
     /// Pi-style: emit `SessionShutdown` for the old, drop in-flight
@@ -2807,6 +2886,21 @@ fn format_session_entry(entry: &SessionEntry) -> String {
                 format!("tool.error {} ({}) -> {message}", a.tool_name, a.call_id)
             }
         },
+    }
+}
+
+/// One-line preview of a session entry for `/tree` output.
+fn render_entry_preview(entry: &SessionEntry) -> String {
+    let raw = format_session_entry(entry);
+    let single_line: String = raw
+        .chars()
+        .map(|c| if c == '\n' { ' ' } else { c })
+        .collect();
+    if single_line.chars().count() > 60 {
+        let truncated: String = single_line.chars().take(60).collect();
+        format!("{truncated}…")
+    } else {
+        single_line
     }
 }
 
