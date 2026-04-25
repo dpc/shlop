@@ -816,11 +816,7 @@ fn err_suffix(message: Option<&str>) -> ToolSuffixSegment {
 }
 
 fn output_stats_suffix(text: &str) -> ToolSuffixSegment {
-    info_suffix(format!(
-        "({} lines, {} bytes)",
-        text.lines().count(),
-        text.len()
-    ))
+    info_suffix(format!("({}L, {}B)", text.lines().count(), text.len()))
 }
 
 /// Error-path display: `<tool_name> <args> <err>`.
@@ -862,7 +858,7 @@ fn format_tool_completion(
                 // for tools that don't ship a diff (or no-op writes).
                 let suffix = format_diff_chip(details).unwrap_or_else(|| {
                     let bytes = cbor_int_field(details, "bytes_written").unwrap_or(0);
-                    format!("({bytes} bytes)")
+                    format!("({bytes}B)")
                 });
                 ToolCallDisplay {
                     tool_name: "write".into(),
@@ -2140,7 +2136,7 @@ mod tests {
         ]);
         let grep = super::format_tool_completion("grep", &grep_details, None);
         assert_eq!(grep.suffixes.len(), 2);
-        assert_eq!(grep.suffixes[0].text, "(2 lines, 4 bytes)");
+        assert_eq!(grep.suffixes[0].text, "(2L, 4B)");
         assert!(matches!(grep.suffixes[0].status, super::ToolStatus::Info));
         assert_eq!(grep.suffixes[1].text, "ok: no matches");
         assert!(matches!(
@@ -2193,7 +2189,7 @@ mod tests {
         ]);
         let shell = super::format_tool_completion("shell", &shell_details, None);
         assert_eq!(shell.suffixes.len(), 2);
-        assert_eq!(shell.suffixes[0].text, "(1 lines, 3 bytes)");
+        assert_eq!(shell.suffixes[0].text, "(1L, 3B)");
         assert!(matches!(shell.suffixes[0].status, super::ToolStatus::Info));
         assert_eq!(shell.suffixes[1].text, "err: 7");
         assert!(matches!(shell.suffixes[1].status, super::ToolStatus::Error));
@@ -2204,7 +2200,7 @@ mod tests {
             Some("command exited with status 7"),
         );
         assert_eq!(shell_error.suffixes.len(), 2);
-        assert_eq!(shell_error.suffixes[0].text, "(1 lines, 3 bytes)");
+        assert_eq!(shell_error.suffixes[0].text, "(1L, 3B)");
         assert!(matches!(
             shell_error.suffixes[0].status,
             super::ToolStatus::Info
