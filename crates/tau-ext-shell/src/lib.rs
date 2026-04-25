@@ -123,7 +123,8 @@ where
         ToolSpec {
             name: READ_TOOL_NAME.into(),
             description: Some(
-                "Read the contents of a file. Returns the file path and text content.".to_owned(),
+                "Read the contents of a file. Supports optional line-based slicing via `start_line` and `line_count`. Returns the file path and text content."
+                    .to_owned(),
             ),
             parameters: Some(serde_json::json!({
                 "type": "object",
@@ -131,6 +132,14 @@ where
                     "path": {
                         "type": "string",
                         "description": "Path to the file"
+                    },
+                    "start_line": {
+                        "type": "integer",
+                        "description": "1-based first line to read. If omitted, starts at line 1."
+                    },
+                    "line_count": {
+                        "type": "integer",
+                        "description": "Maximum number of lines to return. If omitted, reads through end of file."
                     }
                 },
                 "required": ["path"]
@@ -782,6 +791,10 @@ fn truncate_head_plain(input: &str) -> Truncated {
 
 /// Truncate from the head (keep first lines).  Used by `read`.
 fn truncate_head(input: &str) -> Truncated {
+    truncate_head_with_notice(input, "Use start_line and line_count to continue reading.")
+}
+
+fn truncate_head_with_notice(input: &str, continuation_hint: &str) -> Truncated {
     let mut truncated = truncate_head_plain(input);
     if !truncated.was_truncated {
         return truncated;
@@ -790,7 +803,7 @@ fn truncate_head(input: &str) -> Truncated {
     let kept_lines = truncated.content.lines().count();
     truncated.content.push_str(&format!(
         "\n\n[Showing lines 1-{kept_lines} of {} ({} bytes total). \
-         Use offset to continue reading.]",
+         {continuation_hint}]",
         truncated.total_lines, truncated.total_bytes
     ));
     truncated
@@ -845,11 +858,18 @@ fn truncate_tail(input: &str) -> Truncated {
 
 fn read_file(arguments: &CborValue) -> Result<CborValue, String> {
     let path = argument_text(arguments, "path")?;
+    let start_line = parse_read_start_line(arguments)?;
+    let line_count = parse_read_line_count(arguments)?;
     let path_buf = PathBuf::from(&path);
     let raw = fs::read_to_string(&path_buf)
         .map_err(|error| format!("failed to read {}: {error}", path_buf.display()))?;
 
-    let truncated = truncate_head(&raw);
+    let total_lines = raw.lines().count();
+    let sliced = slice_lines(&raw, start_line, line_count);
+    let truncated = truncate_head_with_notice(
+        &sliced.content,
+        "Use start_line and line_count to continue reading.",
+    );
     let mut entries = vec![
         (
             CborValue::Text("path".to_owned()),
@@ -859,6 +879,18 @@ fn read_file(arguments: &CborValue) -> Result<CborValue, String> {
             CborValue::Text("content".to_owned()),
             CborValue::Text(truncated.content),
         ),
+        (
+            CborValue::Text("start_line".to_owned()),
+            CborValue::Integer((sliced.start_line as i64).into()),
+        ),
+        (
+            CborValue::Text("line_count".to_owned()),
+            CborValue::Integer((sliced.line_count as i64).into()),
+        ),
+        (
+            CborValue::Text("total_lines".to_owned()),
+            CborValue::Integer((total_lines as i64).into()),
+        ),
     ];
     if truncated.was_truncated {
         entries.push((
@@ -866,15 +898,48 @@ fn read_file(arguments: &CborValue) -> Result<CborValue, String> {
             CborValue::Bool(true),
         ));
         entries.push((
-            CborValue::Text("total_lines".to_owned()),
-            CborValue::Integer((truncated.total_lines as i64).into()),
-        ));
-        entries.push((
             CborValue::Text("total_bytes".to_owned()),
             CborValue::Integer((truncated.total_bytes as i64).into()),
         ));
     }
     Ok(CborValue::Map(entries))
+}
+
+struct ReadSlice {
+    content: String,
+    start_line: usize,
+    line_count: usize,
+}
+
+fn parse_read_start_line(arguments: &CborValue) -> Result<usize, String> {
+    match optional_argument_int(arguments, "start_line") {
+        None => Ok(1),
+        Some(value) if value < 1 => Err("start_line must be >= 1".to_owned()),
+        Some(value) => Ok(value as usize),
+    }
+}
+
+fn parse_read_line_count(arguments: &CborValue) -> Result<Option<usize>, String> {
+    match optional_argument_int(arguments, "line_count") {
+        None => Ok(None),
+        Some(value) if value < 1 => Err("line_count must be >= 1".to_owned()),
+        Some(value) => Ok(Some(value as usize)),
+    }
+}
+
+fn slice_lines(input: &str, start_line: usize, line_count: Option<usize>) -> ReadSlice {
+    let all_lines: Vec<&str> = input.lines().collect();
+    let total_lines = all_lines.len();
+    let start_idx = start_line.saturating_sub(1).min(total_lines);
+    let end_idx = match line_count {
+        Some(count) => start_idx.saturating_add(count).min(total_lines),
+        None => total_lines,
+    };
+    ReadSlice {
+        content: all_lines[start_idx..end_idx].join("\n"),
+        start_line,
+        line_count: end_idx.saturating_sub(start_idx),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1308,7 +1373,15 @@ fn grep_result_map(
         ),
         (
             CborValue::Text("output".to_owned()),
-            CborValue::Text(output_text),
+            CborValue::Text(output_text.clone()),
+        ),
+        (
+            CborValue::Text("output_lines".to_owned()),
+            CborValue::Integer((output_text.lines().count() as i64).into()),
+        ),
+        (
+            CborValue::Text("output_bytes".to_owned()),
+            CborValue::Integer((output_text.len() as i64).into()),
         ),
     ];
     if let Some(glob) = glob {
@@ -1810,11 +1883,27 @@ fn command_details_value(
         ),
         (
             CborValue::Text("stdout".to_owned()),
-            CborValue::Text(stdout),
+            CborValue::Text(stdout.clone()),
         ),
         (
             CborValue::Text("stderr".to_owned()),
-            CborValue::Text(stderr),
+            CborValue::Text(stderr.clone()),
+        ),
+        (
+            CborValue::Text("stdout_lines".to_owned()),
+            CborValue::Integer((stdout.lines().count() as i64).into()),
+        ),
+        (
+            CborValue::Text("stdout_bytes".to_owned()),
+            CborValue::Integer((stdout.len() as i64).into()),
+        ),
+        (
+            CborValue::Text("stderr_lines".to_owned()),
+            CborValue::Integer((stderr.lines().count() as i64).into()),
+        ),
+        (
+            CborValue::Text("stderr_bytes".to_owned()),
+            CborValue::Integer((stderr.len() as i64).into()),
         ),
     ];
     if let Some(cwd) = cwd {
@@ -2403,18 +2492,43 @@ mod tests {
         // the tool result (pattern/path/glob/matches/output). Lock the
         // wire contract so a future shape change doesn't silently
         // regress the UI back to "grep: done".
-        let with_glob = grep_result_map("foo", "src", Some("*.rs"), 3, "src/a.rs:1:foo".to_owned());
+        let with_glob = grep_result_map(
+            "foo",
+            "src",
+            Some("*.rs"),
+            3,
+            "src/a.rs:1:foo".to_owned(),
+        );
         assert_eq!(cbor_map_text(&with_glob, "pattern"), Some("foo"));
         assert_eq!(cbor_map_text(&with_glob, "path"), Some("src"));
         assert_eq!(cbor_map_text(&with_glob, "glob"), Some("*.rs"));
         assert_eq!(cbor_int_field(&with_glob, "matches"), Some(3));
         assert_eq!(cbor_map_text(&with_glob, "output"), Some("src/a.rs:1:foo"));
+        assert_eq!(cbor_int_field(&with_glob, "output_lines"), Some(1));
+        assert_eq!(cbor_int_field(&with_glob, "output_bytes"), Some(14));
 
         // No-glob form omits the field entirely rather than emitting
         // an empty string.
         let no_glob = grep_result_map("foo", ".", None, 0, "no matches found".to_owned());
         assert!(cbor_map_text(&no_glob, "glob").is_none());
         assert_eq!(cbor_int_field(&no_glob, "matches"), Some(0));
+        assert_eq!(cbor_int_field(&no_glob, "output_lines"), Some(1));
+        assert_eq!(cbor_int_field(&no_glob, "output_bytes"), Some(16));
+    }
+
+    #[test]
+    fn command_details_value_records_stdout_and_stderr_stats() {
+        let details = command_details_value(
+            "echo hi".to_owned(),
+            None,
+            Some(0),
+            "hi\nthere\n".to_owned(),
+            "oops\n".to_owned(),
+        );
+        assert_eq!(cbor_int_field(&details, "stdout_lines"), Some(2));
+        assert_eq!(cbor_int_field(&details, "stdout_bytes"), Some(9));
+        assert_eq!(cbor_int_field(&details, "stderr_lines"), Some(1));
+        assert_eq!(cbor_int_field(&details, "stderr_bytes"), Some(5));
     }
 
     #[test]
@@ -2478,6 +2592,70 @@ mod tests {
     }
 
     #[test]
+    fn slice_lines_returns_requested_window() {
+        let sliced = slice_lines("a\nb\nc\nd", 2, Some(2));
+        assert_eq!(sliced.content, "b\nc");
+        assert_eq!(sliced.start_line, 2);
+        assert_eq!(sliced.line_count, 2);
+    }
+
+    #[test]
+    fn slice_lines_clamps_past_end() {
+        let sliced = slice_lines("a\nb\nc", 10, Some(5));
+        assert_eq!(sliced.content, "");
+        assert_eq!(sliced.start_line, 10);
+        assert_eq!(sliced.line_count, 0);
+    }
+
+    #[test]
+    fn read_file_honors_start_line_and_line_count() {
+        let td = TempDir::new().expect("tempdir");
+        let path = td.path().join("small.txt");
+        std::fs::write(&path, "line 1\nline 2\nline 3\nline 4\nline 5\n").expect("write");
+
+        let args = CborValue::Map(vec![
+            (
+                CborValue::Text("path".to_owned()),
+                CborValue::Text(path.display().to_string()),
+            ),
+            (
+                CborValue::Text("start_line".to_owned()),
+                CborValue::Integer(2.into()),
+            ),
+            (
+                CborValue::Text("line_count".to_owned()),
+                CborValue::Integer(3.into()),
+            ),
+        ]);
+        let result = read_file(&args).expect("read");
+        assert_eq!(cbor_map_text(&result, "content"), Some("line 2\nline 3\nline 4"));
+        assert_eq!(cbor_int_field(&result, "start_line"), Some(2));
+        assert_eq!(cbor_int_field(&result, "line_count"), Some(3));
+        assert_eq!(cbor_int_field(&result, "total_lines"), Some(5));
+    }
+
+    #[test]
+    fn read_file_rejects_invalid_line_arguments() {
+        let args = CborValue::Map(vec![
+            (CborValue::Text("path".to_owned()), CborValue::Text("x".to_owned())),
+            (
+                CborValue::Text("start_line".to_owned()),
+                CborValue::Integer(0.into()),
+            ),
+        ]);
+        assert_eq!(read_file(&args).unwrap_err(), "start_line must be >= 1");
+
+        let args = CborValue::Map(vec![
+            (CborValue::Text("path".to_owned()), CborValue::Text("x".to_owned())),
+            (
+                CborValue::Text("line_count".to_owned()),
+                CborValue::Integer(0.into()),
+            ),
+        ]);
+        assert_eq!(read_file(&args).unwrap_err(), "line_count must be >= 1");
+    }
+
+    #[test]
     fn read_file_truncates_large_output() {
         let td = TempDir::new().expect("tempdir");
         let path = td.path().join("big.txt");
@@ -2492,6 +2670,10 @@ mod tests {
         let content = cbor_map_text(&result, "content").expect("content field");
         assert!(content.contains("line 1\n"));
         assert!(content.contains("[Showing lines 1-"));
+        assert!(content.contains("Use start_line and line_count to continue reading."));
+        assert_eq!(cbor_int_field(&result, "start_line"), Some(1));
+        assert_eq!(cbor_int_field(&result, "line_count"), Some(3000));
+        assert_eq!(cbor_int_field(&result, "total_lines"), Some(3000));
     }
 
     #[test]
