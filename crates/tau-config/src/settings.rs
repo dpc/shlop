@@ -123,6 +123,7 @@ pub struct BuiltinExtension {
     pub name: &'static str,
     pub command: Vec<String>,
     pub role: Option<&'static str>,
+    pub enable: bool,
 }
 
 impl HarnessSettings {
@@ -153,7 +154,7 @@ impl HarnessSettings {
                     ResolvedExtension {
                         prefix: Vec::new(),
                         command: b.command,
-                        enable: true,
+                        enable: b.enable,
                         role: b.role.map(str::to_owned),
                     },
                 )
@@ -546,11 +547,19 @@ mod tests {
                 name: "agent",
                 command: vec!["tau".into(), "ext".into(), "agent".into()],
                 role: Some("agent"),
+                enable: true,
             },
             BuiltinExtension {
                 name: "shell",
                 command: vec!["tau".into(), "ext".into(), "ext-shell".into()],
                 role: Some("tool"),
+                enable: true,
+            },
+            BuiltinExtension {
+                name: "test_dummy",
+                command: vec!["tau".into(), "ext".into(), "ext-test-dummy".into()],
+                role: Some("tool"),
+                enable: false,
             },
         ]
     }
@@ -565,6 +574,13 @@ mod tests {
         assert_eq!(resolved[0].args, vec!["ext", "agent"]);
         assert_eq!(resolved[0].role.as_deref(), Some("agent"));
         assert_eq!(resolved[1].name, "shell");
+    }
+
+    #[test]
+    fn resolve_extensions_builtin_can_start_disabled() {
+        let s = HarnessSettings::default();
+        let resolved = s.resolve_extensions(builtins()).expect("resolve");
+        assert!(resolved.iter().all(|e| e.name != "test_dummy"));
     }
 
     #[test]
@@ -663,6 +679,7 @@ mod tests {
             r#"{
                 extensions: {
                     shell: { enable: false },
+                    test_dummy: { enable: true },
                     agent: { prefix: ["ssh", "host"] },
                     mything: { command: ["/bin/foo"] },
                 },
@@ -673,9 +690,9 @@ mod tests {
         let s: HarnessSettings = load_json5_layered(dir, "harness").expect("load");
         let resolved = s.resolve_extensions(builtins()).expect("resolve");
         let names: Vec<&str> = resolved.iter().map(|e| e.name.as_str()).collect();
-        // shell dropped (disable). agent kept (prefix-wrapped).
-        // mything appended.
-        assert_eq!(names, vec!["agent", "mything"]);
+        // shell dropped (disable). test_dummy enabled. agent kept
+        // (prefix-wrapped). mything appended.
+        assert_eq!(names, vec!["agent", "test_dummy", "mything"]);
         let agent = &resolved[0];
         assert_eq!(agent.command, "ssh");
         assert_eq!(agent.args, vec!["host", "tau", "ext", "agent"]);

@@ -1,0 +1,14 @@
+[package]
+name = "tau-ext-test-dummy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+rand.workspace = true
+serde_json.workspace = true
+tau-proto.workspace = true

@@ -7,4 +7,9 @@
   // default_thinking_levels: {
   //   "local/llama-3": "high",
   // },
+
+  // Optional built-in extension overrides.
+  // extensions: {
+  //   test_dummy: { enable: true },
+  // },
 }

@@ -84,7 +84,7 @@ pub enum Command {
     /// harness to spawn extensions from the unified binary).
     #[command(hide = true, alias = "component")]
     Ext {
-        /// Extension name (agent, ext-shell, harness)
+        /// Extension name (agent, ext-shell, ext-test-dummy, harness)
         name: String,
     },
 }

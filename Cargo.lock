@@ -1358,6 +1358,7 @@ dependencies = [
  "tau-cli-term-raw",
  "tau-config",
  "tau-ext-shell",
+ "tau-ext-test-dummy",
  "tau-harness",
  "tau-proto",
  "tau-provider",
@@ -1424,6 +1425,15 @@ dependencies = [
  "tau-proto",
  "tau-skills",
  "tempfile",
+]
+
+[[package]]
+name = "tau-ext-test-dummy"
+version = "0.1.0"
+dependencies = [
+ "rand",
+ "serde_json",
+ "tau-proto",
 ]
 
 [[package]]
