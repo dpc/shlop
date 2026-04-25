@@ -54,6 +54,10 @@ struct SharedState {
     height: usize,
     /// Set by Term::drop to signal the redraw thread to exit.
     shutdown: bool,
+    /// Set by `resume_after_external` (and similar) to force the
+    /// next redraw to wipe its `Screen` cache and repaint from
+    /// scratch. The redraw loop reads-and-clears this flag.
+    invalidate_screen: bool,
     /// Generation counter for `redraw_sync`. Caller bumps
     /// `sync_requested`; redraw thread sets `sync_completed =
     /// sync_requested` atomically with going idle (right before
@@ -326,6 +330,7 @@ impl Term {
             width,
             height,
             shutdown: false,
+            invalidate_screen: false,
             sync_requested: 0,
             sync_completed: 0,
         }));
@@ -394,6 +399,7 @@ impl Term {
             width,
             height,
             shutdown: false,
+            invalidate_screen: false,
             sync_requested: 0,
             sync_completed: 0,
         }));
@@ -532,7 +538,10 @@ impl Term {
     }
 
     /// Re-acquires raw mode + bracketed paste after an external
-    /// program. Triggers a full redraw so the chat history reappears.
+    /// program. Marks the redraw thread'\''s `Screen` cache stale so the
+    /// next render repaints from scratch; without this, the cache
+    /// would diff against what we *thought* was on screen and skip
+    /// drawing anything since the editor exited.
     pub fn resume_after_external(&self) -> io::Result<()> {
         if !self.owns_raw_mode {
             return Ok(());
@@ -544,6 +553,10 @@ impl Term {
             crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
             crossterm::cursor::MoveTo(0, 0)
         );
+        {
+            let mut st = self.state.lock().expect("term state mutex poisoned");
+            st.invalidate_screen = true;
+        }
         self.redraw.notify();
         Ok(())
     }
@@ -911,10 +924,12 @@ fn redraw_loop(
             }
         }
 
-        let st = state.lock().expect("term state mutex poisoned");
+        let mut st = state.lock().expect("term state mutex poisoned");
         let width = st.width;
         let height = st.height.max(1);
         let size_changed = prev_width != width || prev_height != height;
+        // Take-and-clear so the flag is one-shot.
+        let force_full = std::mem::take(&mut st.invalidate_screen);
         // Capture the sync generation we're rendering against.
         // We must not advance sync_completed beyond this value,
         // because a later bump to sync_requested may have arrived
@@ -924,8 +939,15 @@ fn redraw_loop(
         let layout = layout_all(&st);
         drop(st);
 
-        if size_changed {
-            // Path 2: Full render (resize). See README.md.
+        if force_full {
+            // The terminal was clobbered by an external program
+            // (\$EDITOR returned). Wipe Screen's cached idea of what's
+            // on the terminal so `full_render` redraws from scratch.
+            screen.invalidate();
+        }
+
+        if size_changed || force_full {
+            // Path 2: Full render (resize, or post-external-program).
             if let Err(e) = full_render(&mut writer, &mut screen, &layout, width, height) {
                 eprintln!("redraw: full render error: {e}");
             }
