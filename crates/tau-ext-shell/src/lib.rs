@@ -861,8 +861,7 @@ fn read_file(arguments: &CborValue) -> Result<CborValue, String> {
     let start_line = parse_read_start_line(arguments)?;
     let line_count = parse_read_line_count(arguments)?;
     let path_buf = PathBuf::from(&path);
-    let raw = fs::read_to_string(&path_buf)
-        .map_err(|error| format!("failed to read {}: {error}", path_buf.display()))?;
+    let raw = fs::read_to_string(&path_buf).map_err(|error| error.to_string())?;
 
     let total_lines = raw.lines().count();
     let sliced = slice_lines(&raw, start_line, line_count);
@@ -953,12 +952,7 @@ fn write_file(arguments: &CborValue) -> Result<CborValue, String> {
 
     if let Some(parent) = path_buf.parent() {
         if !parent.exists() {
-            fs::create_dir_all(parent).map_err(|error| {
-                format!(
-                    "failed to create directories for {}: {error}",
-                    path_buf.display()
-                )
-            })?;
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
     }
 
@@ -968,8 +962,7 @@ fn write_file(arguments: &CborValue) -> Result<CborValue, String> {
     let original = fs::read_to_string(&path_buf).unwrap_or_default();
 
     let bytes_written = content.len();
-    fs::write(&path_buf, &content)
-        .map_err(|error| format!("failed to write {}: {error}", path_buf.display()))?;
+    fs::write(&path_buf, &content).map_err(|error| error.to_string())?;
 
     let diff = compute_diff(&original, &content);
 
@@ -994,8 +987,7 @@ fn edit_file(arguments: &CborValue) -> Result<CborValue, String> {
     let path = argument_text(arguments, "path")?;
     let path_buf = PathBuf::from(&path);
 
-    let original = fs::read_to_string(&path_buf)
-        .map_err(|e| format!("failed to read {}: {e}", path_buf.display()))?;
+    let original = fs::read_to_string(&path_buf).map_err(|e| e.to_string())?;
 
     let edits = argument_array(arguments, "edits")?;
     if edits.is_empty() {
@@ -1042,8 +1034,7 @@ fn edit_file(arguments: &CborValue) -> Result<CborValue, String> {
         result.replace_range(*start..*end, new_text);
     }
 
-    fs::write(&path_buf, &result)
-        .map_err(|e| format!("failed to write {}: {e}", path_buf.display()))?;
+    fs::write(&path_buf, &result).map_err(|e| e.to_string())?;
 
     let diff = compute_diff(&original, &result);
 
@@ -2178,7 +2169,8 @@ mod tests {
         let Event::ToolError(error) = error else {
             panic!("expected tool error");
         };
-        assert!(error.message.contains("failed to read"));
+        assert!(!error.message.contains("failed to read"));
+        assert!(error.message.contains("No such file or directory"));
 
         writer
             .write_event(&Event::LifecycleDisconnect(
@@ -2233,6 +2225,90 @@ mod tests {
     }
 
     #[test]
+    fn extension_write_missing_parent_reports_short_error() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let missing_parent = tempdir.path().join("missing-parent");
+        let file_path = missing_parent.join("child.txt");
+        fs::write(&missing_parent, "not a dir").expect("write blocker");
+
+        let (mut reader, mut writer) = spawn_extension();
+        drain_startup(&mut reader);
+
+        writer
+            .write_event(&Event::ToolInvoke(ToolInvoke {
+                call_id: "call-1".into(),
+                tool_name: WRITE_TOOL_NAME.into(),
+                arguments: CborValue::Map(vec![
+                    (
+                        CborValue::Text("path".to_owned()),
+                        CborValue::Text(file_path.display().to_string()),
+                    ),
+                    (
+                        CborValue::Text("content".to_owned()),
+                        CborValue::Text("x".to_owned()),
+                    ),
+                ]),
+            }))
+            .expect("invoke");
+        writer.flush().expect("flush");
+
+        let error = reader.read_event().expect("read").expect("error");
+        let Event::ToolError(error) = error else {
+            panic!("expected tool error");
+        };
+        assert_eq!(error.tool_name, WRITE_TOOL_NAME);
+        assert!(!error.message.contains("failed to create directories"));
+        assert!(!error.message.contains(file_path.to_string_lossy().as_ref()));
+        assert!(error.message.contains("Not a directory"));
+
+        writer
+            .write_event(&Event::LifecycleDisconnect(
+                tau_proto::LifecycleDisconnect { reason: None },
+            ))
+            .expect("disconnect");
+        writer.flush().expect("flush");
+    }
+
+    #[test]
+    fn extension_write_directory_reports_short_error() {
+        let (mut reader, mut writer) = spawn_extension();
+        drain_startup(&mut reader);
+
+        writer
+            .write_event(&Event::ToolInvoke(ToolInvoke {
+                call_id: "call-1".into(),
+                tool_name: WRITE_TOOL_NAME.into(),
+                arguments: CborValue::Map(vec![
+                    (
+                        CborValue::Text("path".to_owned()),
+                        CborValue::Text("/tmp".to_owned()),
+                    ),
+                    (
+                        CborValue::Text("content".to_owned()),
+                        CborValue::Text("x".to_owned()),
+                    ),
+                ]),
+            }))
+            .expect("invoke");
+        writer.flush().expect("flush");
+
+        let error = reader.read_event().expect("read").expect("error");
+        let Event::ToolError(error) = error else {
+            panic!("expected tool error");
+        };
+        assert_eq!(error.tool_name, WRITE_TOOL_NAME);
+        assert!(!error.message.contains("failed to write"));
+        assert!(error.message.contains("Is a directory"));
+
+        writer
+            .write_event(&Event::LifecycleDisconnect(
+                tau_proto::LifecycleDisconnect { reason: None },
+            ))
+            .expect("disconnect");
+        writer.flush().expect("flush");
+    }
+
+    #[test]
     fn extension_writes_file_creates_directories() {
         let tempdir = TempDir::new().expect("tempdir");
         let file_path = tempdir.path().join("a/b/c/deep.txt");
@@ -2264,6 +2340,54 @@ mod tests {
             fs::read_to_string(&file_path).expect("read back"),
             "deep content"
         );
+
+        writer
+            .write_event(&Event::LifecycleDisconnect(
+                tau_proto::LifecycleDisconnect { reason: None },
+            ))
+            .expect("disconnect");
+        writer.flush().expect("flush");
+    }
+
+    #[test]
+    fn edit_read_failure_reports_short_reason() {
+        let (mut reader, mut writer) = spawn_extension();
+        drain_startup(&mut reader);
+
+        writer
+            .write_event(&Event::ToolInvoke(ToolInvoke {
+                call_id: "call-1".into(),
+                tool_name: EDIT_TOOL_NAME.into(),
+                arguments: CborValue::Map(vec![
+                    (
+                        CborValue::Text("path".to_owned()),
+                        CborValue::Text("/definitely/missing/file.txt".to_owned()),
+                    ),
+                    (
+                        CborValue::Text("edits".to_owned()),
+                        CborValue::Array(vec![CborValue::Map(vec![
+                            (
+                                CborValue::Text("oldText".to_owned()),
+                                CborValue::Text("a".to_owned()),
+                            ),
+                            (
+                                CborValue::Text("newText".to_owned()),
+                                CborValue::Text("b".to_owned()),
+                            ),
+                        ])]),
+                    ),
+                ]),
+            }))
+            .expect("invoke");
+        writer.flush().expect("flush");
+
+        let error = reader.read_event().expect("read").expect("error");
+        let Event::ToolError(error) = error else {
+            panic!("expected tool error");
+        };
+        assert_eq!(error.tool_name, EDIT_TOOL_NAME);
+        assert!(!error.message.contains("failed to read"));
+        assert!(error.message.contains("No such file or directory"));
 
         writer
             .write_event(&Event::LifecycleDisconnect(
