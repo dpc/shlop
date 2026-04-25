@@ -329,13 +329,15 @@ impl TurnState {
 }
 
 /// Outcome of `submit_user_prompt`: either the prompt was handed off to
-/// the agent immediately, or it was placed on `pending_prompts` and will
-/// be dispatched once the harness is ready (model selected, agent idle,
-/// extensions ready, session initialized).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// the agent immediately, was placed on `pending_prompts` and will be
+/// dispatched once the harness is ready (model selected, agent idle,
+/// extensions ready, session initialized), or was rejected because its
+/// `session_id` doesn't match the harness's bound session.
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum PromptSubmission {
     Dispatched,
     Queued,
+    Rejected { reason: String },
 }
 
 /// Lifecycle phase of a configured extension. Drives the
@@ -458,6 +460,12 @@ struct Harness {
     bus: EventBus,
     registry: ToolRegistry,
     store: SessionStore,
+    /// The single session this harness owns. UserMessages with a
+    /// different `session_id` are rejected. Pi-style: one harness =
+    /// one active session at a time. Switching sessions tears the
+    /// harness down and respawns extensions; that's a future
+    /// `switch_session` operation, not silent multi-session.
+    current_session_id: SessionId,
     pending_request_sessions: VecDeque<SessionId>,
     pending_tool_sessions: std::collections::HashMap<ToolCallId, SessionId>,
     event_log: std::sync::Arc<EventLog>,
@@ -612,6 +620,7 @@ impl Harness {
             bus,
             registry: ToolRegistry::new(),
             store,
+            current_session_id: eager_session_id.into(),
             pending_request_sessions: VecDeque::new(),
             pending_tool_sessions: std::collections::HashMap::new(),
             event_log: EventLog::new(),
@@ -737,6 +746,7 @@ impl Harness {
             bus,
             registry: ToolRegistry::new(),
             store,
+            current_session_id: eager_session_id.into(),
             pending_request_sessions: VecDeque::new(),
             pending_tool_sessions: std::collections::HashMap::new(),
             event_log: EventLog::new(),
@@ -1471,11 +1481,26 @@ impl Harness {
     /// Queue a prompt when it cannot be sent directly yet, or dispatch
     /// it immediately when the session is initialized and the harness is
     /// ready to talk to the agent.
+    ///
+    /// Rejects prompts whose `session_id` doesn't match the harness's
+    /// bound session — one harness owns one session, period. Switching
+    /// sessions is a separate (future) operation that tears down +
+    /// respawns extensions, not a silent fan-out.
     fn submit_user_prompt(
         &mut self,
         session_id: SessionId,
         text: String,
     ) -> Result<PromptSubmission, HarnessError> {
+        if session_id != self.current_session_id {
+            let reason = format!(
+                "harness is bound to session `{}`; prompt for `{}` rejected",
+                self.current_session_id.as_str(),
+                session_id.as_str()
+            );
+            self.emit_info(&reason);
+            return Ok(PromptSubmission::Rejected { reason });
+        }
+
         if self.dispatch_blocked() || !self.session_initialized(&session_id) {
             self.pending_prompts.push_back((session_id, text));
             self.try_advance_queue();
@@ -3223,12 +3248,19 @@ mod tests {
     }
 
     fn echo_harness(state_dir: impl Into<PathBuf>) -> Result<Harness, HarnessError> {
+        echo_harness_for("s1", state_dir)
+    }
+
+    fn echo_harness_for(
+        session_id: &str,
+        state_dir: impl Into<PathBuf>,
+    ) -> Result<Harness, HarnessError> {
         Harness::new_with_agent(
             state_dir,
             tau_config::settings::TauDirs::default(),
             echo_runner,
             true,
-            default_session_id(),
+            session_id,
         )
     }
 
@@ -3263,7 +3295,7 @@ mod tests {
                 run_daemon(
                     sock,
                     sp,
-                    "default",
+                    "s1",
                     ServeOptions::builder().max_clients(2).build(),
                 )
             }
@@ -3414,7 +3446,7 @@ mod tests {
                 run_daemon(
                     sock,
                     sp,
-                    "default",
+                    "s1",
                     ServeOptions::builder().max_clients(1).build(),
                 )
             }
@@ -3478,7 +3510,7 @@ mod tests {
                 run_daemon(
                     sock,
                     sp,
-                    "default",
+                    "s1",
                     ServeOptions::builder().max_clients(1).build(),
                 )
             }
@@ -3558,6 +3590,10 @@ mod tests {
             .expect("shell")
             .to_owned();
 
+        // Eager init at construction may have already appended a real
+        // AGENTS.md (ext-shell walks the test cwd). Clear so we assert
+        // only on the test-injected pair below.
+        h.discovered_agents_files.clear();
         h.discovered_agents_files.push(DiscoveredAgentsFile {
             source_id: tools_connection_id.clone().into(),
             file_path: PathBuf::from("/repo/AGENTS.md"),
@@ -3583,10 +3619,19 @@ mod tests {
         assert!(matches!(h.turn_state, TurnState::Idle));
 
         let branch = h.store.session("s1").expect("session").current_branch();
-        let SessionEntry::UserMessage { text: injected } = branch[0] else {
-            panic!("expected injected AGENTS.md user message");
-        };
-        assert!(injected.starts_with("# AGENTS.md instructions"));
+        let injected = branch
+            .iter()
+            .rev()
+            .find_map(|e| match e {
+                SessionEntry::UserMessage { text }
+                    if text.starts_with("# AGENTS.md instructions")
+                        && text.contains("/repo/AGENTS.md") =>
+                {
+                    Some(text.as_str())
+                }
+                _ => None,
+            })
+            .expect("expected injected AGENTS.md user message");
         assert!(injected.contains("<AGENTS_FILE path=\"/repo/AGENTS.md\">"));
         assert!(injected.contains("<AGENTS_FILE path=\"/repo/pkg/AGENTS.md\">"));
         let root_pos = injected.find("root rule").expect("root rule");
@@ -3600,85 +3645,53 @@ mod tests {
     }
 
     #[test]
-    fn first_prompt_initializes_custom_session_before_dispatch() {
+    fn cross_session_prompt_is_rejected() {
+        // The harness owns one session at a time. A UserMessage with
+        // a different session id must not silently spin up a second
+        // session — it gets rejected with a clear reason.
         let td = TempDir::new().expect("tempdir");
         let sp = td.path().join("state");
-        let mut h = echo_harness(&sp).expect("start");
-        let tools_connection_id = h
-            .extension_connection_id("shell")
-            .expect("shell")
-            .to_owned();
+        let mut h = echo_harness(&sp).expect("start"); // bound to "s1"
 
         h.selected_model = "test/model".into();
         let submission = h
             .submit_user_prompt("chat-1".into(), "hello".to_owned())
             .expect("submit");
-        assert_eq!(
-            submission,
-            PromptSubmission::Queued,
-            "fresh session should initialize before dispatch"
-        );
-        assert!(h.pending_prompts.len() == 1, "prompt should remain queued");
+        match submission {
+            PromptSubmission::Rejected { reason } => {
+                assert!(reason.contains("s1"), "reason should name bound session");
+                assert!(reason.contains("chat-1"), "reason should name rejected id");
+            }
+            other => panic!("expected Rejected, got {other:?}"),
+        }
         assert!(
-            matches!(
-                &h.turn_state,
-                TurnState::InitializingSession { session_id, .. }
-                    if session_id == "chat-1"
-            ),
-            "expected custom session init, got different turn state"
+            h.pending_prompts.is_empty(),
+            "rejected prompt must not queue"
         );
-
-        h.handle_extension_event(
-            &tools_connection_id,
-            Event::ExtAgentsMdAvailable(tau_proto::ExtAgentsMdAvailable {
-                file_path: "/repo/AGENTS.md".into(),
-                content: "# Root\n- root rule\n".to_owned(),
-            }),
-        )
-        .expect("agents");
-        h.handle_extension_event(
-            &tools_connection_id,
-            Event::ExtensionContextReady(tau_proto::ExtensionContextReady {
-                session_id: "chat-1".into(),
-            }),
-        )
-        .expect("ready");
-
-        assert!(h.initialized_sessions.contains("chat-1"));
         assert!(
-            matches!(&h.turn_state, TurnState::AgentThinking { .. }),
-            "queued prompt should dispatch after init"
+            h.store.session("chat-1").is_none(),
+            "rejected session must not be created"
         );
-
-        let branch = h.store.session("chat-1").expect("session").current_branch();
-        let SessionEntry::UserMessage { text: injected } = &branch[0] else {
-            panic!("expected injected AGENTS.md user message");
-        };
-        assert!(injected.starts_with("# AGENTS.md instructions"));
-        let SessionEntry::UserMessage { text: prompt } = &branch[1] else {
-            panic!("expected queued user prompt after AGENTS.md");
-        };
-        assert_eq!(prompt, "hello");
 
         h.shutdown().expect("shutdown");
     }
 
-    // -- Eager default-session init --
+    // -- Eager session init --
 
     #[test]
-    fn harness_startup_eagerly_initializes_default_session() {
+    fn harness_startup_eagerly_initializes_eager_session() {
         // Guards against the recurring "this looks like redundant work"
         // urge to lazy-ify session init. `echo_harness` calls
         // `Harness::new_with_agent`, which must eagerly initialize the
-        // default session before returning — see the design-choice
-        // comment in the constructor for why.
+        // session before returning — see the design-choice comment in
+        // the constructor for why.
         let td = TempDir::new().expect("tempdir");
         let sp = td.path().join("state");
         let h = echo_harness(&sp).expect("start");
 
         assert!(
-            h.initialized_sessions.contains(default_session_id()),
-            "eager init should mark default session as initialized at startup; \
+            h.initialized_sessions.contains("s1"),
+            "eager init should mark the bound session as initialized at startup; \
              `initialized_sessions` was {:?}",
             h.initialized_sessions
         );
