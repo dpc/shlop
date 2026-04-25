@@ -297,8 +297,12 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
     writer.flush()?;
 
     // Background socket reader — decodes events and sends them to
-    // a channel. Runs independently of the main thread.
-    let (event_tx, event_rx) = mpsc::channel::<Event>();
+    // a channel as `RendererCmd::Remote`. The input thread pushes
+    // `RendererCmd::Local` variants (e.g. `/diff` toggles) into the
+    // same channel so the renderer thread sees a single ordered
+    // stream and never needs to share state with the input thread.
+    let (event_tx, event_rx) = mpsc::channel::<RendererCmd>();
+    let socket_event_tx = event_tx.clone();
     let _socket_reader = std::thread::spawn(move || {
         let mut reader = EventReader::new(BufReader::new(read_stream));
         loop {
@@ -308,7 +312,7 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
                     // see the inner payload directly. The UI is a
                     // best-effort consumer and does not ack.
                     let (_log_id, inner) = event.peel_log();
-                    if event_tx.send(inner).is_err() {
+                    if socket_event_tx.send(RendererCmd::Remote(inner)).is_err() {
                         return;
                     }
                 }
@@ -336,6 +340,10 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
         SlashCommand::new(
             "/thinking",
             "Set reasoning effort: off, minimal, low, medium, high, xhigh (Shift+Tab to cycle)",
+        ),
+        SlashCommand::new(
+            "/diff",
+            "Toggle expanded vs compact display of file edit diffs",
         ),
     ];
     let theme = tau_themes::Theme::builtin();
@@ -372,8 +380,11 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
     let thinking_state = renderer.thinking_state();
     let _renderer = std::thread::spawn(move || {
         let mut renderer = renderer;
-        while let Ok(event) = renderer_rx.recv() {
-            renderer.handle(&event);
+        while let Ok(cmd) = renderer_rx.recv() {
+            match cmd {
+                RendererCmd::Remote(event) => renderer.handle(&event),
+                RendererCmd::ToggleDiffs => renderer.toggle_diffs_expanded(),
+            }
         }
     });
 
@@ -388,6 +399,7 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
         &mut active_session_id,
         thinking_state,
         theme,
+        event_tx,
     )?;
 
     // Send disconnect (best effort). Reason differs so the daemon's
@@ -437,12 +449,22 @@ enum InputLoopExit {
     Detach,
 }
 
+/// Commands the renderer thread drains from a single ordered channel.
+/// The socket reader pushes `Remote(event)`; the input loop pushes
+/// local UI commands like `ToggleDiffs`. Keeping it one channel
+/// removes the need for shared state between the two threads.
+enum RendererCmd {
+    Remote(Event),
+    ToggleDiffs,
+}
+
 fn terminal_input_loop(
     term: &mut tau_cli_term::HighTerm,
     writer: &mut EventWriter<BufWriter<UnixStream>>,
     session_id: &mut String,
     thinking_state: std::sync::Arc<std::sync::atomic::AtomicU8>,
     theme: tau_themes::Theme,
+    renderer_tx: std::sync::mpsc::Sender<RendererCmd>,
 ) -> Result<InputLoopExit, CliError> {
     // Cloned `TermHandle` so we can `print_output` for client-side
     // validation errors (`/thinking foo`, `/tree blah`) from this
@@ -528,6 +550,10 @@ fn terminal_input_loop(
                     print_local(
                         "/thinking <level> — one of: off, minimal, low, medium, high, xhigh",
                     );
+                    continue;
+                }
+                if text == "/diff" {
+                    let _ = renderer_tx.send(RendererCmd::ToggleDiffs);
                     continue;
                 }
                 if let Some(model) = text.strip_prefix("/model ") {
@@ -703,6 +729,19 @@ fn format_diff_chip(details: &CborValue) -> Option<String> {
     Some(format!("(+{added}/-{removed})"))
 }
 
+/// Decode a `DiffSummary` sub-tree from a tool result, if present and
+/// non-empty. Round-trips the CBOR sub-value through ciborium.
+fn extract_diff(details: &CborValue) -> Option<tau_proto::DiffSummary> {
+    let diff = cbor_field(details, "diff")?;
+    let mut buf = Vec::new();
+    ciborium::ser::into_writer(diff, &mut buf).ok()?;
+    let summary: tau_proto::DiffSummary = ciborium::de::from_reader(buf.as_slice()).ok()?;
+    if summary.added == 0 && summary.removed == 0 {
+        return None;
+    }
+    Some(summary)
+}
+
 /// Formats a tool call for display while it is running.
 /// Which status-suffix style the completion block should use.
 #[derive(Clone, Copy)]
@@ -715,6 +754,7 @@ enum ToolStatus {
 /// Decomposed tool-call label, painted as three themed spans:
 /// `<tool_name> <args> <suffix>`. `suffix` is `None` while the tool is
 /// still running (nothing to say yet about the outcome).
+#[derive(Clone)]
 struct ToolCallDisplay {
     tool_name: String,
     args: String,
@@ -973,6 +1013,97 @@ fn render_tool_block(
     StyledBlock::new(StyledText::from(spans))
 }
 
+/// Like [`render_tool_block`] but appends an expanded unified-diff
+/// body when `expanded` is true and `diff` has hunks. The first line
+/// is always the existing three-span tool header (with `+N/-M` chip);
+/// the body, if rendered, comes after a `\n` so `layout_lines` wraps
+/// each diff line independently.
+fn render_diff_tool_block(
+    theme: &tau_themes::Theme,
+    display: &ToolCallDisplay,
+    diff: &tau_proto::DiffSummary,
+    expanded: bool,
+) -> tau_cli_term::StyledBlock {
+    use tau_cli_term::resolve::resolve;
+    use tau_cli_term::{Span, StyledBlock, StyledText};
+    use tau_themes::names;
+
+    // Reuse the header from render_tool_block, then keep its spans so
+    // we can append diff lines below it.
+    let header = render_tool_block(theme, display);
+    let mut spans: Vec<Span> = header.content.spans().to_vec();
+
+    if !expanded || diff.hunks.is_empty() {
+        return StyledBlock::new(StyledText::from(spans));
+    }
+
+    let added_style = resolve(theme, names::DIFF_ADDED);
+    let removed_style = resolve(theme, names::DIFF_REMOVED);
+    let context_style = resolve(theme, names::DIFF_CONTEXT);
+    let header_style = resolve(theme, names::DIFF_HUNK_HEADER);
+    let added_inline_style = resolve(theme, names::DIFF_ADDED_INLINE);
+    let removed_inline_style = resolve(theme, names::DIFF_REMOVED_INLINE);
+
+    for hunk in &diff.hunks {
+        spans.push(Span::new("\n", context_style));
+        spans.push(Span::new(
+            format!(
+                "@@ -{},{} +{},{} @@",
+                hunk.old_start, hunk.old_count, hunk.new_start, hunk.new_count
+            ),
+            header_style,
+        ));
+        for line in &hunk.lines {
+            spans.push(Span::new("\n", context_style));
+            match line {
+                tau_proto::DiffLine::Equal { text } => {
+                    spans.push(Span::new(format!("  {text}"), context_style));
+                }
+                tau_proto::DiffLine::Add { text } => {
+                    spans.push(Span::new(format!("+ {text}"), added_style));
+                }
+                tau_proto::DiffLine::Remove { text } => {
+                    spans.push(Span::new(format!("- {text}"), removed_style));
+                }
+                tau_proto::DiffLine::Modify { old, new } => {
+                    spans.push(Span::new("- ".to_owned(), removed_style));
+                    push_segments(&mut spans, old, removed_style, removed_inline_style);
+                    spans.push(Span::new("\n".to_owned(), context_style));
+                    spans.push(Span::new("+ ".to_owned(), added_style));
+                    push_segments(&mut spans, new, added_style, added_inline_style);
+                }
+            }
+        }
+    }
+    StyledBlock::new(StyledText::from(spans))
+}
+
+fn push_segments(
+    spans: &mut Vec<tau_cli_term::Span>,
+    segments: &[tau_proto::DiffSegment],
+    base: tau_cli_term::Style,
+    inline: tau_cli_term::Style,
+) {
+    use tau_cli_term::Span;
+    for seg in segments {
+        match seg {
+            tau_proto::DiffSegment::Equal { text } => {
+                spans.push(Span::new(text.clone(), base));
+            }
+            // Within a Modify line, only the *changed* sub-slice on
+            // each side is meaningful. Hide the *other* side's slice
+            // so we don't double up (e.g. the - line shouldn't show
+            // the new tokens, only the old).
+            tau_proto::DiffSegment::Remove { text } => {
+                spans.push(Span::new(text.clone(), inline));
+            }
+            tau_proto::DiffSegment::Add { text } => {
+                spans.push(Span::new(text.clone(), inline));
+            }
+        }
+    }
+}
+
 /// Render a user `!`/`!!` shell block: a `shell <cmd>` header in the
 /// same three-span theme used for tool calls, with streaming output
 /// below in the default style.
@@ -1042,6 +1173,13 @@ struct EventRenderer {
     extension_blocks: HashMap<tau_proto::ExtensionInstanceId, tau_cli_term::BlockId>,
     /// Persistent status bar block showing the current model + thinking level.
     model_status_block: Option<tau_cli_term::BlockId>,
+    /// Live history of completed write/edit blocks plus the data
+    /// needed to re-render them. `/diff` flips `diffs_expanded` and
+    /// walks this list calling `set_block` so the entire transcript
+    /// switches mode at once.
+    diff_blocks: Vec<DiffBlockEntry>,
+    /// Global expand-diffs toggle.
+    diffs_expanded: bool,
     /// Current model id (cached so we can re-render the status bar
     /// when the thinking level changes, and vice versa).
     current_model: tau_proto::ModelId,
@@ -1050,6 +1188,15 @@ struct EventRenderer {
     current_thinking: tau_proto::ThinkingLevel,
     /// Shared thinking-level mirror for the input thread.
     thinking_state: std::sync::Arc<std::sync::atomic::AtomicU8>,
+}
+
+/// One completed file-mutation tool block. Held so `/diff` can
+/// re-render every diff in the chat history when the global
+/// expand toggle flips.
+struct DiffBlockEntry {
+    block_id: tau_cli_term::BlockId,
+    display: ToolCallDisplay,
+    diff: tau_proto::DiffSummary,
 }
 
 /// In-flight state for a user `!`/`!!` shell block.
@@ -1079,6 +1226,8 @@ impl EventRenderer {
             shell_blocks: HashMap::new(),
             extension_blocks: HashMap::new(),
             model_status_block: None,
+            diff_blocks: Vec::new(),
+            diffs_expanded: false,
             current_model: tau_proto::ModelId::from(""),
             current_thinking: tau_proto::ThinkingLevel::Off,
             thinking_state: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(thinking_to_u8(
@@ -1091,6 +1240,23 @@ impl EventRenderer {
     /// input thread to read the current level for Shift+Tab cycling.
     fn thinking_state(&self) -> std::sync::Arc<std::sync::atomic::AtomicU8> {
         self.thinking_state.clone()
+    }
+
+    /// Flip the global expand-diffs flag and re-render every diff
+    /// block in the chat history so the entire transcript switches
+    /// mode at once.
+    fn toggle_diffs_expanded(&mut self) {
+        self.diffs_expanded = !self.diffs_expanded;
+        for entry in &self.diff_blocks {
+            let block = render_diff_tool_block(
+                &self.theme,
+                &entry.display,
+                &entry.diff,
+                self.diffs_expanded,
+            );
+            self.handle.set_block(entry.block_id, block);
+        }
+        self.handle.redraw();
     }
 
     fn render_model_status(&mut self) {
@@ -1214,8 +1380,19 @@ impl EventRenderer {
                     self.handle.remove_block(bid);
                 }
                 let display = format_tool_completion(&result.tool_name, &result.result, None);
-                self.handle
-                    .print_output(render_tool_block(&self.theme, &display));
+                if let Some(diff) = extract_diff(&result.result) {
+                    let block =
+                        render_diff_tool_block(&self.theme, &display, &diff, self.diffs_expanded);
+                    let bid = self.handle.print_output(block);
+                    self.diff_blocks.push(DiffBlockEntry {
+                        block_id: bid,
+                        display,
+                        diff,
+                    });
+                } else {
+                    self.handle
+                        .print_output(render_tool_block(&self.theme, &display));
+                }
             }
             Event::ToolError(error) => {
                 if let Some(bid) = self.tool_blocks.remove(error.call_id.as_str()) {

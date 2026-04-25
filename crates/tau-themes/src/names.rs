@@ -42,3 +42,17 @@ pub const PROMPT_MARKER: &str = "prompt.marker";
 
 // -- Banner --
 pub const BANNER_ACCENT: &str = "banner.accent";
+
+// -- Diffs --
+//
+// File-mutation tools (`write`, `edit`) attach a structured
+// `DiffSummary` to their result. The renderer paints each hunk line
+// with a tag-specific style; intra-line `Modify` segments use the
+// inline variants so changed tokens pop out of the surrounding
+// (otherwise red/green) line.
+pub const DIFF_ADDED: &str = "diff.added";
+pub const DIFF_REMOVED: &str = "diff.removed";
+pub const DIFF_CONTEXT: &str = "diff.context";
+pub const DIFF_HUNK_HEADER: &str = "diff.hunk_header";
+pub const DIFF_ADDED_INLINE: &str = "diff.added.inline";
+pub const DIFF_REMOVED_INLINE: &str = "diff.removed.inline";
