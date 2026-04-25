@@ -246,7 +246,7 @@ pub fn github_copilot_token(github_token: &str) -> Result<OAuthTokens, io::Error
         .set("Authorization", &format!("Bearer {github_token}"))
         .set("Accept", "application/json")
         .call()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        .map_err(|e| io::Error::other(e.to_string()))?;
 
     let json = read_json(resp)?;
 
@@ -275,7 +275,7 @@ fn post_form(url: &str, body: &str) -> Result<serde_json::Value, io::Error> {
     let resp = ureq::post(url)
         .set("Content-Type", "application/x-www-form-urlencoded")
         .send_string(body)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        .map_err(|e| io::Error::other(e.to_string()))?;
     read_json(resp)
 }
 
@@ -290,7 +290,7 @@ fn post_form_with_accept(
         .set("Content-Type", "application/x-www-form-urlencoded")
         .set("Accept", accept)
         .send_string(body)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        .map_err(|e| io::Error::other(e.to_string()))?;
     read_json(resp)
 }
 

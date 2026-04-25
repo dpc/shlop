@@ -107,7 +107,7 @@ string_newtype!(/// Identifier correlating a user-initiated `!`/`!!` shell
 
 /// Tool name: must be non-empty and contain only ASCII alphanumerics or
 /// underscores (`[a-zA-Z0-9_]+`).
-#[derive(Clone, Debug, Eq, PartialEq, Hash, serde::Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash, serde::Serialize, Default)]
 #[serde(transparent)]
 pub struct ToolName(String);
 
@@ -122,7 +122,7 @@ impl ToolName {
     /// Try to create a `ToolName`, returning `None` if invalid.
     pub fn try_new(s: impl Into<String>) -> Option<Self> {
         let s = s.into();
-        Self::is_valid(&s).then(|| Self(s))
+        Self::is_valid(&s).then_some(Self(s))
     }
 
     pub fn as_str(&self) -> &str {
@@ -137,14 +137,6 @@ impl ToolName {
 
     fn is_valid(s: &str) -> bool {
         !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-    }
-}
-
-impl Default for ToolName {
-    fn default() -> Self {
-        // Default is used by serde/ciborium for missing fields; an empty
-        // ToolName will fail validation at the boundary where it matters.
-        Self(String::new())
     }
 }
 

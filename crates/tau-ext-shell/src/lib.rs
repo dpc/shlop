@@ -1011,21 +1011,13 @@ fn edit_file(arguments: &CborValue) -> Result<CborValue, String> {
             .ok_or_else(|| "each edit must have a string newText".to_owned())?;
 
         let Some(start) = original.find(old_text) else {
-            return Err(format!(
-                "oldText not found in {}: {:?}",
-                path_buf.display(),
-                truncate(old_text, 80)
-            ));
+            return Err("not found".to_owned());
         };
         let end = start + old_text.len();
 
         // Check uniqueness: there should be no second match.
         if original[start + 1..].contains(old_text) {
-            return Err(format!(
-                "oldText matches multiple locations in {}: {:?}",
-                path_buf.display(),
-                truncate(old_text, 80)
-            ));
+            return Err("ambiguous match".to_owned());
         }
 
         replacements.push((start, end, new_text));
@@ -1040,7 +1032,7 @@ fn edit_file(arguments: &CborValue) -> Result<CborValue, String> {
         // After descending sort: pair[0].start >= pair[1].start.
         // Overlap if pair[1].end > pair[0].start (pair[1] is earlier in file).
         if pair[1].1 > pair[0].0 {
-            return Err("edits overlap — merge nearby changes into one edit".to_owned());
+            return Err("overlapping edits".to_owned());
         }
     }
 
@@ -1066,17 +1058,6 @@ fn edit_file(arguments: &CborValue) -> Result<CborValue, String> {
         ),
         (CborValue::Text("diff".to_owned()), encode_diff(&diff)),
     ]))
-}
-
-fn truncate(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        return s;
-    }
-    let mut end = max;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
 }
 
 // ---------------------------------------------------------------------------
@@ -2293,6 +2274,57 @@ mod tests {
     }
 
     #[test]
+    fn edit_errors_use_short_reasons() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let file_path = tempdir.path().join("edit.txt");
+        fs::write(&file_path, "hello\nworld\n").expect("write");
+
+        let (mut reader, mut writer) = spawn_extension();
+        drain_startup(&mut reader);
+
+        writer
+            .write_event(&Event::ToolInvoke(ToolInvoke {
+                call_id: "call-1".into(),
+                tool_name: EDIT_TOOL_NAME.into(),
+                arguments: CborValue::Map(vec![
+                    (
+                        CborValue::Text("path".to_owned()),
+                        CborValue::Text(file_path.display().to_string()),
+                    ),
+                    (
+                        CborValue::Text("edits".to_owned()),
+                        CborValue::Array(vec![CborValue::Map(vec![
+                            (
+                                CborValue::Text("oldText".to_owned()),
+                                CborValue::Text("missing".to_owned()),
+                            ),
+                            (
+                                CborValue::Text("newText".to_owned()),
+                                CborValue::Text("x".to_owned()),
+                            ),
+                        ])]),
+                    ),
+                ]),
+            }))
+            .expect("invoke");
+        writer.flush().expect("flush");
+
+        let error = reader.read_event().expect("read").expect("error");
+        let Event::ToolError(error) = error else {
+            panic!("expected tool error");
+        };
+        assert_eq!(error.tool_name, EDIT_TOOL_NAME);
+        assert_eq!(error.message, "not found");
+
+        writer
+            .write_event(&Event::LifecycleDisconnect(
+                tau_proto::LifecycleDisconnect { reason: None },
+            ))
+            .expect("disconnect");
+        writer.flush().expect("flush");
+    }
+
+    #[test]
     fn extension_finds_files() {
         let tempdir = TempDir::new().expect("tempdir");
         fs::create_dir_all(tempdir.path().join("src/nested")).expect("mkdir");
@@ -2666,7 +2698,10 @@ mod tests {
                 CborValue::Integer(0.into()),
             ),
         ]);
-        assert_eq!(read_file(&args).unwrap_err(), "start_line must be >= 1");
+        assert_eq!(
+            read_file(&args).expect_err("start_line=0 should fail"),
+            "start_line must be >= 1"
+        );
 
         let args = CborValue::Map(vec![
             (
@@ -2678,7 +2713,10 @@ mod tests {
                 CborValue::Integer(0.into()),
             ),
         ]);
-        assert_eq!(read_file(&args).unwrap_err(), "line_count must be >= 1");
+        assert_eq!(
+            read_file(&args).expect_err("line_count=0 should fail"),
+            "line_count must be >= 1"
+        );
     }
 
     #[test]

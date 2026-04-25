@@ -804,6 +804,17 @@ fn info_suffix(text: String) -> ToolSuffixSegment {
     tool_suffix(text, ToolStatus::Info)
 }
 
+fn ok_suffix() -> ToolSuffixSegment {
+    tool_suffix("ok".to_owned(), ToolStatus::Success)
+}
+
+fn err_suffix(message: Option<&str>) -> ToolSuffixSegment {
+    match message {
+        Some(msg) if !msg.is_empty() => tool_suffix(format!("err: {msg}"), ToolStatus::Error),
+        _ => tool_suffix("err".to_owned(), ToolStatus::Error),
+    }
+}
+
 fn output_stats_suffix(text: &str) -> ToolSuffixSegment {
     info_suffix(format!(
         "({} lines, {} bytes)",
@@ -812,13 +823,12 @@ fn output_stats_suffix(text: &str) -> ToolSuffixSegment {
     ))
 }
 
-/// Error-path display: `<tool_name> <args>` with a `": <msg>"`
-/// status suffix in the error style. Shared by every tool.
+/// Error-path display: `<tool_name> <args> <err>`.
 fn format_tool_error(tool_name: &str, args: String, error_message: &str) -> ToolCallDisplay {
     ToolCallDisplay {
         tool_name: tool_name.to_owned(),
         args,
-        suffixes: vec![tool_suffix(format!(": {error_message}"), ToolStatus::Error)],
+        suffixes: vec![err_suffix(Some(error_message))],
     }
 }
 
@@ -839,7 +849,7 @@ fn format_tool_completion(
                 ToolCallDisplay {
                     tool_name: "read".into(),
                     args: path,
-                    suffixes: vec![output_stats_suffix(&content)],
+                    suffixes: vec![output_stats_suffix(&content), ok_suffix()],
                 }
             }
         }
@@ -857,7 +867,7 @@ fn format_tool_completion(
                 ToolCallDisplay {
                     tool_name: "write".into(),
                     args: path,
-                    suffixes: vec![tool_suffix(suffix, ToolStatus::Success)],
+                    suffixes: vec![info_suffix(suffix), ok_suffix()],
                 }
             }
         }
@@ -873,7 +883,7 @@ fn format_tool_completion(
                 ToolCallDisplay {
                     tool_name: "edit".into(),
                     args: path,
-                    suffixes: vec![tool_suffix(suffix, ToolStatus::Info)],
+                    suffixes: vec![info_suffix(suffix), ok_suffix()],
                 }
             }
         }
@@ -888,7 +898,7 @@ fn format_tool_completion(
                 ToolCallDisplay {
                     tool_name: "find".into(),
                     args,
-                    suffixes: vec![info_suffix(format!("({count} matches)"))],
+                    suffixes: vec![info_suffix(format!("({count} matches)")), ok_suffix()],
                 }
             }
         }
@@ -907,15 +917,10 @@ fn format_tool_completion(
                 let status = cbor_int_field(details, "status");
                 let mut suffixes = vec![output_stats_suffix(&output)];
                 suffixes.push(match status {
-                    Some(code) => tool_suffix(
-                        format!("[{code}]"),
-                        if code == 0 {
-                            ToolStatus::Success
-                        } else {
-                            ToolStatus::Info
-                        },
-                    ),
-                    None => info_suffix("[?]".to_owned()),
+                    Some(0) => ok_suffix(),
+                    Some(1) => tool_suffix("ok: no matches".to_owned(), ToolStatus::Success),
+                    Some(code) => err_suffix(Some(&code.to_string())),
+                    None => info_suffix("ok?".to_owned()),
                 });
                 ToolCallDisplay {
                     tool_name: "grep".into(),
@@ -933,7 +938,7 @@ fn format_tool_completion(
                 ToolCallDisplay {
                     tool_name: "ls".into(),
                     args: path,
-                    suffixes: vec![info_suffix(format!("({count} entries)"))],
+                    suffixes: vec![info_suffix(format!("({count} entries)")), ok_suffix()],
                 }
             }
         }
@@ -945,7 +950,7 @@ fn format_tool_completion(
                 ToolCallDisplay {
                     tool_name: "skill".into(),
                     args: name,
-                    suffixes: vec![info_suffix("loaded".to_owned())],
+                    suffixes: vec![info_suffix("loaded".to_owned()), ok_suffix()],
                 }
             }
         }
@@ -953,8 +958,8 @@ fn format_tool_completion(
             tool_name: tool_name.to_owned(),
             args: String::new(),
             suffixes: vec![match error_message {
-                Some(msg) => tool_suffix(format!(": {msg}"), ToolStatus::Error),
-                None => info_suffix("done".to_owned()),
+                Some(msg) => err_suffix(Some(msg)),
+                None => ok_suffix(),
             }],
         },
     }
@@ -962,8 +967,10 @@ fn format_tool_completion(
 
 fn format_shell_completion(details: &CborValue, error_message: Option<&str>) -> ToolCallDisplay {
     let cmd = cbor_text_field(details, "command").unwrap_or_default();
-    if let Some(msg) = error_message {
-        return format_tool_error("shell", cmd, msg);
+    if !matches!(details, CborValue::Map(_)) {
+        if let Some(msg) = error_message {
+            return format_tool_error("shell", cmd, msg);
+        }
     }
 
     let stdout = cbor_text_field(details, "stdout").unwrap_or_default();
@@ -980,15 +987,9 @@ fn format_shell_completion(details: &CborValue, error_message: Option<&str>) -> 
     let mut suffixes = Vec::new();
     suffixes.push(output_stats_suffix(&combined));
     suffixes.push(match status {
-        Some(code) => tool_suffix(
-            format!("[{code}]"),
-            if code == 0 {
-                ToolStatus::Success
-            } else {
-                ToolStatus::Error
-            },
-        ),
-        None => info_suffix("[?]".to_owned()),
+        Some(0) => ok_suffix(),
+        Some(code) => err_suffix(Some(&code.to_string())),
+        None => info_suffix("ok?".to_owned()),
     });
     ToolCallDisplay {
         tool_name: "shell".into(),
@@ -2141,8 +2142,11 @@ mod tests {
         assert_eq!(grep.suffixes.len(), 2);
         assert_eq!(grep.suffixes[0].text, "(2 lines, 4 bytes)");
         assert!(matches!(grep.suffixes[0].status, super::ToolStatus::Info));
-        assert_eq!(grep.suffixes[1].text, "[1]");
-        assert!(matches!(grep.suffixes[1].status, super::ToolStatus::Info));
+        assert_eq!(grep.suffixes[1].text, "ok: no matches");
+        assert!(matches!(
+            grep.suffixes[1].status,
+            super::ToolStatus::Success
+        ));
 
         let grep_ok_details = CborValue::Map(vec![
             (
@@ -2160,7 +2164,7 @@ mod tests {
             ),
         ]);
         let grep_ok = super::format_tool_completion("grep", &grep_ok_details, None);
-        assert_eq!(grep_ok.suffixes[1].text, "[0]");
+        assert_eq!(grep_ok.suffixes[1].text, "ok");
         assert!(matches!(
             grep_ok.suffixes[1].status,
             super::ToolStatus::Success
@@ -2191,9 +2195,25 @@ mod tests {
         assert_eq!(shell.suffixes.len(), 2);
         assert_eq!(shell.suffixes[0].text, "(1 lines, 3 bytes)");
         assert!(matches!(shell.suffixes[0].status, super::ToolStatus::Info));
-        assert_eq!(shell.suffixes[1].text, "[7]");
+        assert_eq!(shell.suffixes[1].text, "err: 7");
         assert!(matches!(shell.suffixes[1].status, super::ToolStatus::Error));
 
+        let shell_error = super::format_tool_completion(
+            "shell",
+            &shell_details,
+            Some("command exited with status 7"),
+        );
+        assert_eq!(shell_error.suffixes.len(), 2);
+        assert_eq!(shell_error.suffixes[0].text, "(1 lines, 3 bytes)");
+        assert!(matches!(
+            shell_error.suffixes[0].status,
+            super::ToolStatus::Info
+        ));
+        assert_eq!(shell_error.suffixes[1].text, "err: 7");
+        assert!(matches!(
+            shell_error.suffixes[1].status,
+            super::ToolStatus::Error
+        ));
     }
 
     #[test]
@@ -2218,9 +2238,14 @@ mod tests {
             ),
         ]);
         let edit = super::format_tool_completion("edit", &edit_details, None);
-        assert_eq!(edit.suffixes.len(), 1);
+        assert_eq!(edit.suffixes.len(), 2);
         assert_eq!(edit.suffixes[0].text, "(+2/-1)");
         assert!(matches!(edit.suffixes[0].status, super::ToolStatus::Info));
+        assert_eq!(edit.suffixes[1].text, "ok");
+        assert!(matches!(
+            edit.suffixes[1].status,
+            super::ToolStatus::Success
+        ));
     }
 
     /// Reproduces the user-reported bug: send 3 prompts during the
