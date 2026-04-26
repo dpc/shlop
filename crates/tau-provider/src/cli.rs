@@ -509,17 +509,28 @@ fn update_or_print_models_json5(
 
         if update {
             let path = path.expect("checked above");
-            write_provider_to_models_json5(&path, name, entry)?;
-            eprintln!("Updated: {}", path.display());
-            return Ok(());
+            match write_provider_to_models_json5(&path, name, entry) {
+                Ok(()) => {
+                    eprintln!("Updated: {}", path.display());
+                    return Ok(());
+                }
+                Err(e) => {
+                    eprintln!("Failed to update {}: {e}", path.display());
+                    eprintln!("Falling back to printing the entry instead.");
+                }
+            }
         }
     }
 
-    // Fall back: print just the provider entry for manual pasting.
+    print_provider_entry(name, entry);
+    Ok(())
+}
+
+/// Print the provider entry for the user to paste into models.json5.
+fn print_provider_entry(name: &str, entry: &serde_json::Value) {
     let inner = serde_json::to_string_pretty(entry).unwrap_or_default();
     eprintln!("\n--- Add this inside \"providers\" in ~/.config/tau/models.json5 ---\n");
     eprintln!("\"{name}\": {inner}");
-    Ok(())
 }
 
 /// Read existing models.json5, insert the provider, and atomically
