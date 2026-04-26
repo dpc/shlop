@@ -878,10 +878,10 @@ fn layout_all(st: &SharedState) -> LayoutAll {
         }
     }
 
-    let left_chars = st.left_prompt.char_count();
-    let cursor_chars = left_chars + char_count_for_bytes(&st.buffer, st.cursor);
-    let cursor_row = above_end + cursor_chars / width;
-    let cursor_col = cursor_chars % width;
+    let left_cols = st.left_prompt.char_count();
+    let (buffer_cursor_row, cursor_col) =
+        buffer_position_for_byte(&st.buffer, st.cursor, width, left_cols);
+    let cursor_row = above_end + buffer_cursor_row;
 
     all_lines.extend(input_lines);
     layout_id_list(&st.suggestions, &st.blocks, width, &mut all_lines);
@@ -1102,13 +1102,10 @@ fn full_render(
 // --- Helpers ---
 
 fn move_cursor_vertical(st: &SharedState, delta: isize) -> Option<usize> {
-    use unicode_width::UnicodeWidthChar;
-
-    let width = st.width;
+    let width = st.width.max(1);
     let left_cols = st.left_prompt.char_count();
-    let cursor_cols = left_cols + char_count_for_bytes(&st.buffer, st.cursor);
-    let current_row = cursor_cols / width;
-    let current_col = cursor_cols % width;
+    let (current_row, current_col) =
+        buffer_position_for_byte(&st.buffer, st.cursor, width, left_cols);
 
     let target_row = current_row as isize + delta;
     if target_row < 0 {
@@ -1116,24 +1113,18 @@ fn move_cursor_vertical(st: &SharedState, delta: isize) -> Option<usize> {
     }
     let target_row = target_row as usize;
 
-    let total_cols: usize = left_cols
-        + st.buffer
-            .chars()
-            .map(|c| c.width().unwrap_or(0))
-            .sum::<usize>();
-    let max_row = if total_cols == 0 {
-        0
-    } else {
-        (total_cols.saturating_sub(1)) / width
-    };
-    if target_row > max_row {
+    let (max_row, _) = buffer_end_position(&st.buffer, width, left_cols);
+    if max_row < target_row {
         return None;
     }
 
-    let target_offset = (target_row * width + current_col).min(total_cols);
-    let target_buffer_cols = target_offset.saturating_sub(left_cols);
-    let new_cursor = col_offset_to_byte(&st.buffer, target_buffer_cols);
-    Some(new_cursor)
+    Some(byte_offset_for_buffer_position(
+        &st.buffer,
+        target_row,
+        current_col,
+        width,
+        left_cols,
+    ))
 }
 
 fn term_size() -> (usize, usize) {
@@ -1142,9 +1133,84 @@ fn term_size() -> (usize, usize) {
         .unwrap_or((80, 24))
 }
 
-fn char_count_for_bytes(s: &str, byte_pos: usize) -> usize {
+fn initial_buffer_position(initial_cols: usize, width: usize) -> (usize, usize) {
+    let width = width.max(1);
+    (initial_cols / width, initial_cols % width)
+}
+
+fn advance_buffer_position(row: &mut usize, col: &mut usize, ch: char, width: usize) {
     use unicode_width::UnicodeWidthChar;
-    s[..byte_pos].chars().map(|c| c.width().unwrap_or(0)).sum()
+
+    let width = width.max(1);
+    if ch == '\n' {
+        *row += 1;
+        *col = 0;
+        return;
+    }
+
+    let char_width = ch.width().unwrap_or(0);
+    if 0 < *col && width < *col + char_width {
+        *row += 1;
+        *col = 0;
+    }
+    *col += char_width;
+    if width <= *col {
+        *row += *col / width;
+        *col %= width;
+    }
+}
+
+fn buffer_position_for_byte(
+    s: &str,
+    byte_pos: usize,
+    width: usize,
+    initial_cols: usize,
+) -> (usize, usize) {
+    let mut pos = initial_buffer_position(initial_cols, width);
+    for (byte, ch) in s.char_indices() {
+        if byte_pos <= byte {
+            break;
+        }
+        advance_buffer_position(&mut pos.0, &mut pos.1, ch, width);
+    }
+    pos
+}
+
+fn buffer_end_position(s: &str, width: usize, initial_cols: usize) -> (usize, usize) {
+    buffer_position_for_byte(s, s.len(), width, initial_cols)
+}
+
+fn byte_offset_for_buffer_position(
+    s: &str,
+    target_row: usize,
+    target_col: usize,
+    width: usize,
+    initial_cols: usize,
+) -> usize {
+    let mut row_col = initial_buffer_position(initial_cols, width);
+
+    for (byte, ch) in s.char_indices() {
+        let (row, col) = row_col;
+        if target_row < row || (target_row == row && target_col <= col) {
+            return byte;
+        }
+        if ch == '\n' {
+            if target_row == row {
+                return byte;
+            }
+            advance_buffer_position(&mut row_col.0, &mut row_col.1, ch, width);
+            continue;
+        }
+
+        let mut next = row_col;
+        advance_buffer_position(&mut next.0, &mut next.1, ch, width);
+        if target_row < next.0 || (target_row == next.0 && target_col <= next.1) {
+            return byte + ch.len_utf8();
+        }
+        row_col = next;
+    }
+
+    s.len()
 }
 
 fn prev_char_boundary(s: &str, pos: usize) -> usize {
@@ -1161,19 +1227,6 @@ fn next_char_boundary(s: &str, pos: usize) -> usize {
         p += 1;
     }
     p
-}
-
-/// Converts a column offset (in terminal columns) to a byte offset.
-fn col_offset_to_byte(s: &str, target_cols: usize) -> usize {
-    use unicode_width::UnicodeWidthChar;
-    let mut cols = 0usize;
-    for (byte, ch) in s.char_indices() {
-        if cols >= target_cols {
-            return byte;
-        }
-        cols += ch.width().unwrap_or(0);
-    }
-    s.len()
 }
 
 #[cfg(test)]
@@ -1449,6 +1502,40 @@ mod tests {
     fn flush_redraws(handle: &TermHandle, buf: &SharedBuffer, parser: &mut vt100::Parser) {
         handle.redraw_sync();
         buf.drain_into(parser);
+    }
+
+    #[test]
+    fn multiline_buffer_layout_tracks_cursor_after_paste() {
+        let buf = SharedBuffer::new();
+        let mut parser = vt100::Parser::new(5, 10, 20);
+
+        let (_term, handle, _input_tx) =
+            Term::new_virtual(10, 5, "> ", Box::new(buf.clone()), CursorShape::Bar);
+
+        handle.set_buffer("abc\ndefghijkl".to_owned(), "abc\ndefghijkl".len());
+        flush_redraws(&handle, &buf, &mut parser);
+
+        assert_eq!(
+            vt100_rows(&parser, 10),
+            vec!["> abc", "defghijkl", "", "", ""]
+        );
+        assert_eq!(parser.screen().cursor_position(), (1, 9));
+    }
+
+    #[test]
+    fn multiline_buffer_vertical_cursor_motion_uses_visual_lines() {
+        let width = 10;
+        let left_cols = 2;
+        let text = "abc\ndefghijkl";
+
+        let (row, col) = buffer_position_for_byte(text, text.len(), width, left_cols);
+        assert_eq!((row, col), (1, 9));
+
+        let up = byte_offset_for_buffer_position(text, 0, 5, width, left_cols);
+        assert_eq!(up, 3);
+
+        let down = byte_offset_for_buffer_position(text, 1, 9, width, left_cols);
+        assert_eq!(down, text.len());
     }
 
     #[test]
