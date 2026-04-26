@@ -409,8 +409,17 @@ pub struct HarnessModelSelected {
 /// Current context usage for the selected model.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct HarnessContextUsageChanged {
-    /// Percentage of the context window currently used.
-    pub percent_used: u8,
+    /// Input tokens consumed by the most recent agent response, if the
+    /// provider reported it. `None` means usage has never been
+    /// reported for the current model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    /// Percentage of the context window currently used. `None` when
+    /// the model's context window is unknown (no `contextWindow` in
+    /// `models.json5` and the provider didn't expose one), so the UI
+    /// can fall back to showing raw token count instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub percent_used: Option<u8>,
 }
 
 /// Reasoning / "thinking" effort level. Maps to provider-specific

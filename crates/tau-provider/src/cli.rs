@@ -459,28 +459,43 @@ fn build_provider_entry(kind: &ProviderKind) -> serde_json::Value {
             "baseUrl": "http://localhost:11434/v1",
             "auth": "none",
             "api": "openai-completions",
-            "models": [{ "id": "llama3:70b" }],
+            "models": [{ "id": "llama3:70b", "contextWindow": 8192 }],
         }),
         ProviderKind::Openai => serde_json::json!({
             "auth": "api-key",
             "api": "openai-chat",
-            "models": [{ "id": "gpt-5.4" }, { "id": "gpt-5.4-mini" }, { "id": "o3-mini" }],
+            "models": [
+                { "id": "gpt-5.4", "contextWindow": 200000 },
+                { "id": "gpt-5.4-mini", "contextWindow": 200000 },
+                { "id": "o3-mini", "contextWindow": 200000 },
+            ],
         }),
         ProviderKind::OpenaiCodex => serde_json::json!({
             "auth": "openai-codex",
             "api": "openai-chat",
-            "models": [{ "id": "gpt-5.4" }, { "id": "gpt-5.4-mini" }, { "id": "o3-mini" }],
+            "models": [
+                { "id": "gpt-5.4", "contextWindow": 200000 },
+                { "id": "gpt-5.4-mini", "contextWindow": 200000 },
+                { "id": "o3-mini", "contextWindow": 200000 },
+            ],
         }),
         ProviderKind::Anthropic => serde_json::json!({
             "baseUrl": "https://api.anthropic.com/v1",
             "auth": "api-key",
             "api": "anthropic",
-            "models": [{ "id": "claude-opus-4-20250514" }, { "id": "claude-sonnet-4-20250514" }],
+            "models": [
+                { "id": "claude-opus-4-20250514", "contextWindow": 200000 },
+                { "id": "claude-sonnet-4-20250514", "contextWindow": 200000 },
+            ],
         }),
         ProviderKind::GithubCopilot => serde_json::json!({
             "auth": "github-copilot",
             "api": "openai-chat",
-            "models": [{ "id": "claude-sonnet-4.6" }, { "id": "gpt-5.4" }, { "id": "gemini-3-pro" }],
+            "models": [
+                { "id": "claude-sonnet-4.6", "contextWindow": 200000 },
+                { "id": "gpt-5.4", "contextWindow": 200000 },
+                { "id": "gemini-3-pro", "contextWindow": 1000000 },
+            ],
         }),
     }
 }

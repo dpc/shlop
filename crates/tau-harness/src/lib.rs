@@ -512,8 +512,13 @@ struct Harness {
     selected_model: ModelId,
     /// Currently selected reasoning effort level.
     selected_thinking_level: tau_proto::ThinkingLevel,
-    /// Percentage of the selected model's context window currently used.
-    context_percent_used: u8,
+    /// Input tokens consumed by the most recent agent response, if
+    /// the provider reported it. `None` until the first usage report
+    /// for the current model.
+    context_input_tokens: Option<u64>,
+    /// Percentage of the selected model's context window currently
+    /// used. `None` when the model's context window is unknown.
+    context_percent_used: Option<u8>,
     /// Provider/model registry, kept for runtime lookups (e.g.
     /// computing available thinking levels per current model).
     model_registry: tau_config::settings::ModelRegistry,
@@ -668,7 +673,8 @@ impl Harness {
             available_models,
             selected_model,
             selected_thinking_level,
-            context_percent_used: 0,
+            context_input_tokens: None,
+            context_percent_used: None,
             model_registry,
             discovered_skills: std::collections::HashMap::new(),
             discovered_agents_files: Vec::new(),
@@ -812,7 +818,8 @@ impl Harness {
             available_models,
             selected_model,
             selected_thinking_level,
-            context_percent_used: 0,
+            context_input_tokens: None,
+            context_percent_used: None,
             model_registry,
             discovered_skills: std::collections::HashMap::new(),
             discovered_agents_files: Vec::new(),
@@ -1247,7 +1254,8 @@ impl Harness {
                         self.selected_model.as_str(),
                         self.selected_thinking_level,
                     );
-                    self.context_percent_used = 0;
+                    self.context_input_tokens = None;
+                    self.context_percent_used = None;
                     self.publish_event(
                         None,
                         Event::HarnessModelSelected(HarnessModelSelected {
@@ -1261,6 +1269,7 @@ impl Harness {
                     self.publish_event(
                         None,
                         Event::HarnessContextUsageChanged(HarnessContextUsageChanged {
+                            input_tokens: self.context_input_tokens,
                             percent_used: self.context_percent_used,
                         }),
                     );
@@ -1672,6 +1681,7 @@ impl Harness {
             let _ = self.bus.send_to(client_id, None, selected_event);
         }
         let context_event = Event::HarnessContextUsageChanged(HarnessContextUsageChanged {
+            input_tokens: self.context_input_tokens,
             percent_used: self.context_percent_used,
         });
         if selector_matches_event(selectors, &context_event) {
@@ -2150,19 +2160,21 @@ impl Harness {
     }
 
     fn update_context_usage(&mut self, input_tokens: u64) {
-        let Some(context_window) =
-            model_context_window(&self.model_registry, self.selected_model.as_str())
-        else {
-            return;
-        };
-        let percent_used = context_percent_used(input_tokens, context_window);
-        if self.context_percent_used == percent_used {
+        let context_window =
+            model_context_window(&self.model_registry, self.selected_model.as_str());
+        let percent_used = context_window.map(|w| context_percent_used(input_tokens, w));
+        let input_tokens = Some(input_tokens);
+        if self.context_input_tokens == input_tokens && self.context_percent_used == percent_used {
             return;
         }
+        self.context_input_tokens = input_tokens;
         self.context_percent_used = percent_used;
         self.publish_event(
             None,
-            Event::HarnessContextUsageChanged(HarnessContextUsageChanged { percent_used }),
+            Event::HarnessContextUsageChanged(HarnessContextUsageChanged {
+                input_tokens,
+                percent_used,
+            }),
         );
     }
 

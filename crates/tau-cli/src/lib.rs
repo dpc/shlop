@@ -652,6 +652,24 @@ fn thinking_from_u8(value: u8) -> tau_proto::ThinkingLevel {
     }
 }
 
+/// Format the context-usage chip for the status bar. Three cases:
+/// - context window known → `" {percent}%/{window}"` (e.g. `" 6%/200k"`)
+/// - window unknown but token count reported → `" {tokens}/?"`
+/// - nothing known yet → empty string (chip suppressed)
+fn format_context_chip(
+    input_tokens: Option<u64>,
+    percent: Option<u8>,
+    window: Option<u64>,
+) -> String {
+    match (window, percent, input_tokens) {
+        (Some(w), Some(p), _) => format!(" {p}%/{}", format_token_count(w)),
+        // Window not configured — fall back to raw token count so the
+        // user can see usage exists and add `contextWindow` to fix it.
+        (None, _, Some(t)) => format!(" {}/?", format_token_count(t)),
+        _ => String::new(),
+    }
+}
+
 fn format_token_count(tokens: u64) -> String {
     if tokens < 1_000 {
         return tokens.to_string();
@@ -1307,8 +1325,12 @@ struct EventRenderer {
     /// Current thinking level. Mirrored into `thinking_state` so the
     /// input thread can read it for Shift+Tab cycling.
     current_thinking: tau_proto::ThinkingLevel,
-    /// Current model context usage percent.
-    current_context_percent: u8,
+    /// Current model context usage percent. `None` when the context
+    /// window is unknown for the selected model.
+    current_context_percent: Option<u8>,
+    /// Input tokens consumed by the most recent agent response. `None`
+    /// until the first usage report for the current model.
+    current_context_input_tokens: Option<u64>,
     /// Current model context window, in tokens, if known.
     current_context_window: Option<u64>,
     /// Shared thinking-level mirror for the input thread.
@@ -1355,7 +1377,8 @@ impl EventRenderer {
             diffs_expanded: false,
             current_model: tau_proto::ModelId::from(""),
             current_thinking: tau_proto::ThinkingLevel::Off,
-            current_context_percent: 0,
+            current_context_percent: None,
+            current_context_input_tokens: None,
             current_context_window: None,
             thinking_state: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(thinking_to_u8(
                 tau_proto::ThinkingLevel::Off,
@@ -1397,16 +1420,11 @@ impl EventRenderer {
             } else {
                 self.current_thinking.to_string()
             };
-            let context = self
-                .current_context_window
-                .map(|window| {
-                    format!(
-                        " {}%/{}",
-                        self.current_context_percent,
-                        format_token_count(window)
-                    )
-                })
-                .unwrap_or_default();
+            let context = format_context_chip(
+                self.current_context_input_tokens,
+                self.current_context_percent,
+                self.current_context_window,
+            );
             format!("{} ({level}){context}", self.current_model)
         };
         let block = themed_block(&self.theme, names::MODEL_STATUS, label);
@@ -1683,6 +1701,7 @@ impl EventRenderer {
                 self.render_model_status();
             }
             Event::HarnessContextUsageChanged(changed) => {
+                self.current_context_input_tokens = changed.input_tokens;
                 self.current_context_percent = changed.percent_used;
                 self.render_model_status();
             }
@@ -2416,6 +2435,28 @@ mod tests {
             edit_error.suffixes[0].status,
             super::ToolStatus::Error
         ));
+    }
+
+    #[test]
+    fn format_context_chip_picks_format_by_known_fields() {
+        // Both window and percent known → percent/window chip.
+        assert_eq!(
+            super::format_context_chip(Some(12_000), Some(6), Some(200_000)),
+            " 6%/200k",
+        );
+        // Window unknown, tokens reported → tokens/? fallback.
+        assert_eq!(
+            super::format_context_chip(Some(12_000), None, None),
+            " 12k/?",
+        );
+        // Window known but no usage report yet still shows the percent
+        // (which the harness initialized to 0 on model select).
+        assert_eq!(
+            super::format_context_chip(None, Some(0), Some(200_000)),
+            " 0%/200k",
+        );
+        // Nothing known → empty.
+        assert_eq!(super::format_context_chip(None, None, None), "");
     }
 
     #[test]
