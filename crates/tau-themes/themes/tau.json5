@@ -28,6 +28,7 @@
 
     // -- System --
     "system.info":          { fg: "dark_grey" },
+    "system.info.important": { fg: "red", bold: true },
     "system.disconnect":    { fg: "red", bold: true },
 
     // -- Model status --

@@ -27,6 +27,7 @@ pub const EXTENSION_LIFECYCLE: &str = "extension.lifecycle";
 
 // -- System --
 pub const SYSTEM_INFO: &str = "system.info";
+pub const SYSTEM_INFO_IMPORTANT: &str = "system.info.important";
 pub const SYSTEM_DISCONNECT: &str = "system.disconnect";
 
 // -- Model status --

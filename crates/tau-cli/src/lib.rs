@@ -1193,6 +1193,20 @@ fn render_shell_block(
 
 /// Event renderer. Maps session_prompt_id → block_id for in-place
 /// updates. No flags, no suppression — just ID-based lookups.
+fn render_harness_info(
+    theme: &tau_themes::Theme,
+    info: &tau_proto::HarnessInfo,
+) -> tau_cli_term::StyledBlock {
+    use tau_cli_term::resolve::themed_block;
+    use tau_themes::names;
+
+    let style_name = match info.level {
+        tau_proto::HarnessInfoLevel::Normal => names::SYSTEM_INFO,
+        tau_proto::HarnessInfoLevel::Important => names::SYSTEM_INFO_IMPORTANT,
+    };
+    themed_block(theme, style_name, &info.message)
+}
+
 struct EventRenderer {
     handle: tau_cli_term::TermHandle,
     completion_data: tau_cli_term::CompletionData,
@@ -1584,11 +1598,8 @@ impl EventRenderer {
                 ));
             }
             Event::HarnessInfo(info) => {
-                self.handle.print_output(themed_block(
-                    &self.theme,
-                    names::SYSTEM_INFO,
-                    &info.message,
-                ));
+                self.handle
+                    .print_output(render_harness_info(&self.theme, info));
             }
             Event::HarnessModelsAvailable(models) => {
                 let items: Vec<tau_cli_term::CompletionItem> = models

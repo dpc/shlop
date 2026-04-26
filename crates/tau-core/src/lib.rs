@@ -2379,6 +2379,8 @@ mod tests {
             Some("conn-1".into()),
             Event::HarnessInfo(tau_proto::HarnessInfo {
                 message: "hello".to_owned(),
+
+                level: tau_proto::HarnessInfoLevel::Normal,
             }),
         );
         assert_eq!(seq, 0);
@@ -2398,18 +2400,24 @@ mod tests {
             None,
             Event::HarnessInfo(tau_proto::HarnessInfo {
                 message: "a".to_owned(),
+
+                level: tau_proto::HarnessInfoLevel::Normal,
             }),
         );
         log.append(
             None,
             Event::HarnessInfo(tau_proto::HarnessInfo {
                 message: "b".to_owned(),
+
+                level: tau_proto::HarnessInfoLevel::Normal,
             }),
         );
         log.append(
             None,
             Event::HarnessInfo(tau_proto::HarnessInfo {
                 message: "c".to_owned(),
+
+                level: tau_proto::HarnessInfoLevel::Normal,
             }),
         );
 
@@ -2432,6 +2440,8 @@ mod tests {
                 None,
                 Event::HarnessInfo(tau_proto::HarnessInfo {
                     message: "delayed".to_owned(),
+
+                    level: tau_proto::HarnessInfoLevel::Normal,
                 }),
             );
         });
@@ -2448,6 +2458,8 @@ mod tests {
             None,
             Event::HarnessInfo(tau_proto::HarnessInfo {
                 message: "already here".to_owned(),
+
+                level: tau_proto::HarnessInfoLevel::Normal,
             }),
         );
 
@@ -2463,6 +2475,8 @@ mod tests {
                 None,
                 Event::HarnessInfo(tau_proto::HarnessInfo {
                     message: format!("msg-{i}"),
+
+                    level: tau_proto::HarnessInfoLevel::Normal,
                 }),
             );
         }
@@ -2496,6 +2510,8 @@ mod tests {
             None,
             Event::HarnessInfo(tau_proto::HarnessInfo {
                 message: "wake all".to_owned(),
+
+                level: tau_proto::HarnessInfoLevel::Normal,
             }),
         );
 

@@ -1293,6 +1293,8 @@ impl Harness {
                         None,
                         Event::HarnessInfo(tau_proto::HarnessInfo {
                             message: format!("unknown model: {}", select.model),
+
+                            level: tau_proto::HarnessInfoLevel::Normal,
                         }),
                     );
                 }
@@ -1598,16 +1600,27 @@ impl Harness {
     fn check_config_exists(&mut self) {
         if let Some(dir) = tau_config::settings::config_dir() {
             if !dir.join("harness.json5").exists() {
-                self.emit_info("no config found; run `tau init` to create sample config files");
+                self.emit_info_important(
+                    "no config found; run `tau init` to create sample config files",
+                );
             }
         }
     }
 
     fn emit_info(&mut self, message: &str) {
+        self.emit_info_with_level(message, tau_proto::HarnessInfoLevel::Normal);
+    }
+
+    fn emit_info_important(&mut self, message: &str) {
+        self.emit_info_with_level(message, tau_proto::HarnessInfoLevel::Important);
+    }
+
+    fn emit_info_with_level(&mut self, message: &str, level: tau_proto::HarnessInfoLevel) {
         self.publish_event(
             Some("harness"),
             Event::HarnessInfo(tau_proto::HarnessInfo {
                 message: message.to_owned(),
+                level,
             }),
         );
     }

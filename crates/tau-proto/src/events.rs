@@ -372,10 +372,21 @@ pub struct LifecycleDisconnect {
 // Harness informational messages
 // ---------------------------------------------------------------------------
 
+/// Severity of a harness informational message.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessInfoLevel {
+    #[default]
+    Normal,
+    Important,
+}
+
 /// An informational message from the harness displayed to the user.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct HarnessInfo {
     pub message: String,
+    #[serde(default)]
+    pub level: HarnessInfoLevel,
 }
 
 /// The harness announces all available models as `provider/model` strings.
