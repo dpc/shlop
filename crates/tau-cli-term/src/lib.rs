@@ -150,7 +150,7 @@ impl HighTerm {
                 RawEvent::ExternalEditor => {
                     self.completer.dismiss(&self.handle);
                     self.run_external_editor();
-                    self.handle.redraw();
+                    self.handle.redraw_sync();
                     return Ok(Event::BufferChanged);
                 }
             }
