@@ -1,5 +1,5 @@
 {
-  description = "shlop";
+  description = "tau-agent";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
@@ -18,7 +18,7 @@
       system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
-        projectName = "shlop";
+        projectName = "tau-agent";
 
         flakeboxLib = flakebox.lib.mkLib pkgs {
           config = {
@@ -67,9 +67,9 @@
               cargoArtifacts = workspaceDeps;
             };
 
-            shlop-cli = craneLib.buildPackage {
+            tau-cli = craneLib.buildPackage {
               cargoArtifacts = workspaceDeps;
-              cargoExtraArgs = "-p shlop-cli";
+              cargoExtraArgs = "-p tau-cli";
             };
           }
         );
@@ -80,8 +80,8 @@
         '';
       in
       {
-        packages.default = multiBuild.shlop-cli;
-        packages.shlop-cli = multiBuild.shlop-cli;
+        packages.default = multiBuild.tau-cli;
+        packages.tau-cli = multiBuild.tau-cli;
         packages.site = site;
 
         ci = {
