@@ -82,6 +82,11 @@ struct SharedState {
     /// blocking on recv).
     sync_requested: u64,
     sync_completed: u64,
+    /// Raw escape sequences (or any other byte string) waiting to be
+    /// written by the redraw thread on its next pass. Producers push
+    /// here via `TermHandle::print_terminal_escape` to ensure their
+    /// bytes don't interleave with the active frame's render output.
+    pending_raw: Vec<String>,
 }
 
 impl SharedState {
@@ -332,6 +337,16 @@ impl TermHandle {
     pub fn set_right_prompt(&self, text: impl Into<StyledText>) {
         self.lock().right_prompt = text.into();
     }
+
+    /// Queues a raw byte string (typically a terminal escape sequence
+    /// that doesn't change visible output, like an OSC user-var
+    /// notification) to be written by the redraw thread on its next
+    /// pass. Goes through the redraw loop so the bytes never
+    /// interleave with an in-flight frame.
+    pub fn print_terminal_escape(&self, sequence: impl Into<String>) {
+        self.lock().pending_raw.push(sequence.into());
+        self.redraw.notify();
+    }
 }
 
 /// Raw terminal events from the crossterm reader thread.
@@ -403,6 +418,7 @@ impl Term {
             invalidate_screen: false,
             sync_requested: 0,
             sync_completed: 0,
+            pending_raw: Vec::new(),
         }));
 
         let (redraw_tx, redraw_rx) = tau_blocking_notify_channel::channel();
@@ -481,6 +497,7 @@ impl Term {
             invalidate_screen: false,
             sync_requested: 0,
             sync_completed: 0,
+            pending_raw: Vec::new(),
         }));
 
         let (redraw_tx, redraw_rx) = tau_blocking_notify_channel::channel();
@@ -1032,9 +1049,23 @@ fn redraw_loop(
         // because a later bump to sync_requested may have arrived
         // with state changes we haven't read yet.
         let sync_gen = st.sync_requested;
+        let pending_raw = std::mem::take(&mut st.pending_raw);
 
         let layout = layout_all(&st);
         drop(st);
+
+        // Pending escape sequences: emit before the frame so they
+        // sit outside any synchronized-update bracket the renderer
+        // installs. SetUserVar and similar OSC sequences don't
+        // affect visible state, so ordering relative to the frame
+        // doesn't matter for correctness — putting them first just
+        // avoids any chance of interleaving with a deferred frame.
+        for seq in &pending_raw {
+            let _ = writer.write_all(seq.as_bytes());
+        }
+        if !pending_raw.is_empty() {
+            let _ = writer.flush();
+        }
 
         if force_full {
             // The terminal was clobbered by an external program

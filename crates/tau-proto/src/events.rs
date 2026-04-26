@@ -36,6 +36,10 @@ pub enum EventCategory {
     Shell,
     Session,
     Agent,
+    /// Terminal-output side effects directed at the UI: escape
+    /// sequences the UI should write straight through to its
+    /// terminal (notifications, OSC user-vars, etc.).
+    Term,
     /// Wire-level transport, used for the at-least-once `LogEvent` /
     /// `Ack` envelope.
     Wire,
@@ -57,6 +61,7 @@ impl EventCategory {
             Self::Shell => "shell",
             Self::Session => "session",
             Self::Agent => "agent",
+            Self::Term => "term",
             Self::Wire => "wire",
             Self::Other(s) => s.as_str(),
         }
@@ -75,6 +80,7 @@ impl EventCategory {
             "shell" => Self::Shell,
             "session" => Self::Session,
             "agent" => Self::Agent,
+            "term" => Self::Term,
             "wire" => Self::Wire,
             other => Self::Other(other.to_owned()),
         }
@@ -228,6 +234,9 @@ impl EventName {
     pub const UI_SWITCH_SESSION: Self = Self::from_static(EventCategory::Ui, "switch_session");
     pub const UI_TREE_REQUEST: Self = Self::from_static(EventCategory::Ui, "tree_request");
     pub const UI_NAVIGATE_TREE: Self = Self::from_static(EventCategory::Ui, "navigate_tree");
+
+    pub const TERM_OSC1337_SET_USER_VAR: Self =
+        Self::from_static(EventCategory::Term, "osc1337_set_user_var");
 
     pub const SHELL_COMMAND_PROGRESS: Self =
         Self::from_static(EventCategory::Shell, "command_progress");
@@ -847,6 +856,32 @@ pub struct ShellCommandFinished {
 }
 
 // ---------------------------------------------------------------------------
+// Term events — terminal-output side effects directed at the UI
+// ---------------------------------------------------------------------------
+
+/// Ask the UI to write an iTerm2 OSC 1337 `SetUserVar` escape sequence
+/// to its terminal. The terminal emulator interprets it as setting
+/// the named user variable (visible from terminal multiplexers and
+/// scripts watching status); the visible terminal output does not
+/// change. Useful for surfacing notifications, build status, or any
+/// other state to terminal-side tooling.
+///
+/// The UI base64-encodes `value` and emits the appropriate escape
+/// sequence form (plain, or `\x1bPtmux;...\x1b\\` wrapped when running
+/// inside `tmux`). Components without access to a terminal — or
+/// running through a UI that ignores the event — are no-ops.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct Osc1337SetUserVar {
+    /// User-variable name. Must be printable ASCII without `=` or
+    /// control characters; the UI does not validate this and passes
+    /// it through verbatim.
+    pub name: String,
+    /// Value to associate with `name`. Arbitrary bytes are fine — the
+    /// UI base64-encodes before transmission.
+    pub value: String,
+}
+
+// ---------------------------------------------------------------------------
 // Session events — facts from the harness session tracker
 // ---------------------------------------------------------------------------
 
@@ -1096,6 +1131,10 @@ pub enum Event {
     #[serde(rename = "ui.navigate_tree")]
     UiNavigateTree(UiNavigateTree),
 
+    // Term (terminal-output side effects)
+    #[serde(rename = "term.osc1337_set_user_var")]
+    Osc1337SetUserVar(Osc1337SetUserVar),
+
     // Shell (user-initiated)
     #[serde(rename = "shell.command_progress")]
     ShellCommandProgress(ShellCommandProgress),
@@ -1166,6 +1205,7 @@ impl Event {
             Self::UiSwitchSession(_) => EventName::UI_SWITCH_SESSION,
             Self::UiTreeRequest(_) => EventName::UI_TREE_REQUEST,
             Self::UiNavigateTree(_) => EventName::UI_NAVIGATE_TREE,
+            Self::Osc1337SetUserVar(_) => EventName::TERM_OSC1337_SET_USER_VAR,
             Self::ShellCommandProgress(_) => EventName::SHELL_COMMAND_PROGRESS,
             Self::ShellCommandFinished(_) => EventName::SHELL_COMMAND_FINISHED,
             Self::SessionPromptQueued(_) => EventName::SESSION_PROMPT_QUEUED,

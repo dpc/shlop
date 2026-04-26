@@ -411,7 +411,14 @@ impl SubscriptionPolicy for DefaultSubscriptionPolicy {
                 use tau_proto::EventCategory as C;
                 matches!(
                     category,
-                    C::Tool | C::Extension | C::Agent | C::Session | C::Ui | C::Harness | C::Shell
+                    C::Tool
+                        | C::Extension
+                        | C::Agent
+                        | C::Session
+                        | C::Ui
+                        | C::Harness
+                        | C::Shell
+                        | C::Term
                 )
             }
             for selector in selectors {

@@ -291,6 +291,7 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
                 EventSelector::Prefix("extension.".to_owned()),
                 EventSelector::Prefix("harness.".to_owned()),
                 EventSelector::Prefix("shell.".to_owned()),
+                EventSelector::Prefix("term.".to_owned()),
             ],
         }))
         .map_err(CliError::Encode)?;
@@ -667,6 +668,26 @@ fn format_context_chip(
         // user can see usage exists and add `contextWindow` to fix it.
         (None, _, Some(t)) => format!(" {}/?", format_token_count(t)),
         _ => String::new(),
+    }
+}
+
+/// Build the iTerm2 OSC 1337 `SetUserVar` escape sequence for the
+/// given (name, value) pair, with `value` base64-encoded.
+///
+/// When `in_tmux` is true the sequence is wrapped in
+/// `\x1bPtmux;...\x1b\\` and the inner ESC is doubled so tmux passes
+/// the OSC through to the outer terminal instead of consuming it.
+/// Mirrors the shape used by the `user-notification.sh` reference
+/// script. Caller is responsible for detecting tmux (typically by
+/// checking `$TMUX`).
+fn build_osc1337_set_user_var(name: &str, value: &str, in_tmux: bool) -> String {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+    let encoded = STANDARD.encode(value.as_bytes());
+    if in_tmux {
+        format!("\x1bPtmux;\x1b\x1b]1337;SetUserVar={name}={encoded}\x07\x1b\\")
+    } else {
+        format!("\x1b]1337;SetUserVar={name}={encoded}\x07")
     }
 }
 
@@ -1713,6 +1734,11 @@ impl EventRenderer {
                 );
                 self.render_model_status();
             }
+            Event::Osc1337SetUserVar(req) => {
+                let in_tmux = std::env::var_os("TMUX").is_some();
+                let seq = build_osc1337_set_user_var(&req.name, &req.value, in_tmux);
+                self.handle.print_terminal_escape(seq);
+            }
             Event::HarnessThinkingLevelsAvailable(avail) => {
                 let items: Vec<tau_cli_term::CompletionItem> = avail
                     .levels
@@ -2435,6 +2461,17 @@ mod tests {
             edit_error.suffixes[0].status,
             super::ToolStatus::Error
         ));
+    }
+
+    #[test]
+    fn build_osc1337_set_user_var_encodes_value_and_respects_tmux() {
+        let plain = super::build_osc1337_set_user_var("user-notification", "hello", false);
+        assert_eq!(plain, "\x1b]1337;SetUserVar=user-notification=aGVsbG8=\x07");
+        let wrapped = super::build_osc1337_set_user_var("user-notification", "hello", true);
+        assert_eq!(
+            wrapped,
+            "\x1bPtmux;\x1b\x1b]1337;SetUserVar=user-notification=aGVsbG8=\x07\x1b\\",
+        );
     }
 
     #[test]

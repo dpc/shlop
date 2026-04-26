@@ -9,6 +9,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+base64.workspace = true
 ciborium.workspace = true
 clap.workspace = true
 dirs.workspace = true
