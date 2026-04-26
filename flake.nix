@@ -1,5 +1,5 @@
 {
-  description = "tau-agent";
+  description = "tau";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
@@ -18,7 +18,7 @@
       system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
-        projectName = "tau-agent";
+        projectName = "tau";
 
         flakeboxLib = flakebox.lib.mkLib pkgs {
           config = {
@@ -67,9 +67,9 @@
               cargoArtifacts = workspaceDeps;
             };
 
-            tau-cli = craneLib.buildPackage {
+            tau = craneLib.buildPackage {
               cargoArtifacts = workspaceDeps;
-              cargoExtraArgs = "-p tau-cli";
+              cargoExtraArgs = "-p tau";
             };
           }
         );
@@ -80,8 +80,8 @@
         '';
       in
       {
-        packages.default = multiBuild.tau-cli;
-        packages.tau-cli = multiBuild.tau-cli;
+        packages.default = multiBuild.tau;
+        packages.tau = multiBuild.tau;
         packages.site = site;
 
         ci = {
