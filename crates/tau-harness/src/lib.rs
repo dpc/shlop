@@ -5212,6 +5212,55 @@ mod tests {
     }
 
     #[test]
+    fn linear_session_prompts_strictly_extend_previous_messages() {
+        let td = TempDir::new().expect("tempdir");
+        let sp = td.path().join("state");
+        let mut h = echo_harness(&sp).expect("start");
+        h.selected_model = "test/model".into();
+
+        h.store
+            .append_user_message("s1", "hello".to_owned())
+            .expect("append first user");
+
+        let spid1 = h.send_prompt_to_agent("s1");
+        let prompt1 = read_prompt_created(&h, &spid1);
+
+        h.handle_agent_response_finished(AgentResponseFinished {
+            session_prompt_id: spid1,
+            text: Some("hi".to_owned()),
+            tool_calls: Vec::new(),
+            input_tokens: None,
+            cached_tokens: None,
+        })
+        .expect("persist first agent response");
+
+        h.store
+            .append_user_message("s1", "again".to_owned())
+            .expect("append second user");
+
+        let spid2 = h.send_prompt_to_agent("s1");
+        let prompt2 = read_prompt_created(&h, &spid2);
+
+        assert_eq!(prompt2.system_prompt, prompt1.system_prompt);
+        assert_eq!(prompt2.tools, prompt1.tools);
+        assert_eq!(prompt2.model, prompt1.model);
+        assert_eq!(prompt2.effort, prompt1.effort);
+        assert!(
+            prompt1.messages.len() < prompt2.messages.len(),
+            "second prompt should strictly extend first: {} !< {}",
+            prompt1.messages.len(),
+            prompt2.messages.len()
+        );
+        assert_eq!(
+            &prompt2.messages[..prompt1.messages.len()],
+            prompt1.messages.as_slice(),
+            "second prompt must keep first prompt messages as an exact prefix"
+        );
+
+        h.shutdown().expect("shutdown");
+    }
+
+    #[test]
     fn skill_tool_reads_file_content() {
         let td = TempDir::new().expect("tempdir");
         let sp = td.path().join("state");
@@ -5339,5 +5388,22 @@ mod tests {
         );
         // Should not error — just emits a warning and discards.
         assert!(result.is_ok());
+    }
+
+    fn read_prompt_created(h: &Harness, spid: &SessionPromptId) -> SessionPromptCreated {
+        let mut cursor = 0;
+        loop {
+            let entry = h
+                .event_log
+                .get_next_from(cursor)
+                .expect("prompt event in log");
+            cursor = entry.seq + 1;
+            match entry.event {
+                Event::SessionPromptCreated(prompt) if &prompt.session_prompt_id == spid => {
+                    return prompt;
+                }
+                _ => {}
+            }
+        }
     }
 }
