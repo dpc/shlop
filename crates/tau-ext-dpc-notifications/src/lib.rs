@@ -158,6 +158,7 @@ where
         match recv_result {
             Ok(InMsg::Event(event)) => {
                 let (_, inner) = event.peel_log();
+                eprintln!("event: {}", inner.name());
                 match inner {
                     Event::AgentPromptSubmitted(_) => {
                         idle_deadline = None;
@@ -171,9 +172,13 @@ where
                         writer.write_event(&sound_event(VALUE_AGENT_END))?;
                         writer.flush()?;
                         idle_deadline = Some(Instant::now() + idle_duration);
+                        eprintln!("idle deadline armed for {}s", idle_duration.as_secs());
                     }
-                    Event::LifecycleDisconnect(_) => break,
-                    _ => {}
+                    Event::LifecycleDisconnect(_) => {
+                        eprintln!("disconnect received, exiting");
+                        break;
+                    }
+                    other => eprintln!("unhandled event variant: {}", other.name()),
                 }
             }
             Ok(InMsg::EndOfStream) => {
@@ -183,6 +188,7 @@ where
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
+                eprintln!("idle deadline elapsed, emitting text notification");
                 writer.write_event(&idle_text_event())?;
                 writer.flush()?;
                 idle_deadline = None;
