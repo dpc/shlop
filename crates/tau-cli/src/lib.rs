@@ -671,6 +671,41 @@ fn format_context_chip(
     }
 }
 
+fn format_turn_metrics_chip(latency: Option<Duration>, cache_hit_percent: Option<u8>) -> String {
+    let mut chip = String::new();
+    if let Some(percent) = cache_hit_percent {
+        chip.push_str(&format!(" hit:{percent}%"));
+    }
+    if let Some(latency) = latency {
+        chip.push_str(&format!(" resp:{}", format_latency(latency)));
+    }
+    chip
+}
+
+fn format_latency(latency: Duration) -> String {
+    if latency < Duration::from_secs(1) {
+        return format!("{}ms", latency.as_millis());
+    }
+    if latency < Duration::from_secs(10) {
+        let tenths = latency.as_millis() / 100;
+        let whole = tenths / 10;
+        let fractional = tenths % 10;
+        return format!("{whole}.{fractional}s");
+    }
+    format!("{}s", latency.as_secs())
+}
+
+fn cache_hit_percent(input_tokens: Option<u64>, cached_tokens: Option<u64>) -> Option<u8> {
+    let input_tokens = input_tokens?;
+    let cached_tokens = cached_tokens?;
+    if input_tokens == 0 {
+        return Some(0);
+    }
+    let clamped_cached_tokens = cached_tokens.min(input_tokens);
+    let percent = clamped_cached_tokens.saturating_mul(100) / input_tokens;
+    Some(percent.min(100) as u8)
+}
+
 /// Build the iTerm2 OSC 1337 `SetUserVar` escape sequence for the
 /// given (name, value) pair, with `value` base64-encoded.
 ///
@@ -1338,6 +1373,8 @@ struct EventRenderer {
     /// walks this list calling `set_block` so the entire transcript
     /// switches mode at once.
     diff_blocks: Vec<DiffBlockEntry>,
+    /// Prompt dispatch timestamps keyed by `session_prompt_id`.
+    prompt_started_at: HashMap<String, Instant>,
     /// Global expand-diffs toggle.
     diffs_expanded: bool,
     /// Current model id (cached so we can re-render the status bar
@@ -1357,6 +1394,10 @@ struct EventRenderer {
     current_context_cached_tokens: Option<u64>,
     /// Current model context window, in tokens, if known.
     current_context_window: Option<u64>,
+    /// End-to-end latency of the most recently completed prompt.
+    last_turn_latency: Option<Duration>,
+    /// Cache hit rate of the most recently completed prompt.
+    last_turn_cache_hit_percent: Option<u8>,
     /// Shared effort mirror for the input thread.
     effort_state: std::sync::Arc<std::sync::atomic::AtomicU8>,
 }
@@ -1398,6 +1439,7 @@ impl EventRenderer {
             extension_blocks: HashMap::new(),
             model_status_block: None,
             diff_blocks: Vec::new(),
+            prompt_started_at: HashMap::new(),
             diffs_expanded: false,
             current_model: tau_proto::ModelId::from(""),
             current_effort: tau_proto::Effort::Off,
@@ -1405,6 +1447,8 @@ impl EventRenderer {
             current_context_input_tokens: None,
             current_context_cached_tokens: None,
             current_context_window: None,
+            last_turn_latency: None,
+            last_turn_cache_hit_percent: None,
             effort_state: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(effort_to_u8(
                 tau_proto::Effort::Off,
             ))),
@@ -1451,7 +1495,9 @@ impl EventRenderer {
                 self.current_context_percent,
                 self.current_context_window,
             );
-            format!("{} ({level}){context}", self.current_model)
+            let turn_metrics =
+                format_turn_metrics_chip(self.last_turn_latency, self.last_turn_cache_hit_percent);
+            format!("{} ({level}){context}{turn_metrics}", self.current_model)
         };
         let block = themed_block(&self.theme, names::MODEL_STATUS, label);
         match self.model_status_block {
@@ -1497,6 +1543,8 @@ impl EventRenderer {
                 }
             }
             Event::SessionPromptCreated(prompt) => {
+                self.prompt_started_at
+                    .insert(prompt.session_prompt_id.to_string(), Instant::now());
                 if let Some((queued_id, text)) = self.queued_user_blocks.pop_front() {
                     self.handle.remove_block(queued_id);
                     self.handle.print_output(themed_block(
@@ -1515,6 +1563,10 @@ impl EventRenderer {
                 self.prompt_blocks
                     .insert(prompt.session_prompt_id.to_string(), id);
             }
+            Event::AgentPromptSubmitted(submitted) => {
+                self.prompt_started_at
+                    .insert(submitted.session_prompt_id.to_string(), Instant::now());
+            }
             Event::AgentResponseUpdated(update) => {
                 if let Some(&bid) = self.prompt_blocks.get(update.session_prompt_id.as_str()) {
                     let mut text = update.text.clone();
@@ -1525,6 +1577,12 @@ impl EventRenderer {
                 }
             }
             Event::AgentResponseFinished(finished) => {
+                self.last_turn_latency = self
+                    .prompt_started_at
+                    .remove(finished.session_prompt_id.as_str())
+                    .map(|started_at| started_at.elapsed());
+                self.last_turn_cache_hit_percent =
+                    cache_hit_percent(finished.input_tokens, finished.cached_tokens);
                 if let Some(bid) = self
                     .prompt_blocks
                     .remove(finished.session_prompt_id.as_str())
@@ -1551,6 +1609,7 @@ impl EventRenderer {
                 if !finished.tool_calls.is_empty() {
                     self.handle.redraw();
                 }
+                self.render_model_status();
             }
             Event::ToolProgress(progress) => {
                 if !self.tool_blocks.contains_key(progress.call_id.as_str()) {
@@ -1724,6 +1783,8 @@ impl EventRenderer {
             Event::HarnessModelSelected(selected) => {
                 self.current_model = selected.model.clone();
                 self.current_context_window = selected.context_window;
+                self.last_turn_latency = None;
+                self.last_turn_cache_hit_percent = None;
                 self.render_model_status();
             }
             Event::HarnessContextUsageChanged(changed) => {
@@ -1923,6 +1984,7 @@ pub fn main_with_args() -> std::process::ExitCode {
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use tau_cli_term::TermHandle;
     use tau_cli_term_raw::Term;
@@ -2508,6 +2570,29 @@ mod tests {
         );
         // Nothing known → empty.
         assert_eq!(super::format_context_chip(None, None, None, None), "");
+    }
+
+    #[test]
+    fn format_turn_metrics_chip_includes_hit_rate_and_latency() {
+        assert_eq!(
+            super::format_turn_metrics_chip(Some(Duration::from_millis(1_240)), Some(75)),
+            " hit:75% resp:1.2s",
+        );
+        assert_eq!(
+            super::format_turn_metrics_chip(Some(Duration::from_millis(420)), None),
+            " resp:420ms",
+        );
+    }
+
+    #[test]
+    fn cache_hit_percent_clamps_to_input_tokens() {
+        assert_eq!(super::cache_hit_percent(Some(2_000), Some(1_500)), Some(75));
+        assert_eq!(
+            super::cache_hit_percent(Some(2_000), Some(3_000)),
+            Some(100)
+        );
+        assert_eq!(super::cache_hit_percent(Some(0), Some(0)), Some(0));
+        assert_eq!(super::cache_hit_percent(Some(2_000), None), None);
     }
 
     #[test]
