@@ -3066,7 +3066,7 @@ fn load_last_efforts(
     let Some(path) = dirs
         .state_dir
         .as_ref()
-        .map(|d| d.join("harness-state.json"))
+        .map(|d| d.join("harness.json5"))
     else {
         return std::collections::HashMap::new();
     };
@@ -3127,15 +3127,15 @@ fn middle_effort(allowed: &[tau_proto::Effort]) -> tau_proto::Effort {
     allowed[allowed.len() / 2]
 }
 
-/// Load the last-selected model from `<state_dir>/harness-state.json`.
+/// Load the last-selected model from `<state_dir>/harness.json5`.
 fn load_last_selected_model(dirs: &tau_config::settings::TauDirs) -> Option<String> {
-    let path = dirs.state_dir.as_ref()?.join("harness-state.json");
+    let path = dirs.state_dir.as_ref()?.join("harness.json5");
     let text = std::fs::read_to_string(path).ok()?;
     let json: serde_json::Value = serde_json::from_str(&text).ok()?;
     json["last_selected_model"].as_str().map(String::from)
 }
 
-/// Persist model + effort to `<state_dir>/harness-state.json`.
+/// Persist model + effort to `<state_dir>/harness.json5`.
 fn save_harness_state(
     dirs: &tau_config::settings::TauDirs,
     model: &str,
@@ -3144,7 +3144,7 @@ fn save_harness_state(
     let Some(dir) = dirs.state_dir.as_ref() else {
         return;
     };
-    let path = dir.join("harness-state.json");
+    let path = dir.join("harness.json5");
     let _ = std::fs::create_dir_all(dir);
     let mut last_efforts = load_last_efforts(dirs);
     if !model.is_empty() {
@@ -5080,7 +5080,7 @@ mod tests {
             dirs.state_dir
                 .as_ref()
                 .expect("state dir")
-                .join("harness-state.json"),
+                .join("harness.json5"),
             r#"{
                 "last_selected_model": "openai/gpt-4.1",
                 "last_effort": "high"
@@ -5131,7 +5131,7 @@ mod tests {
         )
         .expect("write models");
         std::fs::write(
-            state_dir.join("harness-state.json"),
+            state_dir.join("harness.json5"),
             r#"{
                 "last_selected_model": "openai/gpt-4.1",
                 "last_efforts": {
@@ -5190,7 +5190,7 @@ mod tests {
             }"#,
         )
         .expect("write models");
-        // No harness-state.json: fresh install.
+        // No harness.json5: fresh install.
 
         let harness_settings =
             tau_config::settings::load_harness_settings_in(&dirs).expect("load harness settings");

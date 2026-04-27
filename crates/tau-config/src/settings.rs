@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // CLI settings
@@ -37,6 +37,63 @@ impl Default for CliSettings {
             show_logo: true,
             bar_cursor: true,
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CLI runtime state
+// ---------------------------------------------------------------------------
+
+/// Mutable CLI state persisted across runs at
+/// `<state_dir>/cli.json`. Distinct from `CliSettings` (config) —
+/// this file is written by the CLI itself in response to slash
+/// commands like `/show-diff` and `/show-thinking`.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct CliState {
+    /// Whether to render file-mutation diffs in their full expanded
+    /// form (vs the compact `+N/-M` chip). Toggled by `/show-diff`.
+    pub show_diff: bool,
+    /// Whether to render the agent's reasoning summary (the
+    /// `agent.thinking` block). Toggled by `/show-thinking`.
+    pub show_thinking: bool,
+}
+
+impl Default for CliState {
+    fn default() -> Self {
+        Self {
+            show_diff: false,
+            show_thinking: true,
+        }
+    }
+}
+
+impl CliState {
+    /// Load the persisted CLI state. Missing / malformed file → defaults.
+    #[must_use]
+    pub fn load(dirs: &TauDirs) -> Self {
+        let Some(dir) = dirs.state_dir.as_ref() else {
+            return Self::default();
+        };
+        let path = dir.join("cli.json");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return Self::default();
+        };
+        serde_json::from_str(&text).unwrap_or_default()
+    }
+
+    /// Persist current state. Best-effort: ignores write failures so
+    /// a slash command never fails because the user's state dir is
+    /// read-only.
+    pub fn save(&self, dirs: &TauDirs) {
+        let Some(dir) = dirs.state_dir.as_ref() else {
+            return;
+        };
+        let _ = std::fs::create_dir_all(dir);
+        let path = dir.join("cli.json");
+        let _ = serde_json::to_string_pretty(self)
+            .ok()
+            .and_then(|s| std::fs::write(&path, s).ok());
     }
 }
 
@@ -460,7 +517,7 @@ pub fn state_dir() -> Option<PathBuf> {
 pub struct TauDirs {
     /// Where to look for `cli.json5`, `harness.json5`, `models.json5`, etc.
     pub config_dir: Option<PathBuf>,
-    /// Where to read/write runtime state like `harness-state.json`.
+    /// Where to read/write runtime state like `harness.json5`.
     pub state_dir: Option<PathBuf>,
 }
 
@@ -596,6 +653,36 @@ mod tests {
         assert!(!s.greeting);
         assert!(s.show_logo); // default
         assert!(s.bar_cursor); // default
+    }
+
+    #[test]
+    fn cli_state_defaults_when_file_missing() {
+        let td = TempDir::new().expect("tempdir");
+        let dirs = TauDirs {
+            config_dir: None,
+            state_dir: Some(td.path().to_path_buf()),
+        };
+        let state = CliState::load(&dirs);
+        assert_eq!(state, CliState::default());
+        assert!(!state.show_diff);
+        assert!(state.show_thinking);
+    }
+
+    #[test]
+    fn cli_state_round_trip_through_save_and_load() {
+        let td = TempDir::new().expect("tempdir");
+        let dirs = TauDirs {
+            config_dir: None,
+            state_dir: Some(td.path().to_path_buf()),
+        };
+        let original = CliState {
+            show_diff: true,
+            show_thinking: false,
+        };
+        original.save(&dirs);
+        assert!(td.path().join("cli.json").exists());
+        let reloaded = CliState::load(&dirs);
+        assert_eq!(reloaded, original);
     }
 
     #[test]

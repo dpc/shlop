@@ -343,8 +343,12 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
             "Set reasoning effort: off, minimal, low, medium, high, xhigh (Shift+Tab to cycle)",
         ),
         SlashCommand::new(
-            "/diff",
+            "/show-diff",
             "Toggle expanded vs compact display of file edit diffs",
+        ),
+        SlashCommand::new(
+            "/show-thinking",
+            "Toggle visibility of the agent's reasoning summary blocks",
         ),
     ];
     let theme = tau_themes::Theme::builtin();
@@ -382,8 +386,18 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
     let renderer_rx = event_rx;
     let renderer_completion_data = completion_data;
     // Pre-build the renderer so we can grab its `effort_state`
-    // handle for the input loop's Shift+Tab cycle.
-    let renderer = EventRenderer::new(renderer_handle, renderer_completion_data, theme.clone());
+    // handle for the input loop's Shift+Tab cycle. Load the
+    // persisted `cli.json` state so toggles like `/show-diff` and
+    // `/show-thinking` survive restarts.
+    let dirs = tau_config::settings::TauDirs::default();
+    let cli_state = tau_config::settings::CliState::load(&dirs);
+    let renderer = EventRenderer::new_with_state(
+        renderer_handle,
+        renderer_completion_data,
+        theme.clone(),
+        cli_state,
+        dirs,
+    );
     let effort_state = renderer.effort_state();
     let _renderer = std::thread::spawn(move || {
         let mut renderer = renderer;
@@ -391,6 +405,7 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
             match cmd {
                 RendererCmd::Remote(event) => renderer.handle(&event),
                 RendererCmd::ToggleDiffs => renderer.toggle_diffs_expanded(),
+                RendererCmd::ToggleThinking => renderer.toggle_thinking_visible(),
             }
         }
     });
@@ -461,6 +476,8 @@ enum InputLoopExit {
 /// local UI commands like `ToggleDiffs`. Keeping it one channel
 /// removes the need for shared state between the two threads.
 enum RendererCmd {
+    /// `/show-thinking` toggle.
+    ToggleThinking,
     Remote(Event),
     ToggleDiffs,
 }
@@ -556,8 +573,12 @@ fn terminal_input_loop(
                     print_local("/effort <level> — one of: off, minimal, low, medium, high, xhigh");
                     continue;
                 }
-                if text == "/diff" {
+                if text == "/show-diff" {
                     let _ = renderer_tx.send(RendererCmd::ToggleDiffs);
+                    continue;
+                }
+                if text == "/show-thinking" {
+                    let _ = renderer_tx.send(RendererCmd::ToggleThinking);
                     continue;
                 }
                 if let Some(model) = text.strip_prefix("/model ") {
@@ -1385,6 +1406,17 @@ struct EventRenderer {
     prompt_started_at: HashMap<String, Instant>,
     /// Global expand-diffs toggle.
     diffs_expanded: bool,
+    /// Global show-thinking toggle. When false, agent reasoning
+    /// summaries are not rendered (live or in history). Toggled by
+    /// `/show-thinking`; persisted in `<state_dir>/cli.json`.
+    show_thinking: bool,
+    /// Persisted thinking blocks (one per finished assistant turn).
+    /// When `/show-thinking` flips, every entry is re-rendered as
+    /// either the full text or removed, so the toggle takes effect
+    /// retroactively across the visible transcript.
+    thinking_history: Vec<ThinkingBlockEntry>,
+    /// Where to persist `show_diff` / `show_thinking` toggles.
+    state_dirs: tau_config::settings::TauDirs,
     /// Current model id (cached so we can re-render the status bar
     /// when the effort changes, and vice versa).
     current_model: tau_proto::ModelId,
@@ -1419,6 +1451,15 @@ struct DiffBlockEntry {
     diff: tau_proto::DiffSummary,
 }
 
+/// One finished thinking block. Held so `/show-thinking` can swap
+/// its content between the original reasoning text (visible) and
+/// empty content (hidden) without losing the block's position in
+/// the transcript.
+struct ThinkingBlockEntry {
+    block_id: tau_cli_term::BlockId,
+    text: String,
+}
+
 /// In-flight state for a user `!`/`!!` shell block.
 struct ShellBlockState {
     block_id: tau_cli_term::BlockId,
@@ -1430,10 +1471,32 @@ struct ShellBlockState {
 }
 
 impl EventRenderer {
+    #[cfg(test)]
     fn new(
         handle: tau_cli_term::TermHandle,
         completion_data: tau_cli_term::CompletionData,
         theme: tau_themes::Theme,
+    ) -> Self {
+        // Tests pass a state_dir of None so toggles never touch the
+        // user's real `~/.local/state/tau/cli.json`.
+        Self::new_with_state(
+            handle,
+            completion_data,
+            theme,
+            tau_config::settings::CliState::default(),
+            tau_config::settings::TauDirs {
+                config_dir: None,
+                state_dir: None,
+            },
+        )
+    }
+
+    fn new_with_state(
+        handle: tau_cli_term::TermHandle,
+        completion_data: tau_cli_term::CompletionData,
+        theme: tau_themes::Theme,
+        state: tau_config::settings::CliState,
+        state_dirs: tau_config::settings::TauDirs,
     ) -> Self {
         Self {
             handle,
@@ -1450,7 +1513,10 @@ impl EventRenderer {
             model_status_block: None,
             diff_blocks: Vec::new(),
             prompt_started_at: HashMap::new(),
-            diffs_expanded: false,
+            diffs_expanded: state.show_diff,
+            show_thinking: state.show_thinking,
+            thinking_history: Vec::new(),
+            state_dirs,
             current_model: tau_proto::ModelId::from(""),
             current_effort: tau_proto::Effort::Off,
             current_context_percent: None,
@@ -1463,6 +1529,14 @@ impl EventRenderer {
                 tau_proto::Effort::Off,
             ))),
         }
+    }
+
+    fn save_cli_state(&self) {
+        tau_config::settings::CliState {
+            show_diff: self.diffs_expanded,
+            show_thinking: self.show_thinking,
+        }
+        .save(&self.state_dirs);
     }
 
     /// Returns a clone of the shared effort mirror, used by the
@@ -1485,7 +1559,52 @@ impl EventRenderer {
             );
             self.handle.set_block(entry.block_id, block);
         }
-        self.handle.redraw();
+        // Past diff blocks may have already scrolled out of the
+        // visible window. Force a full repaint so the toggle takes
+        // effect retroactively across scrollback.
+        self.handle.invalidate_screen();
+        self.save_cli_state();
+    }
+
+    /// Flip the global show-thinking flag and re-render every prior
+    /// thinking block in the transcript so the toggle takes effect
+    /// retroactively (full text when on, empty content when off).
+    /// Live in-flight thinking blocks are also flipped. New turns
+    /// continue to be gated by the same flag.
+    ///
+    /// Empty content is used instead of `remove_block` so the
+    /// block's position in the transcript is preserved; toggling
+    /// back on restores the original reasoning text in place.
+    fn toggle_thinking_visible(&mut self) {
+        use tau_cli_term::resolve::themed_block;
+        use tau_themes::names;
+        self.show_thinking = !self.show_thinking;
+        for entry in &self.thinking_history {
+            let display = if self.show_thinking {
+                entry.text.as_str()
+            } else {
+                ""
+            };
+            self.handle.set_block(
+                entry.block_id,
+                themed_block(&self.theme, names::AGENT_THINKING, display),
+            );
+        }
+        for (spid, &bid) in &self.thinking_blocks {
+            let display = if self.show_thinking {
+                self.thinking_text.get(spid).cloned().unwrap_or_default()
+            } else {
+                String::new()
+            };
+            self.handle.set_block(
+                bid,
+                themed_block(&self.theme, names::AGENT_THINKING, display),
+            );
+        }
+        // Past thinking blocks may already be in terminal scrollback.
+        // Force a full repaint so the toggle takes effect there too.
+        self.handle.invalidate_screen();
+        self.save_cli_state();
     }
 
     fn render_model_status(&mut self) {
@@ -1582,23 +1701,43 @@ impl EventRenderer {
 
                 // Thinking is its own block, lazy-created the first
                 // time non-empty summary content arrives. Rendered
-                // above the response block (in `above_active`).
+                // above the response block (in `above_active`). Always
+                // accumulate the text so the toggle can flip on
+                // retroactively, but only paint the live block when
+                // `show_thinking` is on.
                 if let Some(thinking) = update.thinking.as_deref()
                     && !thinking.is_empty()
                 {
                     self.thinking_text
                         .insert(spid.to_owned(), thinking.to_owned());
-                    let mut shown = thinking.to_owned();
-                    append_streaming_indicator(&mut shown);
-                    let block = themed_block(&self.theme, names::AGENT_THINKING, shown);
-                    if let Some(&tbid) = self.thinking_blocks.get(spid) {
-                        self.handle.set_block(tbid, block);
-                    } else {
-                        let tbid = self.handle.new_block(block);
-                        self.handle.push_above_active(tbid);
-                        self.thinking_blocks.insert(spid.to_owned(), tbid);
+                    if self.show_thinking {
+                        let mut shown = thinking.to_owned();
+                        append_streaming_indicator(&mut shown);
+                        let block = themed_block(&self.theme, names::AGENT_THINKING, shown);
+                        if let Some(&tbid) = self.thinking_blocks.get(spid) {
+                            self.handle.set_block(tbid, block);
+                        } else {
+                            // Insert the thinking block ABOVE the
+                            // pending response block in `above_active`.
+                            // The response block was pushed first
+                            // (in SessionPromptCreated), so a plain
+                            // push would land below it. Briefly
+                            // remove the response, push thinking,
+                            // re-push response — net effect: thinking
+                            // is at the response's old position and
+                            // the response moves down by one.
+                            let tbid = self.handle.new_block(block);
+                            if let Some(&response_bid) = self.prompt_blocks.get(spid) {
+                                self.handle.remove_above_active(response_bid);
+                                self.handle.push_above_active(tbid);
+                                self.handle.push_above_active(response_bid);
+                            } else {
+                                self.handle.push_above_active(tbid);
+                            }
+                            self.thinking_blocks.insert(spid.to_owned(), tbid);
+                        }
+                        self.handle.redraw();
                     }
-                    self.handle.redraw();
                 }
 
                 if let Some(&bid) = self.prompt_blocks.get(spid) {
@@ -1628,12 +1767,18 @@ impl EventRenderer {
                 if let Some(tbid) = self.thinking_blocks.remove(spid) {
                     self.handle.remove_block(tbid);
                 }
-                if let Some(thinking) = thinking.filter(|t| !t.is_empty()) {
-                    self.handle.print_output(themed_block(
+                if self.show_thinking
+                    && let Some(thinking) = thinking.filter(|t| !t.is_empty())
+                {
+                    let bid = self.handle.print_output(themed_block(
                         &self.theme,
                         names::AGENT_THINKING,
-                        thinking,
+                        thinking.clone(),
                     ));
+                    self.thinking_history.push(ThinkingBlockEntry {
+                        block_id: bid,
+                        text: thinking,
+                    });
                 }
                 self.thinking_text.remove(spid);
 
@@ -2208,6 +2353,22 @@ mod tests {
         assert!(vt.screen_contains(80, "actual answer"));
         assert!(vt.screen_contains(80, "planning the answer"));
 
+        // Order matters even during live streaming: thinking should
+        // render ABOVE the response, not below it.
+        let live = vt.screen_text(80);
+        let live_thinking = live
+            .iter()
+            .position(|l| l.contains("planning the answer"))
+            .unwrap_or_else(|| panic!("live thinking missing: {live:?}"));
+        let live_response = live
+            .iter()
+            .position(|l| l.contains("actual answer"))
+            .unwrap_or_else(|| panic!("live response missing: {live:?}"));
+        assert!(
+            live_thinking < live_response,
+            "live thinking should render above live response (thinking @ {live_thinking}, response @ {live_response}); lines: {live:?}",
+        );
+
         // On finish both stick in history.
         renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
             session_prompt_id: "sp-0".into(),
@@ -2231,6 +2392,128 @@ mod tests {
         assert!(
             thinking_row < response_row,
             "thinking should render above response (thinking @ {thinking_row}, response @ {response_row}); lines: {lines:?}",
+        );
+    }
+
+    #[test]
+    fn toggle_thinking_visible_round_trip_restores_history() {
+        let (_term, handle, vt) = setup(80, 24);
+        let mut renderer = EventRenderer::new(
+            handle.clone(),
+            tau_cli_term::CompletionData::new(),
+            tau_themes::Theme::builtin(),
+        );
+
+        renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "hi".into(),
+        }));
+        renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
+            session_prompt_id: "sp-0".into(),
+            session_id: "s1".into(),
+            system_prompt: String::new(),
+            messages: Vec::new(),
+            tools: Vec::new(),
+            model: None,
+            effort: tau_proto::Effort::Off,
+            thinking_summary: tau_proto::ThinkingSummary::Auto,
+        }));
+        renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
+            session_prompt_id: "sp-0".into(),
+            text: Some("the_response".into()),
+            tool_calls: Vec::new(),
+            input_tokens: None,
+            cached_tokens: None,
+            thinking: Some("the_thinking_text".into()),
+        }));
+        sync(&handle);
+        assert!(vt.screen_contains(80, "the_thinking_text"));
+        assert!(vt.screen_contains(80, "the_response"));
+
+        // Off — thinking content disappears, no placeholder, no
+        // blank row left behind: the response should be on the same
+        // row as the (now-empty) thinking block sat before. We assert
+        // this indirectly by counting non-blank lines.
+        let lines_before = vt
+            .screen_text(80)
+            .into_iter()
+            .filter(|l| !l.trim().is_empty())
+            .count();
+        renderer.toggle_thinking_visible();
+        sync(&handle);
+        assert!(!vt.screen_contains(80, "the_thinking_text"));
+        assert!(!vt.screen_contains(80, "thinking hidden"));
+        assert!(vt.screen_contains(80, "the_response"));
+        let lines_after = vt
+            .screen_text(80)
+            .into_iter()
+            .filter(|l| !l.trim().is_empty())
+            .count();
+        // Hiding the one thinking block should remove exactly one
+        // visible line of content from the screen.
+        assert_eq!(lines_after + 1, lines_before);
+
+        // Back on — original thinking text returns in its original
+        // position above the response.
+        renderer.toggle_thinking_visible();
+        sync(&handle);
+        let lines = vt.screen_text(80);
+        let thinking_row = lines
+            .iter()
+            .position(|l| l.contains("the_thinking_text"))
+            .unwrap_or_else(|| panic!("thinking should reappear: {lines:?}"));
+        let response_row = lines
+            .iter()
+            .position(|l| l.contains("the_response"))
+            .unwrap_or_else(|| panic!("response should still be visible: {lines:?}"));
+        assert!(thinking_row < response_row);
+    }
+
+    #[test]
+    fn thinking_created_while_off_stays_invisible_after_toggle_on() {
+        // Blocks that arrive while `show_thinking == false` are
+        // never rendered and never tracked, so toggling back on
+        // doesn't suddenly resurrect them. Only blocks that were
+        // visible at some point round-trip through `set_block`.
+        let (_term, handle, vt) = setup(80, 24);
+        let mut renderer = EventRenderer::new(
+            handle.clone(),
+            tau_cli_term::CompletionData::new(),
+            tau_themes::Theme::builtin(),
+        );
+        renderer.toggle_thinking_visible(); // off
+
+        renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "hi".into(),
+        }));
+        renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
+            session_prompt_id: "sp-0".into(),
+            session_id: "s1".into(),
+            system_prompt: String::new(),
+            messages: Vec::new(),
+            tools: Vec::new(),
+            model: None,
+            effort: tau_proto::Effort::Off,
+            thinking_summary: tau_proto::ThinkingSummary::Auto,
+        }));
+        renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
+            session_prompt_id: "sp-0".into(),
+            text: Some("answer".into()),
+            tool_calls: Vec::new(),
+            input_tokens: None,
+            cached_tokens: None,
+            thinking: Some("hidden reasoning".into()),
+        }));
+        sync(&handle);
+        assert!(vt.screen_contains(80, "answer"));
+        assert!(!vt.screen_contains(80, "hidden reasoning"));
+
+        renderer.toggle_thinking_visible(); // on
+        sync(&handle);
+        assert!(
+            !vt.screen_contains(80, "hidden reasoning"),
+            "blocks created while off should not appear after toggle on"
         );
     }
 

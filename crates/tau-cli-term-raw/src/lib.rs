@@ -187,6 +187,21 @@ impl TermHandle {
         self.redraw.notify();
     }
 
+    /// Forces the next redraw to take the full-render path: clear
+    /// the visible screen + scrollback (`\x1b[2J\x1b[H\x1b[3J`)
+    /// and re-emit every line from `all_lines`. Overflow scrolls
+    /// naturally into the (now-empty) scrollback.
+    ///
+    /// Use this when zone-list changes affect rows that have
+    /// already scrolled into terminal scrollback (e.g. toggling
+    /// visibility of a block from a past turn). The diff renderer
+    /// only repaints the visible window, so it can't otherwise
+    /// undo what's already in scrollback.
+    pub fn invalidate_screen(&self) {
+        self.lock().invalidate_screen = true;
+        self.redraw.notify();
+    }
+
     /// Triggers a redraw and blocks until the redraw thread has
     /// processed it. Uses a generation counter: the caller bumps
     /// `sync_requested`, the redraw thread sets `sync_completed`
@@ -905,7 +920,9 @@ impl Drop for Term {
 
 // --- Rendering helpers ---
 
-/// Lays out blocks referenced by an id list, skipping missing ids.
+/// Lays out blocks referenced by an id list, skipping missing ids
+/// and blocks with empty content (so callers can "hide" a block by
+/// swapping its content to empty without leaving a blank row).
 fn layout_id_list(
     ids: &[BlockId],
     blocks: &HashMap<BlockId, StyledBlock>,
@@ -914,6 +931,9 @@ fn layout_id_list(
 ) {
     for id in ids {
         if let Some(block) = blocks.get(id) {
+            if block.content.is_empty() {
+                continue;
+            }
             out.extend(layout_block(block, width));
         }
     }
