@@ -3076,8 +3076,21 @@ fn selected_effort_for_model(
         .get(model)
         .copied()
         .or_else(|| load_last_efforts(dirs).remove(model))
-        .unwrap_or(tau_proto::Effort::Off);
+        .unwrap_or_else(|| middle_effort(&allowed));
     clamp_effort(requested, &allowed)
+}
+
+/// Pick the middle element of `allowed`, or `Off` for an empty list.
+/// First-time users (no `default_efforts` entry, no persisted last
+/// effort) get a sensible reasoning level instead of always landing on
+/// `Off` — for the standard `[Off, Minimal, Low, Medium, High]` list
+/// that's `Low`. Returns `Off` for `[Off]`-only providers and the
+/// empty case.
+fn middle_effort(allowed: &[tau_proto::Effort]) -> tau_proto::Effort {
+    if allowed.is_empty() {
+        return tau_proto::Effort::Off;
+    }
+    allowed[allowed.len() / 2]
 }
 
 /// Load the last-selected model from `<state_dir>/harness-state.json`.
@@ -5092,6 +5105,56 @@ mod tests {
         assert_eq!(
             selected_effort_for_model(&dirs, &harness_settings, &model_registry, "local/llama"),
             tau_proto::Effort::Off
+        );
+    }
+
+    /// First-time users (no per-model entry in `default_efforts`, no
+    /// persisted `last_efforts`) get the middle of the available
+    /// reasoning levels, not the lowest. For the standard
+    /// reasoning-supporting list (`[Off, Minimal, Low, Medium, High]`)
+    /// that's `Low`. Non-reasoning providers stay at `Off`.
+    #[test]
+    fn fresh_install_picks_middle_effort_when_no_history() {
+        let td = TempDir::new().expect("tempdir");
+        let config_dir = td.path().join("config");
+        let state_dir = td.path().join("state");
+        std::fs::create_dir_all(&config_dir).expect("mkdir config");
+        std::fs::create_dir_all(&state_dir).expect("mkdir state");
+        let dirs = tau_config::settings::TauDirs {
+            config_dir: Some(config_dir.clone()),
+            state_dir: Some(state_dir.clone()),
+        };
+
+        // No harness.json5: default settings, empty default_efforts.
+        std::fs::write(
+            config_dir.join("models.json5"),
+            r#"{
+                providers: {
+                    local: {
+                        compat: { supportsReasoningEffort: false },
+                        models: [{ id: "llama" }],
+                    },
+                    openai: {
+                        compat: { supportsReasoningEffort: true },
+                        models: [{ id: "gpt-4.1" }],
+                    },
+                },
+            }"#,
+        )
+        .expect("write models");
+        // No harness-state.json: fresh install.
+
+        let harness_settings =
+            tau_config::settings::load_harness_settings_in(&dirs).expect("load harness settings");
+        let model_registry = tau_config::settings::load_models_in(&dirs).expect("load models");
+
+        assert_eq!(
+            selected_effort_for_model(&dirs, &harness_settings, &model_registry, "openai/gpt-4.1"),
+            tau_proto::Effort::Low,
+        );
+        assert_eq!(
+            selected_effort_for_model(&dirs, &harness_settings, &model_registry, "local/llama"),
+            tau_proto::Effort::Off,
         );
     }
 
