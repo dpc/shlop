@@ -654,14 +654,19 @@ fn effort_from_u8(value: u8) -> tau_proto::Effort {
 /// - nothing known yet → empty string (chip suppressed)
 fn format_context_chip(
     input_tokens: Option<u64>,
+    cached_tokens: Option<u64>,
     percent: Option<u8>,
     window: Option<u64>,
 ) -> String {
+    let cache_suffix = match cached_tokens {
+        Some(0) | None => String::new(),
+        Some(tokens) => format!(" cache:{}", format_token_count(tokens)),
+    };
     match (window, percent, input_tokens) {
-        (Some(w), Some(p), _) => format!(" {p}%/{}", format_token_count(w)),
+        (Some(w), Some(p), _) => format!(" {p}%/{}{}", format_token_count(w), cache_suffix),
         // Window not configured — fall back to raw token count so the
         // user can see usage exists and add `contextWindow` to fix it.
-        (None, _, Some(t)) => format!(" {}/?", format_token_count(t)),
+        (None, _, Some(t)) => format!(" {}/?{}", format_token_count(t), cache_suffix),
         _ => String::new(),
     }
 }
@@ -1347,6 +1352,9 @@ struct EventRenderer {
     /// Input tokens consumed by the most recent agent response. `None`
     /// until the first usage report for the current model.
     current_context_input_tokens: Option<u64>,
+    /// Cached input tokens consumed by the most recent agent
+    /// response. `None` until the first cache-usage report.
+    current_context_cached_tokens: Option<u64>,
     /// Current model context window, in tokens, if known.
     current_context_window: Option<u64>,
     /// Shared effort mirror for the input thread.
@@ -1395,6 +1403,7 @@ impl EventRenderer {
             current_effort: tau_proto::Effort::Off,
             current_context_percent: None,
             current_context_input_tokens: None,
+            current_context_cached_tokens: None,
             current_context_window: None,
             effort_state: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(effort_to_u8(
                 tau_proto::Effort::Off,
@@ -1438,6 +1447,7 @@ impl EventRenderer {
             };
             let context = format_context_chip(
                 self.current_context_input_tokens,
+                self.current_context_cached_tokens,
                 self.current_context_percent,
                 self.current_context_window,
             );
@@ -1718,6 +1728,7 @@ impl EventRenderer {
             }
             Event::HarnessContextUsageChanged(changed) => {
                 self.current_context_input_tokens = changed.input_tokens;
+                self.current_context_cached_tokens = changed.cached_tokens;
                 self.current_context_percent = changed.percent_used;
                 self.render_model_status();
             }
@@ -2023,6 +2034,7 @@ mod tests {
             text: Some("Hi there! How can I help?".into()),
             tool_calls: Vec::new(),
             input_tokens: None,
+            cached_tokens: None,
         }));
         sync(&handle);
         assert!(
@@ -2078,6 +2090,7 @@ mod tests {
             text: Some("response one".into()),
             tool_calls: Vec::new(),
             input_tokens: None,
+            cached_tokens: None,
         }));
         sync(&handle);
         assert!(vt.screen_contains(80, "response one"));
@@ -2121,6 +2134,7 @@ mod tests {
             text: Some("response two complete".into()),
             tool_calls: Vec::new(),
             input_tokens: None,
+            cached_tokens: None,
         }));
         sync(&handle);
         assert!(
@@ -2192,6 +2206,7 @@ mod tests {
                 text: Some(format!("response-{i}")),
                 tool_calls: Vec::new(),
                 input_tokens: None,
+                cached_tokens: None,
             }));
             sync(&handle);
         }
@@ -2247,6 +2262,7 @@ mod tests {
             text: Some("Hello".into()),
             tool_calls: Vec::new(),
             input_tokens: None,
+            cached_tokens: None,
         }));
         sync(&handle);
         assert!(vt.screen_contains(80, "Hello"));
@@ -2274,6 +2290,7 @@ mod tests {
                 )]),
             }],
             input_tokens: None,
+            cached_tokens: None,
         }));
         sync(&handle);
         assert!(vt.screen_contains(80, "read src/main.rs …"));
@@ -2328,6 +2345,7 @@ mod tests {
             text: Some("hello!".into()),
             tool_calls: Vec::new(),
             input_tokens: None,
+            cached_tokens: None,
         }));
         sync(&handle);
 
@@ -2474,22 +2492,22 @@ mod tests {
     fn format_context_chip_picks_format_by_known_fields() {
         // Both window and percent known → percent/window chip.
         assert_eq!(
-            super::format_context_chip(Some(12_000), Some(6), Some(200_000)),
-            " 6%/200k",
+            super::format_context_chip(Some(12_000), Some(9_000), Some(6), Some(200_000)),
+            " 6%/200k cache:9k",
         );
         // Window unknown, tokens reported → tokens/? fallback.
         assert_eq!(
-            super::format_context_chip(Some(12_000), None, None),
+            super::format_context_chip(Some(12_000), None, None, None),
             " 12k/?",
         );
         // Window known but no usage report yet still shows the percent
         // (which the harness initialized to 0 on model select).
         assert_eq!(
-            super::format_context_chip(None, Some(0), Some(200_000)),
+            super::format_context_chip(None, None, Some(0), Some(200_000)),
             " 0%/200k",
         );
         // Nothing known → empty.
-        assert_eq!(super::format_context_chip(None, None, None), "");
+        assert_eq!(super::format_context_chip(None, None, None, None), "");
     }
 
     #[test]
@@ -2629,6 +2647,7 @@ mod tests {
             text: Some("Hello!\n\nHow can I help you today?".into()),
             tool_calls: Vec::new(),
             input_tokens: None,
+            cached_tokens: None,
         }));
         sync(&handle);
         assert!(
@@ -2656,6 +2675,7 @@ mod tests {
             text: Some("Hello again!\n\nHow can I help you?".into()),
             tool_calls: Vec::new(),
             input_tokens: None,
+            cached_tokens: None,
         }));
         sync(&handle);
         assert!(
@@ -2683,6 +2703,7 @@ mod tests {
             text: Some("Hi there!\n\nWhat can I help you with?".into()),
             tool_calls: Vec::new(),
             input_tokens: None,
+            cached_tokens: None,
         }));
         sync(&handle);
 
@@ -2756,6 +2777,7 @@ mod tests {
             text: Some(response.into()),
             tool_calls: Vec::new(),
             input_tokens: None,
+            cached_tokens: None,
         }));
         sync(&handle);
 
@@ -2813,6 +2835,7 @@ mod tests {
             text: Some(response.into()),
             tool_calls: Vec::new(),
             input_tokens: None,
+            cached_tokens: None,
         }));
         sync(&handle);
 
@@ -2869,6 +2892,7 @@ mod tests {
             text: Some(final_text.into()),
             tool_calls: Vec::new(),
             input_tokens: None,
+            cached_tokens: None,
         }));
         sync(&handle);
 

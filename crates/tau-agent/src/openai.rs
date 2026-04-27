@@ -62,6 +62,7 @@ pub struct StreamState {
     pub text: String,
     pub tool_calls: Vec<ToolCallAccumulator>,
     pub input_tokens: Option<u64>,
+    pub cached_tokens: Option<u64>,
 }
 
 /// Accumulates one tool call across streaming chunks.
@@ -77,6 +78,7 @@ impl StreamState {
             text: String::new(),
             tool_calls: Vec::new(),
             input_tokens: None,
+            cached_tokens: None,
         }
     }
 
@@ -156,8 +158,16 @@ pub fn chat_completion_stream(
             continue;
         };
 
-        if state.input_tokens.is_none() {
-            state.input_tokens = chunk.usage.and_then(|usage| usage.prompt_tokens);
+        if let Some(usage) = chunk.usage.as_ref() {
+            if state.input_tokens.is_none() {
+                state.input_tokens = usage.prompt_tokens;
+            }
+            if state.cached_tokens.is_none() {
+                state.cached_tokens = usage
+                    .prompt_tokens_details
+                    .as_ref()
+                    .and_then(|details| details.cached_tokens);
+            }
         }
 
         // Accumulate text content.
@@ -456,6 +466,14 @@ struct StreamFunction {
 struct Usage {
     #[serde(default)]
     prompt_tokens: Option<u64>,
+    #[serde(default)]
+    prompt_tokens_details: Option<PromptTokensDetails>,
+}
+
+#[derive(Deserialize)]
+struct PromptTokensDetails {
+    #[serde(default)]
+    cached_tokens: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -541,6 +559,7 @@ mod tests {
                 },
             ],
             input_tokens: None,
+            cached_tokens: None,
         };
 
         let calls = state.into_tool_calls();

@@ -814,10 +814,13 @@ impl ToolRegistry {
     /// Returns all unique tool specs, one per tool name (first provider wins).
     #[must_use]
     pub fn all_tools(&self) -> Vec<&ToolSpec> {
-        self.providers_by_tool
+        let mut tools: Vec<_> = self
+            .providers_by_tool
             .values()
             .filter_map(|providers| providers.first().map(|p| &p.tool))
-            .collect()
+            .collect();
+        tools.sort_by(|a, b| a.name.as_str().cmp(b.name.as_str()));
+        tools
     }
 
     /// Picks one currently live provider for a tool name.
@@ -1815,6 +1818,7 @@ mod tests {
                     text: Some("hidden".to_owned()),
                     tool_calls: Vec::new(),
                     input_tokens: None,
+                    cached_tokens: None,
                 }),
             )
             .expect("directed route should succeed");
@@ -1863,6 +1867,7 @@ mod tests {
             text: Some("done".to_owned()),
             tool_calls: Vec::new(),
             input_tokens: None,
+            cached_tokens: None,
         }));
         assert_eq!(second_report.delivered_to, vec![agent_id.clone()]);
 

@@ -121,6 +121,16 @@ pub fn responses_stream(
                         .and_then(|response| response["usage"]["input_tokens"].as_u64())
                         .or_else(|| event["usage"]["input_tokens"].as_u64());
                 }
+                if state.cached_tokens.is_none() {
+                    state.cached_tokens = event
+                        .get("response")
+                        .and_then(|response| {
+                            response["usage"]["input_tokens_details"]["cached_tokens"].as_u64()
+                        })
+                        .or_else(|| {
+                            event["usage"]["input_tokens_details"]["cached_tokens"].as_u64()
+                        });
+                }
                 break;
             }
             "response.incomplete" => {
@@ -273,14 +283,6 @@ fn decode_tool_name(name: &str) -> String {
 // Conversation conversion
 // ---------------------------------------------------------------------------
 
-/// Counter for generating unique message IDs.
-static MSG_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-
-fn next_msg_id() -> String {
-    let n = MSG_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    format!("msg_{n}")
-}
-
 fn convert_message(msg: &ConversationMessage, out: &mut Vec<serde_json::Value>) {
     match msg.role {
         ConversationRole::User => {
@@ -346,8 +348,6 @@ fn convert_message(msg: &ConversationMessage, out: &mut Vec<serde_json::Value>) 
                             out.push(serde_json::json!({
                                 "type": "message",
                                 "role": "assistant",
-                                "id": next_msg_id(),
-                                "status": "completed",
                                 "content": [{
                                     "type": "output_text",
                                     "text": text_parts.join("\n"),
@@ -378,8 +378,6 @@ fn convert_message(msg: &ConversationMessage, out: &mut Vec<serde_json::Value>) 
                 out.push(serde_json::json!({
                     "type": "message",
                     "role": "assistant",
-                    "id": next_msg_id(),
-                    "status": "completed",
                     "content": [{
                         "type": "output_text",
                         "text": text_parts.join("\n"),

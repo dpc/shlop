@@ -91,6 +91,7 @@ where
                                 text: Some(msg),
                                 tool_calls: Vec::new(),
                                 input_tokens: None,
+                                cached_tokens: None,
                             },
                         ))?;
                         writer.flush()?;
@@ -266,6 +267,7 @@ fn finish_stream<W: Write>(
     let text_empty = state.text.is_empty();
     let text_content = state.text.clone();
     let input_tokens = state.input_tokens;
+    let cached_tokens = state.cached_tokens;
     let tool_calls = state.into_tool_calls();
     let text = if text_empty {
         if tool_calls.is_empty() {
@@ -281,6 +283,7 @@ fn finish_stream<W: Write>(
         text,
         tool_calls,
         input_tokens,
+        cached_tokens,
     }))?;
     writer.flush()?;
     Ok(())
@@ -296,6 +299,7 @@ fn finish_error<W: Write>(
         text: Some(format!("LLM error: {error}")),
         tool_calls: Vec::new(),
         input_tokens: None,
+        cached_tokens: None,
     }))?;
     writer.flush()?;
     Ok(())
@@ -370,6 +374,7 @@ where
                         text: Some(text),
                         tool_calls: Vec::new(),
                         input_tokens: None,
+                        cached_tokens: None,
                     }))?;
                 } else {
                     // Find user text and make a tool call.
@@ -420,6 +425,7 @@ where
                         text: None,
                         tool_calls: vec![tool_call],
                         input_tokens: None,
+                        cached_tokens: None,
                     }))?;
                 }
                 writer.flush()?;

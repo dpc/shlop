@@ -516,6 +516,9 @@ struct Harness {
     /// the provider reported it. `None` until the first usage report
     /// for the current model.
     context_input_tokens: Option<u64>,
+    /// Cached input tokens consumed by the most recent agent
+    /// response, if the provider reported them.
+    context_cached_tokens: Option<u64>,
     /// Percentage of the selected model's context window currently
     /// used. `None` when the model's context window is unknown.
     context_percent_used: Option<u8>,
@@ -674,6 +677,7 @@ impl Harness {
             selected_model,
             selected_effort,
             context_input_tokens: None,
+            context_cached_tokens: None,
             context_percent_used: None,
             model_registry,
             discovered_skills: std::collections::HashMap::new(),
@@ -823,6 +827,7 @@ impl Harness {
             selected_model,
             selected_effort,
             context_input_tokens: None,
+            context_cached_tokens: None,
             context_percent_used: None,
             model_registry,
             discovered_skills: std::collections::HashMap::new(),
@@ -1273,6 +1278,7 @@ impl Harness {
                         self.selected_effort,
                     );
                     self.context_input_tokens = None;
+                    self.context_cached_tokens = None;
                     self.context_percent_used = None;
                     self.publish_event(
                         None,
@@ -1288,6 +1294,7 @@ impl Harness {
                         None,
                         Event::HarnessContextUsageChanged(HarnessContextUsageChanged {
                             input_tokens: self.context_input_tokens,
+                            cached_tokens: self.context_cached_tokens,
                             percent_used: self.context_percent_used,
                         }),
                     );
@@ -1736,6 +1743,7 @@ impl Harness {
         }
         let context_event = Event::HarnessContextUsageChanged(HarnessContextUsageChanged {
             input_tokens: self.context_input_tokens,
+            cached_tokens: self.context_cached_tokens,
             percent_used: self.context_percent_used,
         });
         if selector_matches_event(selectors, &context_event) {
@@ -2128,8 +2136,8 @@ impl Harness {
         &mut self,
         response: AgentResponseFinished,
     ) -> Result<(), HarnessError> {
-        if let Some(input_tokens) = response.input_tokens {
-            self.update_context_usage(input_tokens);
+        if response.input_tokens.is_some() || response.cached_tokens.is_some() {
+            self.update_context_usage(response.input_tokens, response.cached_tokens);
         }
         // Dedupe: under at-least-once delivery the agent may resend a
         // finished-response after a reconnect. The first delivery removed
@@ -2210,20 +2218,27 @@ impl Harness {
         Ok(())
     }
 
-    fn update_context_usage(&mut self, input_tokens: u64) {
+    fn update_context_usage(&mut self, input_tokens: Option<u64>, cached_tokens: Option<u64>) {
         let context_window =
             model_context_window(&self.model_registry, self.selected_model.as_str());
-        let percent_used = context_window.map(|w| context_percent_used(input_tokens, w));
-        let input_tokens = Some(input_tokens);
-        if self.context_input_tokens == input_tokens && self.context_percent_used == percent_used {
+        let percent_used = match (context_window, input_tokens) {
+            (Some(w), Some(tokens)) => Some(context_percent_used(tokens, w)),
+            _ => None,
+        };
+        if self.context_input_tokens == input_tokens
+            && self.context_cached_tokens == cached_tokens
+            && self.context_percent_used == percent_used
+        {
             return;
         }
         self.context_input_tokens = input_tokens;
+        self.context_cached_tokens = cached_tokens;
         self.context_percent_used = percent_used;
         self.publish_event(
             None,
             Event::HarnessContextUsageChanged(HarnessContextUsageChanged {
                 input_tokens,
+                cached_tokens,
                 percent_used,
             }),
         );
@@ -3160,7 +3175,8 @@ fn build_system_prompt(
     );
 
     // Available skills section.
-    let prompt_skills: Vec<_> = skills.iter().filter(|(_, s)| s.add_to_prompt).collect();
+    let mut prompt_skills: Vec<_> = skills.iter().filter(|(_, s)| s.add_to_prompt).collect();
+    prompt_skills.sort_by(|(a, _), (b, _)| a.as_str().cmp(b.as_str()));
     if !prompt_skills.is_empty() {
         prompt.push_str(
             "\nThe following skills provide specialized instructions for specific tasks.\n\
@@ -4690,6 +4706,7 @@ mod tests {
                 arguments: CborValue::Map(Vec::new()),
             }],
             input_tokens: None,
+            cached_tokens: None,
         };
 
         h.handle_agent_response_finished(response)
@@ -4769,6 +4786,7 @@ mod tests {
                 },
             ],
             input_tokens: None,
+            cached_tokens: None,
         };
 
         h.handle_agent_response_finished(response)
@@ -4877,6 +4895,7 @@ mod tests {
                 },
             ],
             input_tokens: None,
+            cached_tokens: None,
         };
 
         h.handle_agent_response_finished(response)

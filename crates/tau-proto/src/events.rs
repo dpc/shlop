@@ -450,6 +450,10 @@ pub struct HarnessContextUsageChanged {
     /// reported for the current model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_tokens: Option<u64>,
+    /// Cached input tokens consumed by the most recent agent response,
+    /// if the provider reported them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_tokens: Option<u64>,
     /// Percentage of the context window currently used. `None` when
     /// the model's context window is unknown (no `contextWindow` in
     /// `models.json5` and the provider didn't expose one), so the UI
@@ -1015,6 +1019,10 @@ pub struct AgentResponseFinished {
     /// reported usage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_tokens: Option<u64>,
+    /// Cached input tokens consumed by the final request, if the
+    /// provider reported them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_tokens: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------

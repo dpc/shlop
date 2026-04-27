@@ -566,6 +566,7 @@ mod tests {
                 text: Some("Hi there".to_owned()),
                 tool_calls: Vec::new(),
                 input_tokens: None,
+                cached_tokens: None,
             }),
             Event::ExtensionStarting(ExtensionStarting {
                 instance_id: 1.into(),
