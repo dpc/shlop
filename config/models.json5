@@ -4,6 +4,12 @@
     local: {
       baseUrl: "http://localhost:8080/v1",
       apiKey: "none",
+      // For providers that explicitly support OpenAI prompt cache knobs:
+      // compat: {
+      //   supportsPromptCacheKey: true,
+      //   supportsPromptCacheRetention: true,
+      // },
+      // promptCacheRetention: "24h",
       models: [
         { id: "llama-3", contextWindow: 200000 },
       ],

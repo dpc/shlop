@@ -328,6 +328,9 @@ pub struct ProviderConfig {
     pub api_key: Option<String>,
     /// Extra HTTP headers (key → value or env var name).
     pub headers: Option<HashMap<String, String>>,
+    /// Optional provider-side prompt cache retention policy.
+    #[serde(rename = "promptCacheRetention")]
+    pub prompt_cache_retention: Option<PromptCacheRetention>,
     /// Compatibility flags for non-standard providers.
     #[serde(default)]
     pub compat: ProviderCompat,
@@ -346,6 +349,10 @@ pub struct ProviderCompat {
     pub supports_reasoning_effort: bool,
     #[serde(rename = "supportsPrefill")]
     pub supports_prefill: bool,
+    #[serde(rename = "supportsPromptCacheKey")]
+    pub supports_prompt_cache_key: bool,
+    #[serde(rename = "supportsPromptCacheRetention")]
+    pub supports_prompt_cache_retention: bool,
 }
 
 impl Default for ProviderCompat {
@@ -354,6 +361,27 @@ impl Default for ProviderCompat {
             supports_developer_role: true,
             supports_reasoning_effort: true,
             supports_prefill: true,
+            supports_prompt_cache_key: false,
+            supports_prompt_cache_retention: false,
+        }
+    }
+}
+
+/// Provider-side prompt cache retention policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize)]
+pub enum PromptCacheRetention {
+    #[serde(rename = "in_memory")]
+    InMemory,
+    #[serde(rename = "24h")]
+    Extended24h,
+}
+
+impl PromptCacheRetention {
+    #[must_use]
+    pub const fn as_wire(self) -> &'static str {
+        match self {
+            Self::InMemory => "in_memory",
+            Self::Extended24h => "24h",
         }
     }
 }
@@ -799,6 +827,11 @@ mod tests {
                         baseUrl: "http://localhost:8080/v1",
                         api: "openai-completions",
                         apiKey: "test",
+                        promptCacheRetention: "24h",
+                        compat: {
+                            supportsPromptCacheKey: true,
+                            supportsPromptCacheRetention: true,
+                        },
                         models: [{ id: "llama-3" }]
                     }
                 }
@@ -810,6 +843,12 @@ mod tests {
         assert_eq!(m.providers.len(), 1);
         let local = &m.providers["local"];
         assert_eq!(local.base_url.as_deref(), Some("http://localhost:8080/v1"));
+        assert_eq!(
+            local.prompt_cache_retention,
+            Some(PromptCacheRetention::Extended24h)
+        );
+        assert!(local.compat.supports_prompt_cache_key);
+        assert!(local.compat.supports_prompt_cache_retention);
         assert_eq!(local.models.len(), 1);
         assert_eq!(local.models[0].id, "llama-3");
     }

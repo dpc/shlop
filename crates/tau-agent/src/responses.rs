@@ -20,6 +20,10 @@ pub struct ResponsesConfig {
     pub account_id: Option<String>,
     /// Whether the provider's API accepts a `reasoning.effort` field.
     pub supports_reasoning_effort: bool,
+    /// Stable seed used to derive `prompt_cache_key` per request.
+    pub prompt_cache_key_seed: Option<String>,
+    /// Provider-side prompt cache retention policy, when configured.
+    pub prompt_cache_retention: Option<tau_config::settings::PromptCacheRetention>,
 }
 
 /// Calls the Codex Responses API with SSE streaming.
@@ -192,6 +196,10 @@ struct ResponsesRequest {
     tool_choice: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<ReasoningRequest>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_retention: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -241,6 +249,11 @@ fn build_request(config: &ResponsesConfig, request: &PromptPayload<'_>) -> Respo
     } else {
         None
     };
+    let prompt_cache_key =
+        crate::openai::prompt_cache_key(config.prompt_cache_key_seed.as_deref(), request);
+    let prompt_cache_retention = config
+        .prompt_cache_retention
+        .map(tau_config::settings::PromptCacheRetention::as_wire);
 
     ResponsesRequest {
         model: config.model_id.clone(),
@@ -251,6 +264,8 @@ fn build_request(config: &ResponsesConfig, request: &PromptPayload<'_>) -> Respo
         tools,
         tool_choice,
         reasoning,
+        prompt_cache_key,
+        prompt_cache_retention,
     }
 }
 
@@ -386,5 +401,63 @@ fn convert_message(msg: &ConversationMessage, out: &mut Vec<serde_json::Value>) 
                 }));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tau_config::settings::PromptCacheRetention;
+    use tau_proto::Effort;
+
+    use super::*;
+
+    #[test]
+    fn build_request_includes_prompt_cache_fields_when_configured() {
+        let config = ResponsesConfig {
+            base_url: "https://chatgpt.com/backend-api".into(),
+            api_key: "test".into(),
+            model_id: "gpt-5-codex".into(),
+            account_id: None,
+            supports_reasoning_effort: false,
+            prompt_cache_key_seed: Some("seed".into()),
+            prompt_cache_retention: Some(PromptCacheRetention::InMemory),
+        };
+        let request = PromptPayload {
+            system_prompt: "system",
+            messages: &[],
+            tools: &[],
+            effort: Effort::Off,
+        };
+
+        let body = serde_json::to_value(build_request(&config, &request)).expect("serialize");
+        let prompt_cache_key = body["prompt_cache_key"].as_str().expect("prompt_cache_key");
+
+        assert!(prompt_cache_key.starts_with("tau:"));
+        assert_eq!(body["prompt_cache_retention"], "in_memory");
+    }
+
+    #[test]
+    fn build_request_omits_prompt_cache_fields_without_seed_or_retention() {
+        let config = ResponsesConfig {
+            base_url: "https://chatgpt.com/backend-api".into(),
+            api_key: "test".into(),
+            model_id: "gpt-5-codex".into(),
+            account_id: None,
+            supports_reasoning_effort: false,
+            prompt_cache_key_seed: None,
+            prompt_cache_retention: None,
+        };
+        let request = PromptPayload {
+            system_prompt: "system",
+            messages: &[],
+            tools: &[],
+            effort: Effort::Off,
+        };
+
+        let body = serde_json::to_value(build_request(&config, &request)).expect("serialize");
+        let object = body.as_object().expect("request object");
+
+        assert!(!object.contains_key("prompt_cache_key"));
+        assert!(!object.contains_key("prompt_cache_retention"));
     }
 }

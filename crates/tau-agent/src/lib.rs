@@ -9,7 +9,7 @@ mod responses;
 use std::error::Error;
 use std::io::{BufReader, BufWriter, Read, Write};
 
-use tau_config::settings::{self, ModelRegistry};
+use tau_config::settings::{self, ModelRegistry, ProviderConfig};
 use tau_proto::{
     Ack, AgentPromptSubmitted, AgentResponseFinished, AgentResponseUpdated, ClientKind, Event,
     EventName, EventReader, EventSelector, EventWriter, LifecycleHello, LifecycleReady,
@@ -153,6 +153,15 @@ fn resolve_backend(
                 model_id: model_id.to_owned(),
                 account_id,
                 supports_reasoning_effort: provider.compat.supports_reasoning_effort,
+                prompt_cache_key_seed: prompt_cache_key_seed(
+                    provider,
+                    "https://chatgpt.com/backend-api",
+                    model_id,
+                ),
+                prompt_cache_retention: prompt_cache_retention(
+                    provider,
+                    "https://chatgpt.com/backend-api",
+                ),
             }))
         }
         "github-copilot" => {
@@ -165,11 +174,15 @@ fn resolve_backend(
             };
             let base_url = extract_copilot_base_url(&access_token)
                 .unwrap_or_else(|| "https://api.individual.githubcopilot.com".to_owned());
+            let prompt_cache_key_seed = prompt_cache_key_seed(provider, &base_url, model_id);
+            let prompt_cache_retention = prompt_cache_retention(provider, &base_url);
             Some(BackendConfig::ChatCompletions(openai::OpenAiConfig {
                 base_url,
                 api_key: access_token,
                 model_id: model_id.to_owned(),
                 supports_reasoning_effort: provider.compat.supports_reasoning_effort,
+                prompt_cache_key_seed,
+                prompt_cache_retention,
             }))
         }
         "api-key" | "none" | _ => {
@@ -183,14 +196,54 @@ fn resolve_backend(
                 }
             })?;
             let api_key = provider.api_key.clone().unwrap_or_default();
+            let prompt_cache_key_seed = prompt_cache_key_seed(provider, &base_url, model_id);
+            let prompt_cache_retention = prompt_cache_retention(provider, &base_url);
             Some(BackendConfig::ChatCompletions(openai::OpenAiConfig {
                 base_url,
                 api_key,
                 model_id: model_id.to_owned(),
                 supports_reasoning_effort: provider.compat.supports_reasoning_effort,
+                prompt_cache_key_seed,
+                prompt_cache_retention,
             }))
         }
     }
+}
+
+fn prompt_cache_key_seed(
+    provider: &ProviderConfig,
+    base_url: &str,
+    model_id: &str,
+) -> Option<String> {
+    if !supports_prompt_cache_key(provider, base_url) {
+        return None;
+    }
+
+    let cwd = std::env::current_dir().ok()?;
+    Some(openai::prompt_cache_key_seed(base_url, model_id, &cwd))
+}
+
+fn prompt_cache_retention(
+    provider: &ProviderConfig,
+    base_url: &str,
+) -> Option<settings::PromptCacheRetention> {
+    if supports_prompt_cache_retention(provider, base_url) {
+        provider.prompt_cache_retention
+    } else {
+        None
+    }
+}
+
+fn supports_prompt_cache_key(provider: &ProviderConfig, base_url: &str) -> bool {
+    provider.compat.supports_prompt_cache_key || is_public_openai_api(base_url)
+}
+
+fn supports_prompt_cache_retention(provider: &ProviderConfig, base_url: &str) -> bool {
+    provider.compat.supports_prompt_cache_retention || is_public_openai_api(base_url)
+}
+
+fn is_public_openai_api(base_url: &str) -> bool {
+    base_url.trim_end_matches('/') == "https://api.openai.com/v1"
 }
 
 /// Parse `proxy-ep` from a Copilot token string.
@@ -449,5 +502,40 @@ mod tests {
         let models = ModelRegistry::default();
         let auth = tau_provider::storage::AuthStore::default();
         assert!(resolve_backend("fake/model", &models, &auth).is_none());
+    }
+
+    #[test]
+    fn public_openai_api_enables_prompt_cache_support() {
+        let provider = ProviderConfig::default();
+
+        assert!(supports_prompt_cache_key(
+            &provider,
+            "https://api.openai.com/v1"
+        ));
+        assert!(supports_prompt_cache_retention(
+            &provider,
+            "https://api.openai.com/v1/"
+        ));
+    }
+
+    #[test]
+    fn provider_flags_enable_prompt_cache_support_for_non_openai_backends() {
+        let provider = ProviderConfig {
+            compat: settings::ProviderCompat {
+                supports_prompt_cache_key: true,
+                supports_prompt_cache_retention: true,
+                ..settings::ProviderCompat::default()
+            },
+            ..ProviderConfig::default()
+        };
+
+        assert!(supports_prompt_cache_key(
+            &provider,
+            "https://example.com/v1"
+        ));
+        assert!(supports_prompt_cache_retention(
+            &provider,
+            "https://example.com/v1"
+        ));
     }
 }

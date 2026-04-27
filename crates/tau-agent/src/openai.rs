@@ -3,9 +3,11 @@
 //! Works with any endpoint speaking the OpenAI chat completions API:
 //! llama.cpp, vLLM, Ollama, OpenAI, etc.
 
+use std::fmt::Write as _;
 use std::io::BufRead;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tau_proto::{
     AgentToolCall, CborValue, ContentBlock, ConversationMessage, ConversationRole, ToolDefinition,
 };
@@ -30,6 +32,10 @@ pub struct OpenAiConfig {
     /// Whether the provider's API accepts a `reasoning_effort` field.
     /// Read from `models.json5` provider compat flags.
     pub supports_reasoning_effort: bool,
+    /// Stable seed used to derive `prompt_cache_key` per request.
+    pub prompt_cache_key_seed: Option<String>,
+    /// Provider-side prompt cache retention policy, when configured.
+    pub prompt_cache_retention: Option<tau_config::settings::PromptCacheRetention>,
 }
 
 /// Error from the OpenAI client.
@@ -227,6 +233,10 @@ struct CompletionRequest {
     /// effort.
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_retention: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -308,6 +318,10 @@ fn build_request(
     } else {
         None
     };
+    let prompt_cache_key = prompt_cache_key(config.prompt_cache_key_seed.as_deref(), request);
+    let prompt_cache_retention = config
+        .prompt_cache_retention
+        .map(tau_config::settings::PromptCacheRetention::as_wire);
 
     CompletionRequest {
         model: config.model_id.clone(),
@@ -316,7 +330,61 @@ fn build_request(
         tool_choice,
         stream,
         reasoning_effort,
+        prompt_cache_key,
+        prompt_cache_retention,
     }
+}
+
+pub(crate) fn prompt_cache_key_seed(
+    base_url: &str,
+    model_id: &str,
+    cwd: &std::path::Path,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"tau:prompt-cache-key-seed:v1\0");
+    hasher.update(base_url.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(model_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(cwd.to_string_lossy().as_bytes());
+    format!("tau:{}", hex_digest(&hasher.finalize()))
+}
+
+pub(crate) fn prompt_cache_key(seed: Option<&str>, request: &PromptPayload<'_>) -> Option<String> {
+    let seed = seed?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"tau:prompt-cache-key:v1\0");
+    hasher.update(seed.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(request.system_prompt.as_bytes());
+    hasher.update(b"\0");
+
+    for tool in request.tools {
+        hasher.update(tool.name.as_bytes());
+        hasher.update(b"\0");
+        if let Some(description) = tool.description.as_deref() {
+            hasher.update(description.as_bytes());
+        }
+        hasher.update(b"\0");
+        if let Some(parameters) = tool.parameters.as_ref() {
+            hasher.update(
+                serde_json::to_string(parameters)
+                    .unwrap_or_default()
+                    .as_bytes(),
+            );
+        }
+        hasher.update(b"\0");
+    }
+
+    Some(format!("tau:{}", hex_digest(&hasher.finalize())))
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(&mut out, "{byte:02x}");
+    }
+    out
 }
 
 /// Maps `Effort` to the wire string the OpenAI Responses /
@@ -533,6 +601,9 @@ pub fn json_to_cbor(v: &serde_json::Value) -> CborValue {
 
 #[cfg(test)]
 mod tests {
+    use tau_config::settings::PromptCacheRetention;
+    use tau_proto::Effort;
+
     use super::*;
 
     #[test]
@@ -566,5 +637,53 @@ mod tests {
         assert_eq!(calls.len(), 1, "nameless accumulator must be dropped");
         assert_eq!(calls[0].id.as_str(), "call_real");
         assert_eq!(calls[0].name.as_str(), "shell");
+    }
+
+    #[test]
+    fn build_request_includes_prompt_cache_fields_when_configured() {
+        let config = OpenAiConfig {
+            base_url: "https://api.openai.com/v1".into(),
+            api_key: "test".into(),
+            model_id: "gpt-5".into(),
+            supports_reasoning_effort: false,
+            prompt_cache_key_seed: Some("seed".into()),
+            prompt_cache_retention: Some(PromptCacheRetention::Extended24h),
+        };
+        let request = PromptPayload {
+            system_prompt: "system",
+            messages: &[],
+            tools: &[],
+            effort: Effort::Off,
+        };
+
+        let body = serde_json::to_value(build_request(&config, &request, true)).expect("serialize");
+        let prompt_cache_key = body["prompt_cache_key"].as_str().expect("prompt_cache_key");
+
+        assert!(prompt_cache_key.starts_with("tau:"));
+        assert_eq!(body["prompt_cache_retention"], "24h");
+    }
+
+    #[test]
+    fn build_request_omits_prompt_cache_fields_without_seed_or_retention() {
+        let config = OpenAiConfig {
+            base_url: "https://example.com/v1".into(),
+            api_key: "test".into(),
+            model_id: "local".into(),
+            supports_reasoning_effort: false,
+            prompt_cache_key_seed: None,
+            prompt_cache_retention: None,
+        };
+        let request = PromptPayload {
+            system_prompt: "system",
+            messages: &[],
+            tools: &[],
+            effort: Effort::Off,
+        };
+
+        let body = serde_json::to_value(build_request(&config, &request, true)).expect("serialize");
+        let object = body.as_object().expect("request object");
+
+        assert!(!object.contains_key("prompt_cache_key"));
+        assert!(!object.contains_key("prompt_cache_retention"));
     }
 }
