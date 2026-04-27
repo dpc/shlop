@@ -219,7 +219,23 @@ where
                     Event::UiPromptSubmitted(_) => {
                         idle_deadline = None;
                     }
-                    Event::AgentResponseFinished(_) => {
+                    Event::AgentResponseFinished(finished) => {
+                        // The agent emits one `AgentResponseFinished`
+                        // per LLM call. When `tool_calls` is non-empty,
+                        // the harness will run the tools and feed the
+                        // results back as a new prompt — the *turn*
+                        // isn't actually done yet. Only fire the
+                        // end-of-turn sound + idle timer when the
+                        // agent returned a final answer with no
+                        // pending tool work.
+                        if !finished.tool_calls.is_empty() {
+                            tracing::trace!(
+                                target: LOG_TARGET,
+                                tool_calls = finished.tool_calls.len(),
+                                "skipping mid-turn AgentResponseFinished",
+                            );
+                            continue;
+                        }
                         writer.write_event(&sound_event(VALUE_AGENT_END))?;
                         writer.flush()?;
                         idle_deadline = Some(Instant::now() + idle_duration);
@@ -360,6 +376,66 @@ mod tests {
             }
             other => panic!("expected Osc1337SetUserVar, got {other:?}"),
         }
+    }
+
+    /// Mid-turn `AgentResponseFinished` events (those carrying
+    /// pending tool calls) must NOT trigger the end-of-turn sound.
+    /// The agent emits one of those per LLM call when it's looping
+    /// through tool use; the *turn* only ends with a final
+    /// `AgentResponseFinished` that has empty `tool_calls`.
+    #[test]
+    fn mid_turn_finish_with_tool_calls_does_not_emit_end_sound() {
+        use tau_proto::{AgentToolCall, CborValue, ToolNameMaybe};
+        let mut input = Vec::new();
+        let mut writer = EventWriter::new(&mut input);
+        writer
+            .write_event(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
+                session_prompt_id: "sp-0".into(),
+            }))
+            .expect("write");
+        // Mid-turn finish: text=None, tool_calls non-empty. No
+        // notification should fire.
+        writer
+            .write_event(&Event::AgentResponseFinished(AgentResponseFinished {
+                session_prompt_id: "sp-0".into(),
+                text: None,
+                tool_calls: vec![AgentToolCall {
+                    id: "call-1".into(),
+                    name: ToolNameMaybe::from_raw("shell"),
+                    arguments: CborValue::Null,
+                }],
+                input_tokens: None,
+                cached_tokens: None,
+                thinking: Some("planning".into()),
+            }))
+            .expect("write");
+        writer
+            .write_event(&Event::LifecycleDisconnect(LifecycleDisconnect {
+                reason: None,
+            }))
+            .expect("write");
+        writer.flush().expect("flush");
+
+        let mut output = Vec::new();
+        run_with_idle(Cursor::new(input), &mut output, Duration::from_secs(3600)).expect("run");
+
+        let mut reader = EventReader::new(Cursor::new(output));
+        drain_lifecycle(&mut reader);
+
+        // We expect the start sound but NO end sound, because the
+        // tool-bearing AgentResponseFinished is mid-turn.
+        let start = reader.read_event().expect("read").expect("start");
+        match start {
+            Event::Osc1337SetUserVar(osc) => {
+                assert_eq!(osc.value, VALUE_AGENT_START);
+            }
+            other => panic!("expected start OSC, got {other:?}"),
+        }
+        let next = reader.read_event().expect("read");
+        assert!(
+            next.is_none(),
+            "no further OSC events expected after mid-turn finish, got {next:?}",
+        );
     }
 
     /// After AgentResponseFinished we should see the end-sound OSC
