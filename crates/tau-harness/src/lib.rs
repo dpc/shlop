@@ -5405,6 +5405,80 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    /// One-shot dump of the system prompt + first user turn the agent
+    /// receives, written to `tmp/initial_prompt.txt` at the repo root.
+    /// Uses the user's real `TauDirs::default()` config so cwd, skills
+    /// discovered by the shell extension, and the actual tool list
+    /// match what a real session would see (extensions defined in
+    /// `harness.json5` are not spawned by the embedded path, so only
+    /// shell-registered tools appear).
+    ///
+    /// Run with:
+    ///   cargo test -p tau-harness dump_initial_prompt_to_tmp -- --ignored
+    /// --nocapture
+    #[test]
+    #[ignore = "writes tmp/initial_prompt.txt; run with --ignored"]
+    fn dump_initial_prompt_to_tmp() {
+        let td = TempDir::new().expect("tempdir");
+        let sp = td.path().join("state");
+        let mut h = Harness::new_with_agent(
+            &sp,
+            tau_config::settings::TauDirs::default(),
+            default_agent_runner,
+            false,
+            "s1",
+        )
+        .expect("start harness");
+        h.selected_model = "test/model".into();
+
+        h.store
+            .append_user_message("s1", "hello".to_owned())
+            .expect("append user");
+
+        let spid = h.send_prompt_to_agent("s1");
+        let prompt = read_prompt_created(&h, &spid);
+
+        let mut out = String::new();
+        out.push_str("================ MODEL / EFFORT ================\n");
+        out.push_str(&format!(
+            "model:  {}\n",
+            prompt
+                .model
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "(none)".to_owned())
+        ));
+        out.push_str(&format!("effort: {:?}\n\n", prompt.effort));
+
+        out.push_str("================ SYSTEM PROMPT ================\n");
+        out.push_str(&prompt.system_prompt);
+        if !prompt.system_prompt.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push('\n');
+
+        out.push_str("================ MESSAGES ================\n");
+        out.push_str(&serde_json::to_string_pretty(&prompt.messages).expect("messages json"));
+        out.push_str("\n\n");
+
+        out.push_str("================ TOOLS ================\n");
+        out.push_str(&serde_json::to_string_pretty(&prompt.tools).expect("tools json"));
+        out.push('\n');
+
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let dest = repo_root.join("tmp").join("initial_prompt.txt");
+        std::fs::create_dir_all(dest.parent().unwrap()).expect("create tmp/");
+        std::fs::write(&dest, &out).expect("write dump");
+        eprintln!("wrote {}", dest.display());
+
+        h.shutdown().expect("shutdown");
+    }
+
     fn read_prompt_created(h: &Harness, spid: &SessionPromptId) -> SessionPromptCreated {
         let mut cursor = 0;
         loop {
