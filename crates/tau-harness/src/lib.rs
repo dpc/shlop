@@ -2831,16 +2831,19 @@ fn spawn_supervised(
     Ok((conn_id, child_pid))
 }
 
-/// Read an extension's stderr line-by-line and append each line to
-/// `log_path`, prefixed with a wall-clock timestamp. The thread exits
-/// naturally when stderr closes (i.e. the child exits), so callers
-/// don't need to track the join handle.
+/// Read an extension's stderr line-by-line and append each line
+/// verbatim to `log_path`. Extensions are expected to use
+/// `tau_extension::init_logging` (or any other `tracing`-based
+/// formatter), which already emits its own timestamps and levels —
+/// adding our own prefix would double up the metadata. The thread
+/// exits naturally when stderr closes (i.e. the child exits), so
+/// callers don't need to track the join handle.
 fn spawn_extension_stderr_logger(
     name: String,
     stderr: std::process::ChildStderr,
     log_path: PathBuf,
 ) {
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::{BufReader, Write};
     thread::spawn(move || {
         if let Some(parent) = log_path.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
@@ -2876,14 +2879,12 @@ fn spawn_extension_stderr_logger(
         let _ = file.flush();
 
         let mut reader = BufReader::new(stderr);
-        let mut line = String::new();
+        let mut buf = [0u8; 4096];
         loop {
-            line.clear();
-            match reader.read_line(&mut line) {
+            match std::io::Read::read(&mut reader, &mut buf) {
                 Ok(0) => break,
-                Ok(_) => {
-                    let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
-                    let _ = writeln!(file, "[{}] {}", chrono_free_date(), trimmed);
+                Ok(n) => {
+                    let _ = file.write_all(&buf[..n]);
                     let _ = file.flush();
                 }
                 Err(_) => break,

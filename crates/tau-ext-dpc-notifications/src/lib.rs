@@ -28,6 +28,11 @@ use tau_proto::{
     LifecycleSubscribe, Osc1337SetUserVar, PROTOCOL_VERSION,
 };
 
+/// `tracing` target for events emitted from this extension. Matches
+/// the convention described in [`tau_extension`]: a short identifier
+/// the user can name in `TAU_EXT_LOG=dpc_notifications=trace`.
+pub const LOG_TARGET: &str = "dpc_notifications";
+
 /// User-var name for sound notifications (matches `user-notification.sh`).
 pub const SOUND_VAR_NAME: &str = "user-notification";
 
@@ -46,6 +51,7 @@ pub const VALUE_AGENT_END: &str = "protoss-upgrade-complete";
 pub const IDLE_DURATION: Duration = Duration::from_secs(15);
 
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
+    tau_extension::init_logging();
     run(std::io::stdin(), std::io::stdout())
 }
 
@@ -158,7 +164,7 @@ where
         match recv_result {
             Ok(InMsg::Event(event)) => {
                 let (_, inner) = event.peel_log();
-                eprintln!("event: {}", inner.name());
+                tracing::trace!(target: LOG_TARGET, name = %inner.name(), "event received");
                 match inner {
                     Event::AgentPromptSubmitted(_) => {
                         idle_deadline = None;
@@ -172,13 +178,21 @@ where
                         writer.write_event(&sound_event(VALUE_AGENT_END))?;
                         writer.flush()?;
                         idle_deadline = Some(Instant::now() + idle_duration);
-                        eprintln!("idle deadline armed for {}s", idle_duration.as_secs());
+                        tracing::debug!(
+                            target: LOG_TARGET,
+                            seconds = idle_duration.as_secs(),
+                            "idle deadline armed",
+                        );
                     }
                     Event::LifecycleDisconnect(_) => {
-                        eprintln!("disconnect received, exiting");
+                        tracing::info!(target: LOG_TARGET, "disconnect received, exiting");
                         break;
                     }
-                    other => eprintln!("unhandled event variant: {}", other.name()),
+                    other => tracing::trace!(
+                        target: LOG_TARGET,
+                        name = %other.name(),
+                        "ignoring unhandled event",
+                    ),
                 }
             }
             Ok(InMsg::EndOfStream) => {
@@ -188,7 +202,10 @@ where
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                eprintln!("idle deadline elapsed, emitting text notification");
+                tracing::info!(
+                    target: LOG_TARGET,
+                    "idle deadline elapsed, emitting text notification",
+                );
                 writer.write_event(&idle_text_event())?;
                 writer.flush()?;
                 idle_deadline = None;
