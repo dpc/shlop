@@ -761,7 +761,10 @@ impl Harness {
                 _ => ClientKind::Tool,
             };
 
-            let (conn_id, child_pid) = spawn_supervised(ext_config, kind.clone(), &mut bus, &tx)?;
+            let log_path =
+                extension_stderr_log_path(&state_dir, eager_session_id, &ext_config.name);
+            let (conn_id, child_pid) =
+                spawn_supervised(ext_config, kind.clone(), Some(log_path), &mut bus, &tx)?;
 
             if kind == ClientKind::Agent {
                 agent_connection_id = Some(conn_id.clone());
@@ -1461,8 +1464,13 @@ impl Harness {
         );
 
         let kind = self.extensions[index].kind.clone();
+        let log_path = extension_stderr_log_path(
+            &self.dirs_state_dir(),
+            self.current_session_id.as_str(),
+            &config.name,
+        );
         let (new_connection_id, child_pid) =
-            spawn_supervised(&config, kind, &mut self.bus, &self.tx)?;
+            spawn_supervised(&config, kind, Some(log_path), &mut self.bus, &self.tx)?;
         self.extensions[index].connection_id = new_connection_id;
         self.extensions[index].pid = Some(child_pid);
         self.extensions[index].state = ExtensionState::Spawning;
@@ -2763,19 +2771,35 @@ where
     Ok((conn_id, thread))
 }
 
+/// Path of the per-session, per-extension stderr log:
+/// `<state_dir>/<session_id>/extensions/<name>.log`. Stays inside the
+/// session dir so a session is self-contained (logs sit next to
+/// `events.jsonl` and the session's `log.cbor`).
+fn extension_stderr_log_path(state_dir: &Path, session_id: &str, name: &str) -> PathBuf {
+    state_dir
+        .join(session_id)
+        .join("extensions")
+        .join(format!("{name}.log"))
+}
+
 fn spawn_supervised(
     config: &ExtensionConfig,
     kind: ClientKind,
+    stderr_log_path: Option<PathBuf>,
     bus: &mut EventBus,
     tx: &Sender<HarnessEvent>,
 ) -> Result<(tau_proto::ConnectionId, u32), HarnessError> {
-    let mut child = Command::new(&config.command)
+    let mut command = Command::new(&config.command);
+    command
         .args(&config.args)
         .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .map_err(HarnessError::Io)?;
+        .stdout(Stdio::piped());
+    if stderr_log_path.is_some() {
+        command.stderr(Stdio::piped());
+    } else {
+        command.stderr(Stdio::inherit());
+    }
+    let mut child = command.spawn().map_err(HarnessError::Io)?;
 
     let child_pid = child.id();
     let stdin = child
@@ -2786,6 +2810,10 @@ fn spawn_supervised(
         .stdout
         .take()
         .ok_or_else(|| HarnessError::Participant("missing stdout".to_owned()))?;
+
+    if let (Some(log_path), Some(stderr)) = (stderr_log_path, child.stderr.take()) {
+        spawn_extension_stderr_logger(config.name.clone(), stderr, log_path);
+    }
 
     let writer_tx = spawn_writer_thread(stdin, WriterShutdown::KillChild(child));
     let conn_id = bus.connect(Connection::new(
@@ -2801,6 +2829,74 @@ fn spawn_supervised(
     spawn_reader_thread(conn_id.clone(), stdout, tx.clone());
 
     Ok((conn_id, child_pid))
+}
+
+/// Read an extension's stderr line-by-line and append each line to
+/// `log_path`, prefixed with a wall-clock timestamp. The thread exits
+/// naturally when stderr closes (i.e. the child exits), so callers
+/// don't need to track the join handle.
+fn spawn_extension_stderr_logger(
+    name: String,
+    stderr: std::process::ChildStderr,
+    log_path: PathBuf,
+) {
+    use std::io::{BufRead, BufReader, Write};
+    thread::spawn(move || {
+        if let Some(parent) = log_path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                eprintln!(
+                    "tau: failed to create extension log dir {}: {e}",
+                    parent.display()
+                );
+                return;
+            }
+        }
+        let mut file = match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!(
+                    "tau: failed to open extension log {}: {e}",
+                    log_path.display()
+                );
+                return;
+            }
+        };
+
+        let _ = writeln!(
+            file,
+            "--- {} (pid={}) attached at {} ---",
+            name,
+            std::process::id(),
+            chrono_free_date()
+        );
+        let _ = file.flush();
+
+        let mut reader = BufReader::new(stderr);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
+                    let _ = writeln!(file, "[{}] {}", chrono_free_date(), trimmed);
+                    let _ = file.flush();
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = writeln!(
+            file,
+            "--- {} stderr closed at {} ---",
+            name,
+            chrono_free_date()
+        );
+        let _ = file.flush();
+    });
 }
 
 /// Load model registry and harness settings, build the flat model list
