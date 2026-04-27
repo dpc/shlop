@@ -20,8 +20,9 @@ pub struct ResponsesConfig {
     pub account_id: Option<String>,
     /// Whether the provider's API accepts a `reasoning.effort` field.
     pub supports_reasoning_effort: bool,
-    /// Stable seed used to derive `prompt_cache_key` per request.
-    pub prompt_cache_key_seed: Option<String>,
+    /// Routing key sent as `prompt_cache_key`. See
+    /// `openai::prompt_cache_key` for the derivation rationale.
+    pub prompt_cache_key: Option<String>,
     /// Provider-side prompt cache retention policy, when configured.
     pub prompt_cache_retention: Option<tau_config::settings::PromptCacheRetention>,
 }
@@ -249,8 +250,7 @@ fn build_request(config: &ResponsesConfig, request: &PromptPayload<'_>) -> Respo
     } else {
         None
     };
-    let prompt_cache_key =
-        crate::openai::prompt_cache_key(config.prompt_cache_key_seed.as_deref(), request);
+    let prompt_cache_key = config.prompt_cache_key.clone();
     let prompt_cache_retention = config
         .prompt_cache_retention
         .map(tau_config::settings::PromptCacheRetention::as_wire);
@@ -419,7 +419,7 @@ mod tests {
             model_id: "gpt-5-codex".into(),
             account_id: None,
             supports_reasoning_effort: false,
-            prompt_cache_key_seed: Some("seed".into()),
+            prompt_cache_key: Some("tau:seed".into()),
             prompt_cache_retention: Some(PromptCacheRetention::InMemory),
         };
         let request = PromptPayload {
@@ -432,7 +432,7 @@ mod tests {
         let body = serde_json::to_value(build_request(&config, &request)).expect("serialize");
         let prompt_cache_key = body["prompt_cache_key"].as_str().expect("prompt_cache_key");
 
-        assert!(prompt_cache_key.starts_with("tau:"));
+        assert_eq!(prompt_cache_key, "tau:seed");
         assert_eq!(body["prompt_cache_retention"], "in_memory");
     }
 
@@ -444,7 +444,7 @@ mod tests {
             model_id: "gpt-5-codex".into(),
             account_id: None,
             supports_reasoning_effort: false,
-            prompt_cache_key_seed: None,
+            prompt_cache_key: None,
             prompt_cache_retention: None,
         };
         let request = PromptPayload {

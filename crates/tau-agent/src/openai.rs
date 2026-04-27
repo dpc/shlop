@@ -32,8 +32,10 @@ pub struct OpenAiConfig {
     /// Whether the provider's API accepts a `reasoning_effort` field.
     /// Read from `models.json5` provider compat flags.
     pub supports_reasoning_effort: bool,
-    /// Stable seed used to derive `prompt_cache_key` per request.
-    pub prompt_cache_key_seed: Option<String>,
+    /// Routing key sent as `prompt_cache_key`. Stable per
+    /// `(base_url, model_id, cwd)` so OpenAI routes same-prefix
+    /// requests to the same machine.
+    pub prompt_cache_key: Option<String>,
     /// Provider-side prompt cache retention policy, when configured.
     pub prompt_cache_retention: Option<tau_config::settings::PromptCacheRetention>,
 }
@@ -318,7 +320,7 @@ fn build_request(
     } else {
         None
     };
-    let prompt_cache_key = prompt_cache_key(config.prompt_cache_key_seed.as_deref(), request);
+    let prompt_cache_key = config.prompt_cache_key.clone();
     let prompt_cache_retention = config
         .prompt_cache_retention
         .map(tau_config::settings::PromptCacheRetention::as_wire);
@@ -335,48 +337,25 @@ fn build_request(
     }
 }
 
-pub(crate) fn prompt_cache_key_seed(
-    base_url: &str,
-    model_id: &str,
-    cwd: &std::path::Path,
-) -> String {
+/// Build the `prompt_cache_key` for a session.
+///
+/// OpenAI uses this only to influence routing — the cache itself is
+/// keyed by the prefix bytes — so the key just needs to be stable for
+/// "requests that should share a machine." Hashing
+/// `(base_url, model_id, cwd)` is broad enough that all turns of the
+/// same agent in the same workspace land on the same key, which is
+/// what raises hit rate above the ~15-RPM-per-key overflow threshold.
+/// Anything finer-grained (system prompt, tools) would needlessly
+/// fragment the routing key without improving cache lookups.
+pub(crate) fn prompt_cache_key(base_url: &str, model_id: &str, cwd: &std::path::Path) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"tau:prompt-cache-key-seed:v1\0");
+    hasher.update(b"tau:prompt-cache-key:v2\0");
     hasher.update(base_url.as_bytes());
     hasher.update(b"\0");
     hasher.update(model_id.as_bytes());
     hasher.update(b"\0");
     hasher.update(cwd.to_string_lossy().as_bytes());
     format!("tau:{}", hex_digest(&hasher.finalize()))
-}
-
-pub(crate) fn prompt_cache_key(seed: Option<&str>, request: &PromptPayload<'_>) -> Option<String> {
-    let seed = seed?;
-    let mut hasher = Sha256::new();
-    hasher.update(b"tau:prompt-cache-key:v1\0");
-    hasher.update(seed.as_bytes());
-    hasher.update(b"\0");
-    hasher.update(request.system_prompt.as_bytes());
-    hasher.update(b"\0");
-
-    for tool in request.tools {
-        hasher.update(tool.name.as_bytes());
-        hasher.update(b"\0");
-        if let Some(description) = tool.description.as_deref() {
-            hasher.update(description.as_bytes());
-        }
-        hasher.update(b"\0");
-        if let Some(parameters) = tool.parameters.as_ref() {
-            hasher.update(
-                serde_json::to_string(parameters)
-                    .unwrap_or_default()
-                    .as_bytes(),
-            );
-        }
-        hasher.update(b"\0");
-    }
-
-    Some(format!("tau:{}", hex_digest(&hasher.finalize())))
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
@@ -646,7 +625,7 @@ mod tests {
             api_key: "test".into(),
             model_id: "gpt-5".into(),
             supports_reasoning_effort: false,
-            prompt_cache_key_seed: Some("seed".into()),
+            prompt_cache_key: Some("tau:seed".into()),
             prompt_cache_retention: Some(PromptCacheRetention::Extended24h),
         };
         let request = PromptPayload {
@@ -659,7 +638,7 @@ mod tests {
         let body = serde_json::to_value(build_request(&config, &request, true)).expect("serialize");
         let prompt_cache_key = body["prompt_cache_key"].as_str().expect("prompt_cache_key");
 
-        assert!(prompt_cache_key.starts_with("tau:"));
+        assert_eq!(prompt_cache_key, "tau:seed");
         assert_eq!(body["prompt_cache_retention"], "24h");
     }
 
@@ -670,7 +649,7 @@ mod tests {
             api_key: "test".into(),
             model_id: "local".into(),
             supports_reasoning_effort: false,
-            prompt_cache_key_seed: None,
+            prompt_cache_key: None,
             prompt_cache_retention: None,
         };
         let request = PromptPayload {

@@ -153,7 +153,7 @@ fn resolve_backend(
                 model_id: model_id.to_owned(),
                 account_id,
                 supports_reasoning_effort: provider.compat.supports_reasoning_effort,
-                prompt_cache_key_seed: prompt_cache_key_seed(
+                prompt_cache_key: prompt_cache_key(
                     provider,
                     "https://chatgpt.com/backend-api",
                     model_id,
@@ -174,14 +174,14 @@ fn resolve_backend(
             };
             let base_url = extract_copilot_base_url(&access_token)
                 .unwrap_or_else(|| "https://api.individual.githubcopilot.com".to_owned());
-            let prompt_cache_key_seed = prompt_cache_key_seed(provider, &base_url, model_id);
+            let prompt_cache_key = prompt_cache_key(provider, &base_url, model_id);
             let prompt_cache_retention = prompt_cache_retention(provider, &base_url);
             Some(BackendConfig::ChatCompletions(openai::OpenAiConfig {
                 base_url,
                 api_key: access_token,
                 model_id: model_id.to_owned(),
                 supports_reasoning_effort: provider.compat.supports_reasoning_effort,
-                prompt_cache_key_seed,
+                prompt_cache_key,
                 prompt_cache_retention,
             }))
         }
@@ -196,21 +196,21 @@ fn resolve_backend(
                 }
             })?;
             let api_key = provider.api_key.clone().unwrap_or_default();
-            let prompt_cache_key_seed = prompt_cache_key_seed(provider, &base_url, model_id);
+            let prompt_cache_key = prompt_cache_key(provider, &base_url, model_id);
             let prompt_cache_retention = prompt_cache_retention(provider, &base_url);
             Some(BackendConfig::ChatCompletions(openai::OpenAiConfig {
                 base_url,
                 api_key,
                 model_id: model_id.to_owned(),
                 supports_reasoning_effort: provider.compat.supports_reasoning_effort,
-                prompt_cache_key_seed,
+                prompt_cache_key,
                 prompt_cache_retention,
             }))
         }
     }
 }
 
-fn prompt_cache_key_seed(
+fn prompt_cache_key(
     provider: &ProviderConfig,
     base_url: &str,
     model_id: &str,
@@ -220,7 +220,7 @@ fn prompt_cache_key_seed(
     }
 
     let cwd = std::env::current_dir().ok()?;
-    Some(openai::prompt_cache_key_seed(base_url, model_id, &cwd))
+    Some(openai::prompt_cache_key(base_url, model_id, &cwd))
 }
 
 fn prompt_cache_retention(
