@@ -366,6 +366,37 @@ pub fn decode_event_from_slice(bytes: &[u8]) -> Result<Event, DecodeError> {
     decode_event(Cursor::new(bytes))
 }
 
+/// Convert a `serde_json::Value` into a [`CborValue`].
+///
+/// Numbers are preserved as integers when possible, otherwise as
+/// floats. Anything that doesn't round-trip cleanly (e.g. an
+/// out-of-range number that's neither `i64` nor `f64`) becomes
+/// [`CborValue::Null`]. JSON's full type system is a strict subset
+/// of CBOR, so the conversion is otherwise lossless.
+#[must_use]
+pub fn json_to_cbor(v: &serde_json::Value) -> CborValue {
+    match v {
+        serde_json::Value::Null => CborValue::Null,
+        serde_json::Value::Bool(b) => CborValue::Bool(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                CborValue::Integer(i.into())
+            } else if let Some(f) = n.as_f64() {
+                CborValue::Float(f)
+            } else {
+                CborValue::Null
+            }
+        }
+        serde_json::Value::String(s) => CborValue::Text(s.clone()),
+        serde_json::Value::Array(arr) => CborValue::Array(arr.iter().map(json_to_cbor).collect()),
+        serde_json::Value::Object(map) => CborValue::Map(
+            map.iter()
+                .map(|(k, v)| (CborValue::Text(k.clone()), json_to_cbor(v)))
+                .collect(),
+        ),
+    }
+}
+
 /// Stateful writer for a stream of protocol events.
 #[derive(Debug)]
 pub struct EventWriter<W> {

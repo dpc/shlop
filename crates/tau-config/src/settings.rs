@@ -81,7 +81,7 @@ pub struct HarnessSettings {
 /// All fields are optional in the on-disk form so users can override
 /// just the fields they care about for built-in extensions; the
 /// harness merges these with built-in defaults at startup.
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ExtensionEntry {
     /// argv prefix prepended before `command`. Useful for wrappers
@@ -104,6 +104,13 @@ pub struct ExtensionEntry {
     /// Built-in `agent` defaults to that; everything else is treated
     /// as a tool extension.
     pub role: Option<String>,
+
+    /// Free-form configuration object handed to the extension at
+    /// startup via `LifecycleConfigure`. The harness does not
+    /// interpret it — the extension defines and validates its own
+    /// schema. Defaults to an empty object so extensions can rely
+    /// on always seeing a value.
+    pub config: serde_json::Value,
 }
 
 impl Default for ExtensionEntry {
@@ -116,6 +123,7 @@ impl Default for ExtensionEntry {
             command: Vec::new(),
             enable: true,
             role: None,
+            config: serde_json::Value::Object(serde_json::Map::new()),
         }
     }
 }
@@ -128,6 +136,9 @@ pub struct BuiltinExtension {
     pub command: Vec<String>,
     pub role: Option<&'static str>,
     pub enable: bool,
+    /// Built-in default config for this extension, merged below any
+    /// user-provided `config: { … }` object in `harness.json5`.
+    pub config: serde_json::Value,
 }
 
 impl HarnessSettings {
@@ -160,6 +171,7 @@ impl HarnessSettings {
                         command: b.command,
                         enable: b.enable,
                         role: b.role.map(str::to_owned),
+                        config: b.config,
                     },
                 )
             })
@@ -182,6 +194,12 @@ impl HarnessSettings {
                     if user.role.is_some() {
                         existing.role = user.role.clone();
                     }
+                    // Config: user object overlays builtin object
+                    // field-by-field; non-object user values replace
+                    // the builtin entirely. This lets a user override
+                    // `idle_seconds` without re-stating the rest of
+                    // the builtin defaults.
+                    existing.config = merge_json(existing.config.take(), user.config.clone());
                 }
                 None => {
                     if user.command.is_empty() {
@@ -195,6 +213,7 @@ impl HarnessSettings {
                             command: user.command.clone(),
                             enable: user.enable,
                             role: user.role.clone(),
+                            config: user.config.clone(),
                         },
                     );
                 }
@@ -221,6 +240,7 @@ impl HarnessSettings {
                 command: program,
                 args,
                 role: entry.role,
+                config: entry.config,
             });
         }
         Ok(out)
@@ -233,6 +253,28 @@ struct ResolvedExtension {
     command: Vec<String>,
     enable: bool,
     role: Option<String>,
+    config: serde_json::Value,
+}
+
+/// Merge `over` on top of `base` for extension config objects.
+///
+/// When both are JSON objects, keys are merged shallowly:
+/// `over`'s keys win, `base`'s keys are kept where `over` doesn't
+/// mention them. For any other shape (one side isn't an object),
+/// `over` replaces `base` outright if it isn't `Null`. This is the
+/// minimum needed to let a user override one field of a builtin's
+/// config without restating the rest.
+fn merge_json(base: serde_json::Value, over: serde_json::Value) -> serde_json::Value {
+    match (base, over) {
+        (serde_json::Value::Object(mut b), serde_json::Value::Object(o)) => {
+            for (k, v) in o {
+                b.insert(k, v);
+            }
+            serde_json::Value::Object(b)
+        }
+        (base, serde_json::Value::Null) => base,
+        (_, over) => over,
+    }
 }
 
 /// Error returned by [`HarnessSettings::resolve_extensions`].
@@ -569,24 +611,28 @@ mod tests {
                 command: vec!["tau".into(), "ext".into(), "agent".into()],
                 role: Some("agent"),
                 enable: true,
+                config: serde_json::json!({}),
             },
             BuiltinExtension {
                 name: "shell",
                 command: vec!["tau".into(), "ext".into(), "ext-shell".into()],
                 role: Some("tool"),
                 enable: true,
+                config: serde_json::json!({}),
             },
             BuiltinExtension {
                 name: "test_dummy",
                 command: vec!["tau".into(), "ext".into(), "ext-test-dummy".into()],
                 role: Some("tool"),
                 enable: false,
+                config: serde_json::json!({}),
             },
             BuiltinExtension {
                 name: "dpc_notifications",
                 command: vec!["tau".into(), "ext".into(), "ext-dpc-notifications".into()],
                 role: Some("tool"),
                 enable: false,
+                config: serde_json::json!({ "idle_seconds": 60 }),
             },
         ]
     }

@@ -1085,6 +1085,20 @@ impl Harness {
             Event::LifecycleHello(hello) => {
                 self.set_extension_state(source_id, ExtensionState::Handshaking);
                 self.publish_event(Some(source_id), Event::LifecycleHello(hello));
+                self.send_lifecycle_configure(source_id);
+            }
+            Event::LifecycleConfigError(err) => {
+                let name = self
+                    .extensions
+                    .iter()
+                    .find(|e| e.connection_id.as_str() == source_id)
+                    .map(|e| e.name.clone())
+                    .unwrap_or_else(|| "extension".to_owned());
+                self.emit_info_important(&format!(
+                    "extension {name} rejected its config: {}\nthe value of \
+                     `extensions.{name}.config` in harness.json5 is being ignored",
+                    err.message,
+                ));
             }
             Event::LifecycleSubscribe(subscribe) => {
                 self.bus
@@ -1636,6 +1650,29 @@ impl Harness {
                 "harness.json5 failed to parse — extensions and model selection from it are being IGNORED.\n{error}"
             ));
         }
+    }
+
+    /// Push the configured `config` value (from `harness.json5`) to
+    /// the just-said-Hello extension. Sends point-to-point so it
+    /// arrives even if the extension hasn't subscribed to the
+    /// `lifecycle` category yet. In-process extensions don't carry
+    /// a `supervised_config` so they get the empty default — they
+    /// already accept configuration via constructor parameters.
+    fn send_lifecycle_configure(&mut self, source_id: &str) {
+        let config_json = self
+            .extensions
+            .iter()
+            .find(|e| e.connection_id.as_str() == source_id)
+            .and_then(|e| e.supervised_config.as_ref())
+            .map(|cfg| cfg.config.clone())
+            .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+        let _ = self.bus.send_to(
+            source_id,
+            None,
+            Event::LifecycleConfigure(tau_proto::LifecycleConfigure {
+                config: tau_proto::json_to_cbor(&config_json),
+            }),
+        );
     }
 
     fn emit_info(&mut self, message: &str) {
@@ -3504,12 +3541,14 @@ pub fn builtin_extensions() -> Vec<tau_config::settings::BuiltinExtension> {
             command: vec![tau_binary.clone(), "ext".to_owned(), "agent".to_owned()],
             role: Some("agent"),
             enable: true,
+            config: serde_json::json!({}),
         },
         BuiltinExtension {
             name: "shell",
             command: vec![tau_binary.clone(), "ext".to_owned(), "ext-shell".to_owned()],
             role: Some("tool"),
             enable: true,
+            config: serde_json::json!({}),
         },
         BuiltinExtension {
             name: "test_dummy",
@@ -3520,6 +3559,7 @@ pub fn builtin_extensions() -> Vec<tau_config::settings::BuiltinExtension> {
             ],
             role: Some("tool"),
             enable: false,
+            config: serde_json::json!({}),
         },
         BuiltinExtension {
             name: "dpc_notifications",
@@ -3530,6 +3570,7 @@ pub fn builtin_extensions() -> Vec<tau_config::settings::BuiltinExtension> {
             ],
             role: Some("tool"),
             enable: false,
+            config: serde_json::json!({ "idle_seconds": 60 }),
         },
     ]
 }

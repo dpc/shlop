@@ -12,6 +12,7 @@ workspace = true
 config.workspace = true
 dirs.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 tau-proto.workspace = true
 toml.workspace = true
 

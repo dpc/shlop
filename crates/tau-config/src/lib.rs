@@ -18,7 +18,7 @@ use std::{fmt, fs, io};
 use serde::Deserialize;
 
 /// The resolved harness configuration after layering user and project config.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Config {
     pub core: CoreConfig,
     pub extensions: Vec<ExtensionConfig>,
@@ -63,7 +63,7 @@ pub enum CoreMode {
 }
 
 /// One configured extension process entry.
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExtensionConfig {
     pub name: String,
@@ -72,10 +72,19 @@ pub struct ExtensionConfig {
     pub args: Vec<String>,
     #[serde(default)]
     pub role: Option<String>,
+    /// Config object handed to the extension via
+    /// `LifecycleConfigure`. Defaults to an empty object so
+    /// extensions always see a value.
+    #[serde(default = "empty_object")]
+    pub config: serde_json::Value,
+}
+
+fn empty_object() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
 }
 
 /// The shape of one TOML config file before layering is applied.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigFile {
     #[serde(default)]

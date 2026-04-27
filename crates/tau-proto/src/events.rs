@@ -190,6 +190,9 @@ impl EventName {
     pub const LIFECYCLE_READY: Self = Self::from_static(EventCategory::Lifecycle, "ready");
     pub const LIFECYCLE_DISCONNECT: Self =
         Self::from_static(EventCategory::Lifecycle, "disconnect");
+    pub const LIFECYCLE_CONFIGURE: Self = Self::from_static(EventCategory::Lifecycle, "configure");
+    pub const LIFECYCLE_CONFIG_ERROR: Self =
+        Self::from_static(EventCategory::Lifecycle, "config_error");
 
     pub const TOOL_REGISTER: Self = Self::from_static(EventCategory::Tool, "register");
     pub const TOOL_UNREGISTER: Self = Self::from_static(EventCategory::Tool, "unregister");
@@ -375,6 +378,31 @@ pub struct LifecycleReady {
 pub struct LifecycleDisconnect {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+/// Configuration handed to an extension at startup. Sent
+/// point-to-point from the harness to the extension immediately
+/// after the harness sees the extension's
+/// [`LifecycleHello`](crate::LifecycleHello). Carries whatever the
+/// `config: { … }` value was for that extension in `harness.json5`,
+/// or [`CborValue::Null`] / an empty map when no config was
+/// provided.
+///
+/// `Eq` is not derivable because the underlying CBOR value can
+/// contain floats; `PartialEq` is enough for tests.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LifecycleConfigure {
+    pub config: CborValue,
+}
+
+/// Reported by an extension when its
+/// [`LifecycleConfigure`](LifecycleConfigure) value is malformed (or
+/// otherwise unusable). The harness surfaces the message just like
+/// a `harness.json5` parse error so the user can see why their
+/// per-extension config was rejected.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct LifecycleConfigError {
+    pub message: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -1062,6 +1090,10 @@ pub enum Event {
     LifecycleReady(LifecycleReady),
     #[serde(rename = "lifecycle.disconnect")]
     LifecycleDisconnect(LifecycleDisconnect),
+    #[serde(rename = "lifecycle.configure")]
+    LifecycleConfigure(LifecycleConfigure),
+    #[serde(rename = "lifecycle.config_error")]
+    LifecycleConfigError(LifecycleConfigError),
 
     // Tools
     #[serde(rename = "tool.register")]
@@ -1175,6 +1207,8 @@ impl Event {
             Self::LifecycleSubscribe(_) => EventName::LIFECYCLE_SUBSCRIBE,
             Self::LifecycleReady(_) => EventName::LIFECYCLE_READY,
             Self::LifecycleDisconnect(_) => EventName::LIFECYCLE_DISCONNECT,
+            Self::LifecycleConfigure(_) => EventName::LIFECYCLE_CONFIGURE,
+            Self::LifecycleConfigError(_) => EventName::LIFECYCLE_CONFIG_ERROR,
             Self::ToolRegister(_) => EventName::TOOL_REGISTER,
             Self::ToolUnregister(_) => EventName::TOOL_UNREGISTER,
             Self::ToolRequest(_) => EventName::TOOL_REQUEST,

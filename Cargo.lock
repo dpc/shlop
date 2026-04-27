@@ -1425,6 +1425,7 @@ dependencies = [
  "config",
  "dirs",
  "serde",
+ "serde_json",
  "tau-proto",
  "tempfile",
  "toml",
@@ -1448,6 +1449,8 @@ dependencies = [
 name = "tau-ext-dpc-notifications"
 version = "0.1.0"
 dependencies = [
+ "ciborium",
+ "serde",
  "serde_json",
  "tau-extension",
  "tau-proto",
