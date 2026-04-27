@@ -11,6 +11,7 @@
     // -- Agent responses --
     "agent.response":       { fg: "blue", italic: true },
     "agent.pending":        { fg: "dark_grey" },
+    "agent.thinking":       { fg: "dark_grey", italic: true },
 
     // -- Tool execution --
     // A tool-call block is composed of three spans: name, args, status.

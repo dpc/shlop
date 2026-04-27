@@ -20,6 +20,9 @@ pub struct ResponsesConfig {
     pub account_id: Option<String>,
     /// Whether the provider's API accepts a `reasoning.effort` field.
     pub supports_reasoning_effort: bool,
+    /// Whether the provider's API accepts `reasoning.summary` and
+    /// streams `response.reasoning_summary_text.*` events.
+    pub supports_reasoning_summary: bool,
     /// Routing key sent as `prompt_cache_key`. See
     /// `openai::prompt_cache_key` for the derivation rationale.
     pub prompt_cache_key: Option<String>,
@@ -28,10 +31,15 @@ pub struct ResponsesConfig {
 }
 
 /// Calls the Codex Responses API with SSE streaming.
+///
+/// `on_update` is invoked on each visible delta with `(text,
+/// thinking)`, where `thinking` is the accumulated reasoning summary
+/// the provider has streamed so far (or `None` if no summary
+/// content has arrived yet).
 pub fn responses_stream(
     config: &ResponsesConfig,
     request: &PromptPayload<'_>,
-    mut on_update: impl FnMut(&str),
+    mut on_update: impl FnMut(&str, Option<&str>),
 ) -> Result<StreamState, OpenAiError> {
     let url = format!("{}/codex/responses", config.base_url.trim_end_matches('/'));
 
@@ -81,7 +89,26 @@ pub fn responses_stream(
             "response.output_text.delta" => {
                 if let Some(delta) = event["delta"].as_str() {
                     state.text.push_str(delta);
-                    on_update(&state.text);
+                    on_update(&state.text, state.thinking.as_deref());
+                }
+            }
+            "response.reasoning_summary_text.delta" => {
+                if let Some(delta) = event["delta"].as_str() {
+                    state
+                        .thinking
+                        .get_or_insert_with(String::new)
+                        .push_str(delta);
+                    on_update(&state.text, state.thinking.as_deref());
+                }
+            }
+            "response.reasoning_summary_part.added" => {
+                // Each summary part is a separate paragraph. Insert a
+                // blank line between parts so consecutive paragraphs
+                // are visually separated.
+                if let Some(thinking) = state.thinking.as_mut() {
+                    if !thinking.is_empty() && !thinking.ends_with("\n\n") {
+                        thinking.push_str("\n\n");
+                    }
                 }
             }
             "response.function_call_arguments.delta" => {
@@ -205,7 +232,10 @@ struct ResponsesRequest {
 
 #[derive(Serialize)]
 struct ReasoningRequest {
-    effort: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effort: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<&'static str>,
 }
 
 fn build_request(config: &ResponsesConfig, request: &PromptPayload<'_>) -> ResponsesRequest {
@@ -245,8 +275,18 @@ fn build_request(config: &ResponsesConfig, request: &PromptPayload<'_>) -> Respo
         Some("auto".to_owned())
     };
 
-    let reasoning = if config.supports_reasoning_effort {
-        crate::openai::effort_wire(request.effort).map(|effort| ReasoningRequest { effort })
+    let effort = if config.supports_reasoning_effort {
+        crate::openai::effort_wire(request.effort)
+    } else {
+        None
+    };
+    let summary = if config.supports_reasoning_summary {
+        request.thinking_summary.as_openai_wire()
+    } else {
+        None
+    };
+    let reasoning = if effort.is_some() || summary.is_some() {
+        Some(ReasoningRequest { effort, summary })
     } else {
         None
     };
@@ -419,6 +459,7 @@ mod tests {
             model_id: "gpt-5-codex".into(),
             account_id: None,
             supports_reasoning_effort: false,
+            supports_reasoning_summary: false,
             prompt_cache_key: Some("tau:seed".into()),
             prompt_cache_retention: Some(PromptCacheRetention::InMemory),
         };
@@ -427,6 +468,7 @@ mod tests {
             messages: &[],
             tools: &[],
             effort: Effort::Off,
+            thinking_summary: tau_proto::ThinkingSummary::Off,
         };
 
         let body = serde_json::to_value(build_request(&config, &request)).expect("serialize");
@@ -444,6 +486,7 @@ mod tests {
             model_id: "gpt-5-codex".into(),
             account_id: None,
             supports_reasoning_effort: false,
+            supports_reasoning_summary: false,
             prompt_cache_key: None,
             prompt_cache_retention: None,
         };
@@ -452,6 +495,7 @@ mod tests {
             messages: &[],
             tools: &[],
             effort: Effort::Off,
+            thinking_summary: tau_proto::ThinkingSummary::Off,
         };
 
         let body = serde_json::to_value(build_request(&config, &request)).expect("serialize");

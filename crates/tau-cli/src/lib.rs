@@ -1350,6 +1350,14 @@ struct EventRenderer {
     completion_data: tau_cli_term::CompletionData,
     theme: tau_themes::Theme,
     prompt_blocks: HashMap<String, tau_cli_term::BlockId>,
+    /// Live thinking blocks keyed by `session_prompt_id`. Lazy-created
+    /// the first time the agent emits non-empty `thinking` for the
+    /// prompt, so backends that don't return reasoning summaries
+    /// produce no extra block.
+    thinking_blocks: HashMap<String, tau_cli_term::BlockId>,
+    /// Latest thinking text per live prompt, captured during streaming
+    /// so `AgentResponseFinished` can render it into history.
+    thinking_text: HashMap<String, String>,
     /// Block ID of the last user message (for moving on queue).
     last_user_block: Option<tau_cli_term::BlockId>,
     /// Queued user-message blocks (in above_sticky zone).
@@ -1432,6 +1440,8 @@ impl EventRenderer {
             completion_data,
             theme,
             prompt_blocks: HashMap::new(),
+            thinking_blocks: HashMap::new(),
+            thinking_text: HashMap::new(),
             last_user_block: None,
             queued_user_blocks: VecDeque::new(),
             tool_blocks: HashMap::new(),
@@ -1568,7 +1578,30 @@ impl EventRenderer {
                     .insert(submitted.session_prompt_id.to_string(), Instant::now());
             }
             Event::AgentResponseUpdated(update) => {
-                if let Some(&bid) = self.prompt_blocks.get(update.session_prompt_id.as_str()) {
+                let spid = update.session_prompt_id.as_str();
+
+                // Thinking is its own block, lazy-created the first
+                // time non-empty summary content arrives. Rendered
+                // above the response block (in `above_active`).
+                if let Some(thinking) = update.thinking.as_deref()
+                    && !thinking.is_empty()
+                {
+                    self.thinking_text
+                        .insert(spid.to_owned(), thinking.to_owned());
+                    let mut shown = thinking.to_owned();
+                    append_streaming_indicator(&mut shown);
+                    let block = themed_block(&self.theme, names::AGENT_THINKING, shown);
+                    if let Some(&tbid) = self.thinking_blocks.get(spid) {
+                        self.handle.set_block(tbid, block);
+                    } else {
+                        let tbid = self.handle.new_block(block);
+                        self.handle.push_above_active(tbid);
+                        self.thinking_blocks.insert(spid.to_owned(), tbid);
+                    }
+                    self.handle.redraw();
+                }
+
+                if let Some(&bid) = self.prompt_blocks.get(spid) {
                     let mut text = update.text.clone();
                     append_streaming_indicator(&mut text);
                     let block = themed_block(&self.theme, names::AGENT_RESPONSE, text);
@@ -1577,16 +1610,34 @@ impl EventRenderer {
                 }
             }
             Event::AgentResponseFinished(finished) => {
+                let spid = finished.session_prompt_id.as_str();
                 self.last_turn_latency = self
                     .prompt_started_at
-                    .remove(finished.session_prompt_id.as_str())
+                    .remove(spid)
                     .map(|started_at| started_at.elapsed());
                 self.last_turn_cache_hit_percent =
                     cache_hit_percent(finished.input_tokens, finished.cached_tokens);
-                if let Some(bid) = self
-                    .prompt_blocks
-                    .remove(finished.session_prompt_id.as_str())
-                {
+
+                // Finalize the thinking block above the response.
+                // Prefer the finished event's payload if it carries
+                // one; fall back to whatever streaming captured.
+                let thinking = finished
+                    .thinking
+                    .clone()
+                    .or_else(|| self.thinking_text.remove(spid));
+                if let Some(tbid) = self.thinking_blocks.remove(spid) {
+                    self.handle.remove_block(tbid);
+                }
+                if let Some(thinking) = thinking.filter(|t| !t.is_empty()) {
+                    self.handle.print_output(themed_block(
+                        &self.theme,
+                        names::AGENT_THINKING,
+                        thinking,
+                    ));
+                }
+                self.thinking_text.remove(spid);
+
+                if let Some(bid) = self.prompt_blocks.remove(spid) {
                     self.handle.remove_block(bid);
 
                     let text = finished.text.as_deref().unwrap_or("");
@@ -2078,6 +2129,7 @@ mod tests {
             tools: Vec::new(),
             model: None,
             effort: tau_proto::Effort::Off,
+            thinking_summary: tau_proto::ThinkingSummary::Off,
         }));
         sync(&handle);
         assert!(vt.screen_contains(80, "…"));
@@ -2086,6 +2138,7 @@ mod tests {
         renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
             session_prompt_id: "sp-0".into(),
             text: "Hi there!".into(),
+            thinking: None,
         }));
         sync(&handle);
         assert!(vt.screen_contains(80, "Hi there!"));
@@ -2097,6 +2150,7 @@ mod tests {
             tool_calls: Vec::new(),
             input_tokens: None,
             cached_tokens: None,
+            thinking: None,
         }));
         sync(&handle);
         assert!(
@@ -2104,6 +2158,121 @@ mod tests {
             "final response should be visible, got: {:?}",
             vt.screen_text(80)
         );
+    }
+
+    #[test]
+    fn thinking_renders_as_separate_block_above_response() {
+        let (_term, handle, vt) = setup(80, 24);
+        let mut renderer = EventRenderer::new(
+            handle.clone(),
+            tau_cli_term::CompletionData::new(),
+            tau_themes::Theme::builtin(),
+        );
+
+        renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "hi".into(),
+        }));
+        renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
+            session_prompt_id: "sp-0".into(),
+            session_id: "s1".into(),
+            system_prompt: String::new(),
+            messages: Vec::new(),
+            tools: Vec::new(),
+            model: None,
+            effort: tau_proto::Effort::Off,
+            thinking_summary: tau_proto::ThinkingSummary::Auto,
+        }));
+        sync(&handle);
+
+        // Thinking arrives before the response text. Both should be
+        // visible simultaneously, with thinking above response.
+        renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
+            session_prompt_id: "sp-0".into(),
+            text: String::new(),
+            thinking: Some("planning the answer".into()),
+        }));
+        sync(&handle);
+        assert!(
+            vt.screen_contains(80, "planning the answer"),
+            "thinking block should be live: {:?}",
+            vt.screen_text(80)
+        );
+
+        renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
+            session_prompt_id: "sp-0".into(),
+            text: "actual answer".into(),
+            thinking: Some("planning the answer".into()),
+        }));
+        sync(&handle);
+        assert!(vt.screen_contains(80, "actual answer"));
+        assert!(vt.screen_contains(80, "planning the answer"));
+
+        // On finish both stick in history.
+        renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
+            session_prompt_id: "sp-0".into(),
+            text: Some("actual answer".into()),
+            tool_calls: Vec::new(),
+            input_tokens: None,
+            cached_tokens: None,
+            thinking: Some("planning the answer".into()),
+        }));
+        sync(&handle);
+        // Thinking should appear above the response in the history.
+        let lines = vt.screen_text(80);
+        let thinking_row = lines
+            .iter()
+            .position(|l| l.contains("planning the answer"))
+            .unwrap_or_else(|| panic!("thinking should remain in history: {lines:?}"));
+        let response_row = lines
+            .iter()
+            .position(|l| l.contains("actual answer"))
+            .unwrap_or_else(|| panic!("response should remain in history: {lines:?}"));
+        assert!(
+            thinking_row < response_row,
+            "thinking should render above response (thinking @ {thinking_row}, response @ {response_row}); lines: {lines:?}",
+        );
+    }
+
+    #[test]
+    fn no_thinking_block_when_summary_absent() {
+        let (_term, handle, vt) = setup(80, 24);
+        let mut renderer = EventRenderer::new(
+            handle.clone(),
+            tau_cli_term::CompletionData::new(),
+            tau_themes::Theme::builtin(),
+        );
+
+        renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "hi".into(),
+        }));
+        renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
+            session_prompt_id: "sp-0".into(),
+            session_id: "s1".into(),
+            system_prompt: String::new(),
+            messages: Vec::new(),
+            tools: Vec::new(),
+            model: None,
+            effort: tau_proto::Effort::Off,
+            thinking_summary: tau_proto::ThinkingSummary::Off,
+        }));
+        renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
+            session_prompt_id: "sp-0".into(),
+            text: "hello".into(),
+            thinking: None,
+        }));
+        renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
+            session_prompt_id: "sp-0".into(),
+            text: Some("hello".into()),
+            tool_calls: Vec::new(),
+            input_tokens: None,
+            cached_tokens: None,
+            thinking: None,
+        }));
+        sync(&handle);
+        // Just make sure we didn't crash and the response is visible.
+        assert!(vt.screen_contains(80, "hello"));
     }
 
     #[test]
@@ -2128,6 +2297,7 @@ mod tests {
             tools: Vec::new(),
             model: None,
             effort: tau_proto::Effort::Off,
+            thinking_summary: tau_proto::ThinkingSummary::Off,
         }));
 
         // Second prompt queued.
@@ -2153,6 +2323,7 @@ mod tests {
             tool_calls: Vec::new(),
             input_tokens: None,
             cached_tokens: None,
+            thinking: None,
         }));
         sync(&handle);
         assert!(vt.screen_contains(80, "response one"));
@@ -2166,6 +2337,7 @@ mod tests {
             tools: Vec::new(),
             model: None,
             effort: tau_proto::Effort::Off,
+            thinking_summary: tau_proto::ThinkingSummary::Off,
         }));
         sync(&handle);
         assert!(
@@ -2182,6 +2354,7 @@ mod tests {
         renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
             session_prompt_id: "sp-1".into(),
             text: "response two".into(),
+            thinking: None,
         }));
         sync(&handle);
         assert!(
@@ -2197,6 +2370,7 @@ mod tests {
             tool_calls: Vec::new(),
             input_tokens: None,
             cached_tokens: None,
+            thinking: None,
         }));
         sync(&handle);
         assert!(
@@ -2236,6 +2410,7 @@ mod tests {
                     tools: Vec::new(),
                     model: None,
                     effort: tau_proto::Effort::Off,
+                    thinking_summary: tau_proto::ThinkingSummary::Off,
                 }));
             } else {
                 renderer.handle(&Event::SessionPromptQueued(SessionPromptQueued {
@@ -2257,11 +2432,13 @@ mod tests {
                     tools: Vec::new(),
                     model: None,
                     effort: tau_proto::Effort::Off,
+                    thinking_summary: tau_proto::ThinkingSummary::Off,
                 }));
             }
             renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
                 session_prompt_id: spid.clone(),
                 text: format!("partial-{i}"),
+                thinking: None,
             }));
             renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
                 session_prompt_id: spid,
@@ -2269,6 +2446,7 @@ mod tests {
                 tool_calls: Vec::new(),
                 input_tokens: None,
                 cached_tokens: None,
+                thinking: None,
             }));
             sync(&handle);
         }
@@ -2308,6 +2486,7 @@ mod tests {
             tools: Vec::new(),
             model: None,
             effort: tau_proto::Effort::Off,
+            thinking_summary: tau_proto::ThinkingSummary::Off,
         }));
         sync(&handle);
         assert!(vt.screen_contains(80, "…"));
@@ -2315,6 +2494,7 @@ mod tests {
         renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
             session_prompt_id: "sp-0".into(),
             text: "Hello".into(),
+            thinking: None,
         }));
         sync(&handle);
         assert!(vt.screen_contains(80, "Hello …"));
@@ -2325,6 +2505,7 @@ mod tests {
             tool_calls: Vec::new(),
             input_tokens: None,
             cached_tokens: None,
+            thinking: None,
         }));
         sync(&handle);
         assert!(vt.screen_contains(80, "Hello"));
@@ -2353,6 +2534,7 @@ mod tests {
             }],
             input_tokens: None,
             cached_tokens: None,
+            thinking: None,
         }));
         sync(&handle);
         assert!(vt.screen_contains(80, "read src/main.rs …"));
@@ -2397,10 +2579,12 @@ mod tests {
             tools: Vec::new(),
             model: None,
             effort: tau_proto::Effort::Off,
+            thinking_summary: tau_proto::ThinkingSummary::Off,
         }));
         renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
             session_prompt_id: "sp-0".into(),
             text: "hello!".into(),
+            thinking: None,
         }));
         renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
             session_prompt_id: "sp-0".into(),
@@ -2408,6 +2592,7 @@ mod tests {
             tool_calls: Vec::new(),
             input_tokens: None,
             cached_tokens: None,
+            thinking: None,
         }));
         sync(&handle);
 
@@ -2687,12 +2872,14 @@ mod tests {
             tools: Vec::new(),
             model: None,
             effort: tau_proto::Effort::Off,
+            thinking_summary: tau_proto::ThinkingSummary::Off,
         }));
 
         // Agent starts streaming response 1.
         renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
             session_prompt_id: "sp-0".into(),
             text: "Hello".into(),
+            thinking: None,
         }));
         sync(&handle);
         assert!(
@@ -2723,6 +2910,7 @@ mod tests {
         renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
             session_prompt_id: "sp-0".into(),
             text: "Hello!\n\nHow can I help you today?".into(),
+            thinking: None,
         }));
         sync(&handle);
 
@@ -2733,6 +2921,7 @@ mod tests {
             tool_calls: Vec::new(),
             input_tokens: None,
             cached_tokens: None,
+            thinking: None,
         }));
         sync(&handle);
         assert!(
@@ -2750,10 +2939,12 @@ mod tests {
             tools: Vec::new(),
             model: None,
             effort: tau_proto::Effort::Off,
+            thinking_summary: tau_proto::ThinkingSummary::Off,
         }));
         renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
             session_prompt_id: "sp-1".into(),
             text: "Hello again!\n\nHow can I help you?".into(),
+            thinking: None,
         }));
         renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
             session_prompt_id: "sp-1".into(),
@@ -2761,6 +2952,7 @@ mod tests {
             tool_calls: Vec::new(),
             input_tokens: None,
             cached_tokens: None,
+            thinking: None,
         }));
         sync(&handle);
         assert!(
@@ -2778,10 +2970,12 @@ mod tests {
             tools: Vec::new(),
             model: None,
             effort: tau_proto::Effort::Off,
+            thinking_summary: tau_proto::ThinkingSummary::Off,
         }));
         renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
             session_prompt_id: "sp-2".into(),
             text: "Hi there!\n\nWhat can I help you with?".into(),
+            thinking: None,
         }));
         renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
             session_prompt_id: "sp-2".into(),
@@ -2789,6 +2983,7 @@ mod tests {
             tool_calls: Vec::new(),
             input_tokens: None,
             cached_tokens: None,
+            thinking: None,
         }));
         sync(&handle);
 
@@ -2849,6 +3044,7 @@ mod tests {
             tools: Vec::new(),
             model: None,
             effort: tau_proto::Effort::Off,
+            thinking_summary: tau_proto::ThinkingSummary::Off,
         }));
 
         // Response with emoji followed by text on next line.
@@ -2856,6 +3052,7 @@ mod tests {
         renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
             session_prompt_id: "sp-0".into(),
             text: response.into(),
+            thinking: None,
         }));
         renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
             session_prompt_id: "sp-0".into(),
@@ -2863,6 +3060,7 @@ mod tests {
             tool_calls: Vec::new(),
             input_tokens: None,
             cached_tokens: None,
+            thinking: None,
         }));
         sync(&handle);
 
@@ -2911,6 +3109,7 @@ mod tests {
             tools: Vec::new(),
             model: None,
             effort: tau_proto::Effort::Off,
+            thinking_summary: tau_proto::ThinkingSummary::Off,
         }));
 
         // 3 emoji = 6 columns + "end" = 9 columns total.
@@ -2921,6 +3120,7 @@ mod tests {
             tool_calls: Vec::new(),
             input_tokens: None,
             cached_tokens: None,
+            thinking: None,
         }));
         sync(&handle);
 
@@ -2957,12 +3157,14 @@ mod tests {
             tools: Vec::new(),
             model: None,
             effort: tau_proto::Effort::Off,
+            thinking_summary: tau_proto::ThinkingSummary::Off,
         }));
 
         let partial = "stream 0\nstream 1\nstream 2\nstream 3\nPARTIAL ONLY";
         renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
             session_prompt_id: "sp-0".into(),
             text: partial.into(),
+            thinking: None,
         }));
         sync(&handle);
         assert!(
@@ -2978,6 +3180,7 @@ mod tests {
             tool_calls: Vec::new(),
             input_tokens: None,
             cached_tokens: None,
+            thinking: None,
         }));
         sync(&handle);
 

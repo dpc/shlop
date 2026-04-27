@@ -9,6 +9,9 @@ pub const USER_PROMPT_QUEUED: &str = "user.prompt.queued";
 // -- Agent responses --
 pub const AGENT_RESPONSE: &str = "agent.response";
 pub const AGENT_PENDING: &str = "agent.pending";
+/// Live + finalized provider-supplied reasoning summary, rendered as
+/// a separate block above the assistant response.
+pub const AGENT_THINKING: &str = "agent.thinking";
 
 // -- Tool execution --
 //

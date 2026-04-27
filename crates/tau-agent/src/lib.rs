@@ -92,6 +92,7 @@ where
                                 tool_calls: Vec::new(),
                                 input_tokens: None,
                                 cached_tokens: None,
+                                thinking: None,
                             },
                         ))?;
                         writer.flush()?;
@@ -153,6 +154,10 @@ fn resolve_backend(
                 model_id: model_id.to_owned(),
                 account_id,
                 supports_reasoning_effort: provider.compat.supports_reasoning_effort,
+                supports_reasoning_summary: supports_reasoning_summary(
+                    provider,
+                    "https://chatgpt.com/backend-api",
+                ),
                 prompt_cache_key: prompt_cache_key(
                     provider,
                     "https://chatgpt.com/backend-api",
@@ -238,6 +243,13 @@ fn supports_prompt_cache_key(provider: &ProviderConfig, base_url: &str) -> bool 
     provider.compat.supports_prompt_cache_key || is_builtin_openai_prompt_cache_api(base_url)
 }
 
+/// Whether to send `reasoning.summary` to this provider on the
+/// Responses path. Auto-enabled on the public OpenAI API and the
+/// Codex backend; otherwise gated behind `supportsReasoningSummary`.
+fn supports_reasoning_summary(provider: &ProviderConfig, base_url: &str) -> bool {
+    provider.compat.supports_reasoning_summary || is_builtin_openai_prompt_cache_api(base_url)
+}
+
 fn supports_prompt_cache_retention(provider: &ProviderConfig, base_url: &str) -> bool {
     provider.compat.supports_prompt_cache_retention || is_builtin_openai_prompt_cache_api(base_url)
 }
@@ -274,12 +286,14 @@ fn handle_chat_completions<W: Write>(
         messages: &prompt.messages,
         tools: &prompt.tools,
         effort: prompt.effort,
+        thinking_summary: prompt.thinking_summary,
     };
 
-    match openai::chat_completion_stream(config, &request, |text_so_far| {
+    match openai::chat_completion_stream(config, &request, |text_so_far, thinking_so_far| {
         let _ = writer.write_event(&Event::AgentResponseUpdated(AgentResponseUpdated {
             session_prompt_id: session_prompt_id.into(),
             text: text_so_far.to_owned(),
+            thinking: thinking_so_far.map(str::to_owned),
         }));
         let _ = writer.flush();
     }) {
@@ -300,12 +314,14 @@ fn handle_responses<W: Write>(
         messages: &prompt.messages,
         tools: &prompt.tools,
         effort: prompt.effort,
+        thinking_summary: prompt.thinking_summary,
     };
 
-    match responses::responses_stream(config, &request, |text_so_far| {
+    match responses::responses_stream(config, &request, |text_so_far, thinking_so_far| {
         let _ = writer.write_event(&Event::AgentResponseUpdated(AgentResponseUpdated {
             session_prompt_id: session_prompt_id.into(),
             text: text_so_far.to_owned(),
+            thinking: thinking_so_far.map(str::to_owned),
         }));
         let _ = writer.flush();
     }) {
@@ -324,6 +340,7 @@ fn finish_stream<W: Write>(
     let text_content = state.text.clone();
     let input_tokens = state.input_tokens;
     let cached_tokens = state.cached_tokens;
+    let thinking = state.thinking.clone();
     let tool_calls = state.into_tool_calls();
     let text = if text_empty {
         if tool_calls.is_empty() {
@@ -340,6 +357,7 @@ fn finish_stream<W: Write>(
         tool_calls,
         input_tokens,
         cached_tokens,
+        thinking,
     }))?;
     writer.flush()?;
     Ok(())
@@ -356,6 +374,7 @@ fn finish_error<W: Write>(
         tool_calls: Vec::new(),
         input_tokens: None,
         cached_tokens: None,
+        thinking: None,
     }))?;
     writer.flush()?;
     Ok(())
@@ -431,6 +450,7 @@ where
                         tool_calls: Vec::new(),
                         input_tokens: None,
                         cached_tokens: None,
+                        thinking: None,
                     }))?;
                 } else {
                     // Find user text and make a tool call.
@@ -482,6 +502,7 @@ where
                         tool_calls: vec![tool_call],
                         input_tokens: None,
                         cached_tokens: None,
+                        thinking: None,
                     }))?;
                 }
                 writer.flush()?;

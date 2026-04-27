@@ -353,6 +353,11 @@ pub struct ProviderCompat {
     pub supports_prompt_cache_key: bool,
     #[serde(rename = "supportsPromptCacheRetention")]
     pub supports_prompt_cache_retention: bool,
+    /// Provider's API accepts `reasoning.summary` and streams
+    /// `response.reasoning_summary_text.*` events. Currently only
+    /// the OpenAI Responses API surface.
+    #[serde(rename = "supportsReasoningSummary")]
+    pub supports_reasoning_summary: bool,
 }
 
 impl Default for ProviderCompat {
@@ -363,6 +368,7 @@ impl Default for ProviderCompat {
             supports_prefill: true,
             supports_prompt_cache_key: false,
             supports_prompt_cache_retention: false,
+            supports_reasoning_summary: false,
         }
     }
 }

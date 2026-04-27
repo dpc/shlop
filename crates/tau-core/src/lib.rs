@@ -877,8 +877,18 @@ impl ToolRegistry {
 /// One persisted chat or tool activity entry belonging to a session.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum SessionEntry {
-    UserMessage { text: String },
-    AgentMessage { text: String },
+    UserMessage {
+        text: String,
+    },
+    AgentMessage {
+        text: String,
+        /// Provider-supplied reasoning summary captured during the
+        /// turn, if any. Persisted alongside the response so resume
+        /// can re-render it; intentionally excluded from prompt
+        /// replay (see harness `assemble_conversation`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thinking: Option<String>,
+    },
     ToolActivity(ToolActivityRecord),
 }
 
@@ -1421,9 +1431,23 @@ impl SessionStore {
         session_id: impl Into<String>,
         text: impl Into<String>,
     ) -> Result<NodeId, SessionStoreError> {
+        self.append_agent_message_with_thinking(session_id, text, None)
+    }
+
+    /// Appends one agent message to a session with an optional
+    /// reasoning summary captured during the turn.
+    pub fn append_agent_message_with_thinking(
+        &mut self,
+        session_id: impl Into<String>,
+        text: impl Into<String>,
+        thinking: Option<String>,
+    ) -> Result<NodeId, SessionStoreError> {
         self.append(
             &session_id.into(),
-            SessionEntry::AgentMessage { text: text.into() },
+            SessionEntry::AgentMessage {
+                text: text.into(),
+                thinking,
+            },
         )
     }
 
@@ -1819,6 +1843,7 @@ mod tests {
                     tool_calls: Vec::new(),
                     input_tokens: None,
                     cached_tokens: None,
+                    thinking: None,
                 }),
             )
             .expect("directed route should succeed");
@@ -1868,6 +1893,7 @@ mod tests {
             tool_calls: Vec::new(),
             input_tokens: None,
             cached_tokens: None,
+            thinking: None,
         }));
         assert_eq!(second_report.delivered_to, vec![agent_id.clone()]);
 
@@ -2074,6 +2100,7 @@ mod tests {
                 },
                 &SessionEntry::AgentMessage {
                     text: "hi there".to_owned(),
+                    thinking: None,
                 },
             ]
         );
@@ -2343,6 +2370,7 @@ mod tests {
             }],
             model: None,
             effort: tau_proto::Effort::Off,
+            thinking_summary: tau_proto::ThinkingSummary::Off,
         };
         let _ = bus.send_to(&agent_id, None, Event::SessionPromptCreated(prompt));
 

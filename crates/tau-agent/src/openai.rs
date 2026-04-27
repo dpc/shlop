@@ -21,6 +21,10 @@ pub struct PromptPayload<'a> {
     /// `reasoning_effort` (Chat Completions) or `reasoning.effort`
     /// (Responses), iff the provider supports it.
     pub effort: tau_proto::Effort,
+    /// Whether to ask the provider for a visible reasoning summary,
+    /// and at what verbosity. Only honored on backends whose config
+    /// reports `supports_reasoning_summary`.
+    pub thinking_summary: tau_proto::ThinkingSummary,
 }
 
 /// Configuration for the OpenAI-compatible backend.
@@ -71,6 +75,10 @@ pub struct StreamState {
     pub tool_calls: Vec<ToolCallAccumulator>,
     pub input_tokens: Option<u64>,
     pub cached_tokens: Option<u64>,
+    /// Provider-supplied reasoning summary accumulated so far. `None`
+    /// when the provider hasn't emitted any summary content (or when
+    /// summaries weren't requested).
+    pub thinking: Option<String>,
 }
 
 /// Accumulates one tool call across streaming chunks.
@@ -87,6 +95,7 @@ impl StreamState {
             tool_calls: Vec::new(),
             input_tokens: None,
             cached_tokens: None,
+            thinking: None,
         }
     }
 
@@ -118,12 +127,16 @@ impl StreamState {
 }
 
 /// Calls the chat completions endpoint with streaming. Invokes the
-/// callback with the accumulated text on each content delta.
-/// Returns the final state (text + tool calls).
+/// callback with the accumulated text and (optional) thinking
+/// summary on each content delta. Returns the final state.
+///
+/// Chat Completions has no `thinking` channel today, so the
+/// `thinking` argument is always `None`. Kept in the signature to
+/// match the Responses path so the agent's update path is uniform.
 pub fn chat_completion_stream(
     config: &OpenAiConfig,
     request: &PromptPayload<'_>,
-    mut on_update: impl FnMut(&str),
+    mut on_update: impl FnMut(&str, Option<&str>),
 ) -> Result<StreamState, OpenAiError> {
     let url = format!("{}/chat/completions", config.base_url.trim_end_matches('/'));
 
@@ -181,7 +194,7 @@ pub fn chat_completion_stream(
         // Accumulate text content.
         if let Some(content) = choice.delta.content {
             state.text.push_str(&content);
-            on_update(&state.text);
+            on_update(&state.text, None);
         }
 
         // Accumulate tool calls.
@@ -610,6 +623,7 @@ mod tests {
             ],
             input_tokens: None,
             cached_tokens: None,
+            thinking: None,
         };
 
         let calls = state.into_tool_calls();
@@ -633,6 +647,7 @@ mod tests {
             messages: &[],
             tools: &[],
             effort: Effort::Off,
+            thinking_summary: tau_proto::ThinkingSummary::Off,
         };
 
         let body = serde_json::to_value(build_request(&config, &request, true)).expect("serialize");
@@ -657,6 +672,7 @@ mod tests {
             messages: &[],
             tools: &[],
             effort: Effort::Off,
+            thinking_summary: tau_proto::ThinkingSummary::Off,
         };
 
         let body = serde_json::to_value(build_request(&config, &request, true)).expect("serialize");

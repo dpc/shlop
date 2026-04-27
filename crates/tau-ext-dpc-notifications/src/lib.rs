@@ -324,6 +324,7 @@ mod tests {
                 tool_calls: Vec::new(),
                 input_tokens: None,
                 cached_tokens: None,
+                thinking: None,
             }))
             .expect("write");
         // Explicit disconnect so the loop exits without waiting on
@@ -376,6 +377,7 @@ mod tests {
                 tool_calls: Vec::new(),
                 input_tokens: None,
                 cached_tokens: None,
+                thinking: None,
             }))
             .expect("write");
         writer.flush().expect("flush");
@@ -468,6 +470,7 @@ mod tests {
                 tool_calls: Vec::new(),
                 input_tokens: None,
                 cached_tokens: None,
+                thinking: None,
             }))
             .expect("write");
         writer

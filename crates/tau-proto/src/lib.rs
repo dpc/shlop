@@ -560,6 +560,7 @@ mod tests {
                 }],
                 model: None,
                 effort: Effort::Off,
+                thinking_summary: ThinkingSummary::Off,
             }),
             Event::AgentResponseFinished(AgentResponseFinished {
                 session_prompt_id: "sp-1".into(),
@@ -567,6 +568,7 @@ mod tests {
                 tool_calls: Vec::new(),
                 input_tokens: None,
                 cached_tokens: None,
+                thinking: None,
             }),
             Event::ExtensionStarting(ExtensionStarting {
                 instance_id: 1.into(),

@@ -534,6 +534,66 @@ pub struct HarnessEffortChanged {
     pub level: Effort,
 }
 
+/// Whether to ask the provider for a human-readable summary of its
+/// reasoning, and at what verbosity. Currently only the OpenAI
+/// Responses API exposes this surface (`reasoning.summary`). Off by
+/// default — summaries cost extra latency and tokens.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThinkingSummary {
+    #[default]
+    Off,
+    Auto,
+    Concise,
+    Detailed,
+}
+
+impl ThinkingSummary {
+    /// Short label for status display.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Auto => "auto",
+            Self::Concise => "concise",
+            Self::Detailed => "detailed",
+        }
+    }
+
+    /// Wire string used by OpenAI's Responses `reasoning.summary`
+    /// field, or `None` for the off mode where the field is omitted.
+    #[must_use]
+    pub const fn as_openai_wire(self) -> Option<&'static str> {
+        match self {
+            Self::Off => None,
+            Self::Auto => Some("auto"),
+            Self::Concise => Some("concise"),
+            Self::Detailed => Some("detailed"),
+        }
+    }
+}
+
+impl std::str::FromStr for ThinkingSummary {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "off" => Ok(Self::Off),
+            "auto" => Ok(Self::Auto),
+            "concise" => Ok(Self::Concise),
+            "detailed" => Ok(Self::Detailed),
+            other => Err(format!(
+                "unknown thinking summary `{other}`; expected off/auto/concise/detailed"
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for ThinkingSummary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// The harness announces which efforts are valid for the
 /// currently-selected model. Updated on startup and on every model
 /// switch. Empty list means no effort applies (no model
@@ -974,6 +1034,11 @@ pub struct SessionPromptCreated {
     /// Reasoning effort to request from the provider (if supported).
     #[serde(default)]
     pub effort: Effort,
+    /// Whether to ask the provider for a visible reasoning summary,
+    /// and at what verbosity. Sent to providers that advertise
+    /// `supportsReasoningSummary`; ignored by everyone else.
+    #[serde(default)]
+    pub thinking_summary: ThinkingSummary,
 }
 
 // ---------------------------------------------------------------------------
@@ -992,6 +1057,12 @@ pub struct AgentPromptSubmitted {
 pub struct AgentResponseUpdated {
     pub session_prompt_id: SessionPromptId,
     pub text: String,
+    /// Accumulated provider-supplied reasoning summary so far, if the
+    /// provider exposed one. Replace, not delta. Persisted with the
+    /// final assistant turn but never replayed back into later
+    /// prompts (see `assemble_conversation`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
 }
 
 /// One tool call the agent wants to make.
@@ -1023,6 +1094,11 @@ pub struct AgentResponseFinished {
     /// provider reported them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_tokens: Option<u64>,
+    /// Final accumulated provider-supplied reasoning summary, if the
+    /// provider exposed one. Persisted with the assistant turn but
+    /// never replayed into later prompts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

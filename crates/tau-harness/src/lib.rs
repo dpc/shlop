@@ -512,6 +512,9 @@ struct Harness {
     selected_model: ModelId,
     /// Currently selected reasoning effort level.
     selected_effort: tau_proto::Effort,
+    /// Currently selected reasoning summary mode. Sent to providers
+    /// that advertise `supportsReasoningSummary`; ignored elsewhere.
+    selected_thinking_summary: tau_proto::ThinkingSummary,
     /// Input tokens consumed by the most recent agent response, if
     /// the provider reported it. `None` until the first usage report
     /// for the current model.
@@ -676,6 +679,7 @@ impl Harness {
             available_models,
             selected_model,
             selected_effort,
+            selected_thinking_summary: tau_proto::ThinkingSummary::Auto,
             context_input_tokens: None,
             context_cached_tokens: None,
             context_percent_used: None,
@@ -826,6 +830,7 @@ impl Harness {
             available_models,
             selected_model,
             selected_effort,
+            selected_thinking_summary: tau_proto::ThinkingSummary::Auto,
             context_input_tokens: None,
             context_cached_tokens: None,
             context_percent_used: None,
@@ -2123,6 +2128,7 @@ impl Harness {
             tools,
             model,
             effort: self.selected_effort,
+            thinking_summary: self.selected_thinking_summary,
         });
         self.publish_event(None, event);
 
@@ -2166,10 +2172,14 @@ impl Harness {
         self.completed_prompts
             .insert(response.session_prompt_id.clone());
 
-        // Persist agent text if present.
+        // Persist agent text if present, with the captured reasoning
+        // summary (if any) attached to the same session entry.
         if let Some(ref text) = response.text {
-            self.store
-                .append_agent_message(&*session_id, text.clone())?;
+            self.store.append_agent_message_with_thinking(
+                &*session_id,
+                text.clone(),
+                response.thinking.clone(),
+            )?;
         }
 
         if !response.tool_calls.is_empty() {
@@ -3302,7 +3312,11 @@ fn assemble_conversation(tree: &tau_core::SessionTree) -> Vec<ConversationMessag
                     content: vec![ContentBlock::Text { text: text.clone() }],
                 });
             }
-            SessionEntry::AgentMessage { text } => {
+            SessionEntry::AgentMessage { text, thinking: _ } => {
+                // `thinking` is intentionally NOT replayed: provider
+                // reasoning summaries are for human inspection only,
+                // never fed back into later turns as plain assistant
+                // text. See `TAU_VISIBLE_THINKING_IMPLEMENTATION_PLAN.md`.
                 messages.push(ConversationMessage {
                     role: ConversationRole::Assistant,
                     content: vec![ContentBlock::Text { text: text.clone() }],
@@ -3463,7 +3477,7 @@ pub fn format_extension_event(event: &Event) -> String {
 fn format_session_entry(entry: &SessionEntry) -> String {
     match entry {
         SessionEntry::UserMessage { text } => format!("user: {text}"),
-        SessionEntry::AgentMessage { text } => format!("agent: {text}"),
+        SessionEntry::AgentMessage { text, .. } => format!("agent: {text}"),
         SessionEntry::ToolActivity(a) => match &a.outcome {
             ToolActivityOutcome::Requested { arguments } => {
                 if a.tool_name.as_str() == "skill" {
@@ -3514,7 +3528,7 @@ fn latest_agent_preview(session: &tau_core::SessionTree) -> Option<String> {
         .into_iter()
         .rev()
         .find_map(|e| match e {
-            SessionEntry::AgentMessage { text } => Some(text.clone()),
+            SessionEntry::AgentMessage { text, .. } => Some(text.clone()),
             _ => None,
         })
 }
@@ -4719,6 +4733,7 @@ mod tests {
             }],
             input_tokens: None,
             cached_tokens: None,
+            thinking: None,
         };
 
         h.handle_agent_response_finished(response)
@@ -4799,6 +4814,7 @@ mod tests {
             ],
             input_tokens: None,
             cached_tokens: None,
+            thinking: None,
         };
 
         h.handle_agent_response_finished(response)
@@ -4908,6 +4924,7 @@ mod tests {
             ],
             input_tokens: None,
             cached_tokens: None,
+            thinking: None,
         };
 
         h.handle_agent_response_finished(response)
@@ -5246,6 +5263,7 @@ mod tests {
             tool_calls: Vec::new(),
             input_tokens: None,
             cached_tokens: None,
+            thinking: None,
         })
         .expect("persist first agent response");
 
@@ -5270,6 +5288,62 @@ mod tests {
             &prompt2.messages[..prompt1.messages.len()],
             prompt1.messages.as_slice(),
             "second prompt must keep first prompt messages as an exact prefix"
+        );
+
+        h.shutdown().expect("shutdown");
+    }
+
+    #[test]
+    fn thinking_is_persisted_but_excluded_from_prompt_replay() {
+        // Linear-prefix and prompt-cache hygiene depends on
+        // `assemble_conversation` ignoring the persisted thinking
+        // field. Otherwise the model would see its own reasoning
+        // summary echoed back as plain assistant text.
+        let td = TempDir::new().expect("tempdir");
+        let sp = td.path().join("state");
+        let mut h = echo_harness(&sp).expect("start");
+        h.selected_model = "test/model".into();
+
+        h.store
+            .append_user_message("s1", "first".to_owned())
+            .expect("append user");
+
+        let spid1 = h.send_prompt_to_agent("s1");
+        h.handle_agent_response_finished(AgentResponseFinished {
+            session_prompt_id: spid1,
+            text: Some("answer".to_owned()),
+            tool_calls: Vec::new(),
+            input_tokens: None,
+            cached_tokens: None,
+            thinking: Some("The user is asking ...".to_owned()),
+        })
+        .expect("persist agent response");
+
+        // Confirm it was stored on the session entry.
+        let stored = h
+            .store
+            .session("s1")
+            .expect("session")
+            .current_branch()
+            .into_iter()
+            .find_map(|e| match e {
+                SessionEntry::AgentMessage { thinking, .. } => Some(thinking.clone()),
+                _ => None,
+            })
+            .expect("agent message");
+        assert_eq!(stored.as_deref(), Some("The user is asking ..."));
+
+        // The next prompt's replayed messages must NOT contain the
+        // thinking text.
+        h.store
+            .append_user_message("s1", "second".to_owned())
+            .expect("append second user");
+        let spid2 = h.send_prompt_to_agent("s1");
+        let prompt2 = read_prompt_created(&h, &spid2);
+        let serialized = serde_json::to_string(&prompt2.messages).expect("json");
+        assert!(
+            !serialized.contains("The user is asking"),
+            "prompt replay must not echo reasoning summary back to the model",
         );
 
         h.shutdown().expect("shutdown");
