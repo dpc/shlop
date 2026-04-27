@@ -582,6 +582,12 @@ mod tests {
                 role: Some("tool"),
                 enable: false,
             },
+            BuiltinExtension {
+                name: "dpc_notifications",
+                command: vec!["tau".into(), "ext".into(), "ext-dpc-notifications".into()],
+                role: Some("tool"),
+                enable: false,
+            },
         ]
     }
 

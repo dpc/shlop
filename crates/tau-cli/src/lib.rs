@@ -1888,10 +1888,11 @@ pub fn main_with_args() -> std::process::ExitCode {
                     "agent" => tau_agent::run_stdio,
                     "ext-shell" => tau_ext_shell::run_stdio,
                     "ext-test-dummy" => tau_ext_test_dummy::run_stdio,
+                    "ext-dpc-notifications" => tau_ext_dpc_notifications::run_stdio,
                     "harness" => tau_harness::run_component,
                     _ => {
                         return Err(CliError::Participant(format!(
-                            "unknown extension: {name}\navailable: agent, ext-shell, ext-test-dummy, harness"
+                            "unknown extension: {name}\navailable: agent, ext-shell, ext-test-dummy, ext-dpc-notifications, harness"
                         )));
                     }
                 };

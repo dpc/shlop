@@ -1,0 +1,13 @@
+[package]
+name = "tau-ext-dpc-notifications"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde_json.workspace = true
+tau-proto.workspace = true

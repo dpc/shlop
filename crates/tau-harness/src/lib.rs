@@ -3384,7 +3384,21 @@ pub fn builtin_extensions() -> Vec<tau_config::settings::BuiltinExtension> {
         },
         BuiltinExtension {
             name: "test_dummy",
-            command: vec![tau_binary, "ext".to_owned(), "ext-test-dummy".to_owned()],
+            command: vec![
+                tau_binary.clone(),
+                "ext".to_owned(),
+                "ext-test-dummy".to_owned(),
+            ],
+            role: Some("tool"),
+            enable: false,
+        },
+        BuiltinExtension {
+            name: "dpc_notifications",
+            command: vec![
+                tau_binary,
+                "ext".to_owned(),
+                "ext-dpc-notifications".to_owned(),
+            ],
             role: Some("tool"),
             enable: false,
         },

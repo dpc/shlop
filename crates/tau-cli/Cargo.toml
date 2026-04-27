@@ -23,6 +23,7 @@ tau-provider.workspace = true
 
 # Still needed for component dispatch
 tau-agent.workspace = true
+tau-ext-dpc-notifications.workspace = true
 tau-ext-shell.workspace = true
 tau-ext-test-dummy.workspace = true
 
