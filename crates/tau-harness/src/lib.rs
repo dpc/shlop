@@ -3213,12 +3213,20 @@ fn build_runtime_context_message() -> ConversationMessage {
 
 fn insert_runtime_context_message(messages: &mut Vec<ConversationMessage>) {
     let runtime_context = build_runtime_context_message();
-    let trailing_user_start = messages
-        .iter()
-        .rposition(|message| message.role != ConversationRole::User)
-        .map(|idx| idx + 1)
-        .unwrap_or_else(|| messages.len().saturating_sub(1));
-    messages.insert(trailing_user_start, runtime_context);
+    let runtime_text = match runtime_context.content.into_iter().next() {
+        Some(ContentBlock::Text { text }) => text,
+        other => panic!("unexpected runtime context content: {other:?}"),
+    };
+    if let Some(last) = messages.last_mut()
+        && last.role == ConversationRole::User
+    {
+        last.content.push(ContentBlock::Text { text: runtime_text });
+        return;
+    }
+    messages.push(ConversationMessage {
+        role: ConversationRole::User,
+        content: vec![ContentBlock::Text { text: runtime_text }],
+    });
 }
 
 fn render_agents_context_message<'a>(
@@ -5246,7 +5254,7 @@ mod tests {
     }
 
     #[test]
-    fn send_prompt_to_agent_inserts_runtime_context_before_trailing_user_turn() {
+    fn send_prompt_to_agent_appends_runtime_context_to_last_user_message() {
         let td = TempDir::new().expect("tempdir");
         let sp = td.path().join("state");
         let mut h = echo_harness(&sp).expect("start");
@@ -5270,28 +5278,20 @@ mod tests {
                 _ => {}
             }
         };
-        let runtime = prompt
-            .messages
-            .iter()
-            .find(|message| match &message.content[..] {
-                [ContentBlock::Text { text }] => text.contains("<runtime_context>"),
-                _ => false,
-            })
-            .expect("runtime context message");
-        assert_eq!(runtime.role, ConversationRole::User);
-        let text = match &runtime.content[..] {
-            [ContentBlock::Text { text }] => text,
-            other => panic!("unexpected runtime context content: {other:?}"),
-        };
-        assert!(text.contains("<runtime_context>"));
-        assert!(text.contains("Current date:"));
-        assert!(text.contains("Current working directory:"));
         let last = prompt.messages.last().expect("last user prompt");
-        let last_text = match &last.content[..] {
-            [ContentBlock::Text { text }] => text,
+        let runtime_text = match &last.content[..] {
+            [
+                ContentBlock::Text { text: hello },
+                ContentBlock::Text { text: runtime },
+            ] => {
+                assert_eq!(hello, "hello");
+                runtime
+            }
             other => panic!("unexpected last message content: {other:?}"),
         };
-        assert_eq!(last_text, "hello");
+        assert!(runtime_text.contains("<runtime_context>"));
+        assert!(runtime_text.contains("Current date:"));
+        assert!(runtime_text.contains("Current working directory:"));
 
         h.shutdown().expect("shutdown");
     }
