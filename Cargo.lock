@@ -1449,7 +1449,6 @@ dependencies = [
 name = "tau-ext-dpc-notifications"
 version = "0.1.0"
 dependencies = [
- "ciborium",
  "serde",
  "serde_json",
  "tau-extension",
@@ -1485,6 +1484,10 @@ dependencies = [
 name = "tau-extension"
 version = "0.1.0"
 dependencies = [
+ "ciborium",
+ "serde",
+ "serde_json",
+ "tau-proto",
  "tracing",
  "tracing-subscriber",
 ]

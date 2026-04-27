@@ -186,28 +186,31 @@ where
                 let (_, inner) = event.peel_log();
                 tracing::trace!(target: LOG_TARGET, name = %inner.name(), "event received");
                 match inner {
-                    Event::LifecycleConfigure(msg) => match parse_config(&msg.config) {
-                        Ok(cfg) => {
-                            idle_duration = Duration::from_secs(cfg.idle_seconds);
-                            tracing::info!(
-                                target: LOG_TARGET,
-                                idle_seconds = cfg.idle_seconds,
-                                "applied config",
-                            );
+                    Event::LifecycleConfigure(msg) => {
+                        match tau_extension::parse_config::<ExtConfig>(&msg.config) {
+                            Ok(cfg) => {
+                                idle_duration = Duration::from_secs(cfg.idle_seconds);
+                                tracing::info!(
+                                    target: LOG_TARGET,
+                                    idle_seconds = cfg.idle_seconds,
+                                    "applied config",
+                                );
+                            }
+                            Err(message) => {
+                                tracing::warn!(
+                                    target: LOG_TARGET,
+                                    error = %message,
+                                    "rejecting config",
+                                );
+                                writer.write_event(&Event::LifecycleConfigError(
+                                    LifecycleConfigError {
+                                        message: message.clone(),
+                                    },
+                                ))?;
+                                writer.flush()?;
+                            }
                         }
-                        Err(error) => {
-                            let message = error.to_string();
-                            tracing::warn!(
-                                target: LOG_TARGET,
-                                %error,
-                                "rejecting config",
-                            );
-                            writer.write_event(&Event::LifecycleConfigError(
-                                LifecycleConfigError { message },
-                            ))?;
-                            writer.flush()?;
-                        }
-                    },
+                    }
                     Event::AgentPromptSubmitted(_) => {
                         idle_deadline = None;
                         writer.write_event(&sound_event(VALUE_AGENT_START))?;
@@ -265,19 +268,6 @@ where
     }
 
     Ok(())
-}
-
-/// Decode the harness-provided `config` (a CBOR value) into the
-/// extension's typed config struct. Roundtrips through CBOR bytes
-/// because `ciborium::value::Value` doesn't expose a direct
-/// `Deserializer` impl.
-fn parse_config(
-    value: &tau_proto::CborValue,
-) -> Result<ExtConfig, ciborium::de::Error<std::io::Error>> {
-    let mut bytes = Vec::new();
-    ciborium::ser::into_writer(value, &mut bytes)
-        .map_err(|e| ciborium::de::Error::Io(std::io::Error::other(e.to_string())))?;
-    ciborium::de::from_reader(bytes.as_slice())
 }
 
 fn sound_event(value: &str) -> Event {

@@ -9,5 +9,11 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+ciborium.workspace = true
+serde.workspace = true
+tau-proto.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

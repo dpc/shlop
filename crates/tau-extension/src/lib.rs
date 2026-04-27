@@ -71,3 +71,78 @@ pub fn init_logging() {
 
     let _ = tracing::subscriber::set_global_default(subscriber);
 }
+
+/// Decode the harness-provided `LifecycleConfigure.config` value into
+/// the extension's typed configuration struct.
+///
+/// `Err` carries a human-readable message suitable for stuffing
+/// straight into `LifecycleConfigError { message }` — the harness
+/// surfaces it verbatim to the user. Avoids the noisy
+/// `Semantic(None, "…")` shape `ciborium::de::Error` produces from
+/// its derived `Debug` (which is what its `Display` falls back to).
+///
+/// Errors are flattened to one of:
+/// - `<message>` for a plain semantic error (the most common case — missing
+///   field, unknown field, type mismatch);
+/// - `<message> (at offset N)` if `ciborium` reported one;
+/// - prefixed with `CBOR syntax error` / `IO error` for the rarer
+///   transport-level cases.
+pub fn parse_config<C: serde::de::DeserializeOwned>(
+    value: &tau_proto::CborValue,
+) -> Result<C, String> {
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(value, &mut bytes)
+        .map_err(|e| format!("failed to re-encode config payload: {e}"))?;
+    ciborium::de::from_reader::<C, _>(&bytes[..]).map_err(format_de_error)
+}
+
+fn format_de_error(error: ciborium::de::Error<std::io::Error>) -> String {
+    use ciborium::de::Error;
+    match error {
+        Error::Io(e) => format!("IO error reading config: {e}"),
+        Error::Syntax(offset) => format!("CBOR syntax error at offset {offset}"),
+        Error::Semantic(offset, msg) => match offset {
+            Some(o) => format!("{msg} (at offset {o})"),
+            None => msg,
+        },
+        Error::RecursionLimitExceeded => "config nesting too deep".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(serde::Deserialize, PartialEq, Debug)]
+    #[serde(default, deny_unknown_fields)]
+    struct Demo {
+        n: u32,
+    }
+
+    impl Default for Demo {
+        fn default() -> Self {
+            Self { n: 1 }
+        }
+    }
+
+    fn cbor_from_json(json: serde_json::Value) -> tau_proto::CborValue {
+        tau_proto::json_to_cbor(&json)
+    }
+
+    #[test]
+    fn parse_config_returns_typed_struct() {
+        let value = cbor_from_json(serde_json::json!({ "n": 7 }));
+        let cfg: Demo = parse_config(&value).expect("parse");
+        assert_eq!(cfg, Demo { n: 7 });
+    }
+
+    #[test]
+    fn parse_config_error_strips_debug_wrapper() {
+        let value = cbor_from_json(serde_json::json!({ "wrong": 7 }));
+        let err = parse_config::<Demo>(&value).expect_err("should fail");
+        // No `Semantic(None, "…")` wrapping: just the message.
+        assert!(!err.starts_with("Semantic"), "got: {err}");
+        assert!(err.contains("unknown field"), "got: {err}");
+        assert!(err.contains("wrong"), "got: {err}");
+    }
+}
