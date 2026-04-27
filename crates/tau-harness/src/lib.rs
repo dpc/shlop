@@ -2091,9 +2091,18 @@ impl Harness {
     }
 
     fn send_prompt_to_agent(&mut self, session_id: &str) -> SessionPromptId {
+        // Linear-prefix invariant: each subsequent prompt for the same
+        // session must be a strict byte-prefix extension of the prior
+        // one. Provider prompt caches (OpenAI, Anthropic, etc.) key
+        // entirely off the prefix bytes, so any per-turn churn in
+        // `system_prompt`, `tools`, or earlier messages busts the
+        // cache. See `linear_session_prompts_strictly_extend_previous_messages`.
         let tree = self.store.session(session_id);
         let messages = tree.map(assemble_conversation).unwrap_or_default();
         let tools = self.gather_tool_definitions();
+        let cwd = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "(unknown)".to_owned());
         let session_prompt_id: SessionPromptId =
             format!("sp-{}", self.next_session_prompt_id).into();
         self.next_session_prompt_id += 1;
@@ -2109,7 +2118,7 @@ impl Harness {
         let event = Event::SessionPromptCreated(SessionPromptCreated {
             session_prompt_id: session_prompt_id.clone(),
             session_id: session_id.into(),
-            system_prompt: build_system_prompt(&tools, &self.discovered_skills),
+            system_prompt: build_system_prompt(&tools, &self.discovered_skills, &cwd),
             messages,
             tools,
             model,
@@ -3144,13 +3153,22 @@ fn save_harness_state(
         .and_then(|s| std::fs::write(&path, s).ok());
 }
 
-/// Builds the system prompt from available tools, skills, and environment.
+/// Builds the system prompt from available tools, skills, and cwd.
+///
+/// Must be deterministic and stable across turns of the same session
+/// — see the linear-prefix invariant in `send_prompt_to_agent`.
+/// Tools and skills are sorted by name (HashMap iteration would
+/// otherwise drift). The current date is intentionally omitted:
+/// including it would invalidate the prompt cache every midnight
+/// UTC. cwd is threaded in from the caller so the caller owns the
+/// source of truth.
 fn build_system_prompt(
     tools: &[ToolDefinition],
     skills: &std::collections::HashMap<tau_proto::SkillName, DiscoveredSkill>,
+    cwd: &str,
 ) -> String {
     let mut prompt = String::from(
-        "You are an expert coding assistant operating inside tau, \
+        "You are an expert coding assistant operating inside Tau, \
          a coding agent harness. You help users by reading files, \
          executing commands, editing code, and writing new files.\n\n",
     );
@@ -3193,9 +3211,6 @@ fn build_system_prompt(
         prompt.push_str("</available_skills>\n");
     }
 
-    let cwd = std::env::current_dir()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| "(unknown)".to_owned());
     prompt.push_str(&format!("\nCurrent working directory: {cwd}\n"));
 
     prompt
@@ -5186,12 +5201,12 @@ mod tests {
                 add_to_prompt: true,
             },
         );
-        let prompt = build_system_prompt(&[], &skills);
+        let prompt = build_system_prompt(&[], &skills, "/tmp/work");
         assert!(prompt.contains("<available_skills>"));
         assert!(prompt.contains("<name>brave-search</name>"));
         assert!(prompt.contains("Web search via Brave API"));
         assert!(!prompt.contains("Current date:"));
-        assert!(prompt.contains("Current working directory:"));
+        assert!(prompt.contains("Current working directory: /tmp/work"));
     }
 
     #[test]
@@ -5206,7 +5221,7 @@ mod tests {
                 add_to_prompt: false,
             },
         );
-        let prompt = build_system_prompt(&[], &skills);
+        let prompt = build_system_prompt(&[], &skills, "/tmp/work");
         assert!(!prompt.contains("<available_skills>"));
         assert!(!prompt.contains("hidden"));
     }
