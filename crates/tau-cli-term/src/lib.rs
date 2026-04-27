@@ -31,7 +31,7 @@ pub enum Event {
     /// The input buffer changed.
     BufferChanged,
     /// Shift+Tab pressed outside of completion — caller decides what
-    /// to do with it (Pi-style: cycle thinking level).
+    /// to do with it (Pi-style: cycle effort).
     BackTab,
 }
 

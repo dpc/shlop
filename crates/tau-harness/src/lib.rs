@@ -511,7 +511,7 @@ struct Harness {
     /// Currently selected model as `"provider/model_id"`.
     selected_model: ModelId,
     /// Currently selected reasoning effort level.
-    selected_thinking_level: tau_proto::ThinkingLevel,
+    selected_effort: tau_proto::Effort,
     /// Input tokens consumed by the most recent agent response, if
     /// the provider reported it. `None` until the first usage report
     /// for the current model.
@@ -520,7 +520,7 @@ struct Harness {
     /// used. `None` when the model's context window is unknown.
     context_percent_used: Option<u8>,
     /// Provider/model registry, kept for runtime lookups (e.g.
-    /// computing available thinking levels per current model).
+    /// computing available efforts per current model).
     model_registry: tau_config::settings::ModelRegistry,
     /// Skills discovered by extensions, keyed by name.
     discovered_skills: std::collections::HashMap<tau_proto::SkillName, DiscoveredSkill>,
@@ -640,7 +640,7 @@ impl Harness {
 
         let (available_models, selected_model, model_registry, harness_settings) =
             load_model_list(&dirs);
-        let selected_thinking_level = selected_thinking_level_for_model(
+        let selected_effort = selected_effort_for_model(
             &dirs,
             &harness_settings,
             &model_registry,
@@ -672,7 +672,7 @@ impl Harness {
             debug_log: None,
             available_models,
             selected_model,
-            selected_thinking_level,
+            selected_effort,
             context_input_tokens: None,
             context_percent_used: None,
             model_registry,
@@ -789,7 +789,7 @@ impl Harness {
 
         let (available_models, selected_model, model_registry, harness_settings) =
             load_model_list(&dirs);
-        let selected_thinking_level = selected_thinking_level_for_model(
+        let selected_effort = selected_effort_for_model(
             &dirs,
             &harness_settings,
             &model_registry,
@@ -821,7 +821,7 @@ impl Harness {
             debug_log: None,
             available_models,
             selected_model,
-            selected_thinking_level,
+            selected_effort,
             context_input_tokens: None,
             context_percent_used: None,
             model_registry,
@@ -1261,7 +1261,7 @@ impl Harness {
                 if self.available_models.contains(&select.model) {
                     let was_empty = self.selected_model.is_empty();
                     self.selected_model = select.model.clone();
-                    self.selected_thinking_level = selected_thinking_level_for_model(
+                    self.selected_effort = selected_effort_for_model(
                         &self.dirs,
                         &load_harness_settings_or_warn(&self.dirs),
                         &self.model_registry,
@@ -1270,7 +1270,7 @@ impl Harness {
                     save_harness_state(
                         &self.dirs,
                         self.selected_model.as_str(),
-                        self.selected_thinking_level,
+                        self.selected_effort,
                     );
                     self.context_input_tokens = None;
                     self.context_percent_used = None;
@@ -1293,22 +1293,18 @@ impl Harness {
                     );
                     self.publish_event(
                         None,
-                        Event::HarnessThinkingLevelChanged(
-                            tau_proto::HarnessThinkingLevelChanged {
-                                level: self.selected_thinking_level,
-                            },
-                        ),
+                        Event::HarnessEffortChanged(tau_proto::HarnessEffortChanged {
+                            level: self.selected_effort,
+                        }),
                     );
                     // Levels depend on the new model's provider.
-                    let levels = thinking_levels_for_model(
-                        &self.model_registry,
-                        self.selected_model.as_str(),
-                    );
+                    let levels =
+                        efforts_for_model(&self.model_registry, self.selected_model.as_str());
                     self.publish_event(
                         None,
-                        Event::HarnessThinkingLevelsAvailable(
-                            tau_proto::HarnessThinkingLevelsAvailable { levels },
-                        ),
+                        Event::HarnessEffortsAvailable(tau_proto::HarnessEffortsAvailable {
+                            levels,
+                        }),
                     );
                     // If we just went from no-model to having one,
                     // drain queued prompts.
@@ -1327,19 +1323,18 @@ impl Harness {
                 }
                 Ok(true)
             }
-            Event::UiSetThinkingLevel(req) => {
-                let levels =
-                    thinking_levels_for_model(&self.model_registry, self.selected_model.as_str());
-                self.selected_thinking_level = clamp_thinking_level(req.level, &levels);
+            Event::UiSetEffort(req) => {
+                let levels = efforts_for_model(&self.model_registry, self.selected_model.as_str());
+                self.selected_effort = clamp_effort(req.level, &levels);
                 save_harness_state(
                     &self.dirs,
                     self.selected_model.as_str(),
-                    self.selected_thinking_level,
+                    self.selected_effort,
                 );
                 self.publish_event(
                     None,
-                    Event::HarnessThinkingLevelChanged(tau_proto::HarnessThinkingLevelChanged {
-                        level: self.selected_thinking_level,
+                    Event::HarnessEffortChanged(tau_proto::HarnessEffortChanged {
+                        level: self.selected_effort,
                     }),
                 );
                 Ok(true)
@@ -1746,18 +1741,15 @@ impl Harness {
         if selector_matches_event(selectors, &context_event) {
             let _ = self.bus.send_to(client_id, None, context_event);
         }
-        let thinking_event =
-            Event::HarnessThinkingLevelChanged(tau_proto::HarnessThinkingLevelChanged {
-                level: self.selected_thinking_level,
-            });
-        if selector_matches_event(selectors, &thinking_event) {
-            let _ = self.bus.send_to(client_id, None, thinking_event);
+        let effort_event = Event::HarnessEffortChanged(tau_proto::HarnessEffortChanged {
+            level: self.selected_effort,
+        });
+        if selector_matches_event(selectors, &effort_event) {
+            let _ = self.bus.send_to(client_id, None, effort_event);
         }
-        let levels = thinking_levels_for_model(&self.model_registry, self.selected_model.as_str());
+        let levels = efforts_for_model(&self.model_registry, self.selected_model.as_str());
         let levels_event =
-            Event::HarnessThinkingLevelsAvailable(tau_proto::HarnessThinkingLevelsAvailable {
-                levels,
-            });
+            Event::HarnessEffortsAvailable(tau_proto::HarnessEffortsAvailable { levels });
         if selector_matches_event(selectors, &levels_event) {
             let _ = self.bus.send_to(client_id, None, levels_event);
         }
@@ -2113,7 +2105,7 @@ impl Harness {
             messages,
             tools,
             model,
-            thinking_level: self.selected_thinking_level,
+            effort: self.selected_effort,
         });
         self.publish_event(None, event);
 
@@ -2974,16 +2966,16 @@ fn load_model_list(
     (available, selected, model_registry, harness_settings)
 }
 
-/// Returns the thinking levels valid for `model` (a `provider/model_id`
-/// string). Empty list means thinking is N/A — no model selected, or
+/// Returns the efforts valid for `model` (a `provider/model_id`
+/// string). Empty list means no effort applies — no model selected, or
 /// the provider doesn't support reasoning. Otherwise returns the
 /// canonical [Off, Minimal, Low, Medium, High] set; xhigh is gated on
 /// future per-model config (Pi only enables it for codex-max).
-fn thinking_levels_for_model(
+fn efforts_for_model(
     registry: &tau_config::settings::ModelRegistry,
     model: &str,
-) -> Vec<tau_proto::ThinkingLevel> {
-    use tau_proto::ThinkingLevel as L;
+) -> Vec<tau_proto::Effort> {
+    use tau_proto::Effort as L;
     if model.is_empty() {
         return Vec::new();
     }
@@ -3020,32 +3012,23 @@ fn context_percent_used(input_tokens: u64, context_window: u64) -> u8 {
     percent.min(100) as u8
 }
 
-fn clamp_thinking_level(
-    requested: tau_proto::ThinkingLevel,
-    allowed: &[tau_proto::ThinkingLevel],
-) -> tau_proto::ThinkingLevel {
+fn clamp_effort(requested: tau_proto::Effort, allowed: &[tau_proto::Effort]) -> tau_proto::Effort {
     if allowed.iter().any(|level| *level == requested) {
         return requested;
     }
-    if allowed
-        .iter()
-        .any(|level| *level == tau_proto::ThinkingLevel::Off)
-    {
-        return tau_proto::ThinkingLevel::Off;
+    if allowed.iter().any(|level| *level == tau_proto::Effort::Off) {
+        return tau_proto::Effort::Off;
     }
-    allowed
-        .first()
-        .copied()
-        .unwrap_or(tau_proto::ThinkingLevel::Off)
+    allowed.first().copied().unwrap_or(tau_proto::Effort::Off)
 }
 
-fn parse_thinking_level(value: &str) -> Option<tau_proto::ThinkingLevel> {
+fn parse_effort(value: &str) -> Option<tau_proto::Effort> {
     value.parse().ok()
 }
 
-fn load_last_thinking_levels(
+fn load_last_efforts(
     dirs: &tau_config::settings::TauDirs,
-) -> std::collections::HashMap<String, tau_proto::ThinkingLevel> {
+) -> std::collections::HashMap<String, tau_proto::Effort> {
     let Some(path) = dirs
         .state_dir
         .as_ref()
@@ -3061,9 +3044,9 @@ fn load_last_thinking_levels(
     };
 
     let mut levels = std::collections::HashMap::new();
-    if let Some(map) = json["last_thinking_levels"].as_object() {
+    if let Some(map) = json["last_efforts"].as_object() {
         for (model, level) in map {
-            let Some(level) = level.as_str().and_then(parse_thinking_level) else {
+            let Some(level) = level.as_str().and_then(parse_effort) else {
                 continue;
             };
             levels.insert(model.clone(), level);
@@ -3072,10 +3055,7 @@ fn load_last_thinking_levels(
 
     if levels.is_empty() {
         if let Some(model) = json["last_selected_model"].as_str() {
-            if let Some(level) = json["last_thinking_level"]
-                .as_str()
-                .and_then(parse_thinking_level)
-            {
+            if let Some(level) = json["last_effort"].as_str().and_then(parse_effort) {
                 levels.insert(model.to_owned(), level);
             }
         }
@@ -3084,20 +3064,20 @@ fn load_last_thinking_levels(
     levels
 }
 
-fn selected_thinking_level_for_model(
+fn selected_effort_for_model(
     dirs: &tau_config::settings::TauDirs,
     harness_settings: &tau_config::settings::HarnessSettings,
     registry: &tau_config::settings::ModelRegistry,
     model: &str,
-) -> tau_proto::ThinkingLevel {
-    let allowed = thinking_levels_for_model(registry, model);
+) -> tau_proto::Effort {
+    let allowed = efforts_for_model(registry, model);
     let requested = harness_settings
-        .default_thinking_levels
+        .default_efforts
         .get(model)
         .copied()
-        .or_else(|| load_last_thinking_levels(dirs).remove(model))
-        .unwrap_or(tau_proto::ThinkingLevel::Off);
-    clamp_thinking_level(requested, &allowed)
+        .or_else(|| load_last_efforts(dirs).remove(model))
+        .unwrap_or(tau_proto::Effort::Off);
+    clamp_effort(requested, &allowed)
 }
 
 /// Load the last-selected model from `<state_dir>/harness-state.json`.
@@ -3108,28 +3088,28 @@ fn load_last_selected_model(dirs: &tau_config::settings::TauDirs) -> Option<Stri
     json["last_selected_model"].as_str().map(String::from)
 }
 
-/// Persist model + thinking level to `<state_dir>/harness-state.json`.
+/// Persist model + effort to `<state_dir>/harness-state.json`.
 fn save_harness_state(
     dirs: &tau_config::settings::TauDirs,
     model: &str,
-    thinking: tau_proto::ThinkingLevel,
+    effort: tau_proto::Effort,
 ) {
     let Some(dir) = dirs.state_dir.as_ref() else {
         return;
     };
     let path = dir.join("harness-state.json");
     let _ = std::fs::create_dir_all(dir);
-    let mut last_thinking_levels = load_last_thinking_levels(dirs);
+    let mut last_efforts = load_last_efforts(dirs);
     if !model.is_empty() {
-        last_thinking_levels.insert(model.to_owned(), thinking);
+        last_efforts.insert(model.to_owned(), effort);
     }
-    let thinking_json = last_thinking_levels
+    let effort_json = last_efforts
         .into_iter()
         .map(|(model, level)| (model, serde_json::Value::String(level.as_str().to_owned())))
         .collect::<serde_json::Map<String, serde_json::Value>>();
     let json = serde_json::json!({
         "last_selected_model": model,
-        "last_thinking_levels": thinking_json,
+        "last_efforts": effort_json,
     });
     let _ = serde_json::to_string_pretty(&json)
         .ok()
@@ -5028,7 +5008,7 @@ mod tests {
     // -- Skills --
 
     #[test]
-    fn load_harness_state_prefers_per_model_thinking_and_migrates_legacy_value() {
+    fn load_harness_state_prefers_per_model_effort_and_migrates_legacy_value() {
         let td = TempDir::new().expect("tempdir");
         let dirs = tau_config::settings::TauDirs {
             config_dir: Some(td.path().to_path_buf()),
@@ -5042,20 +5022,17 @@ mod tests {
                 .join("harness-state.json"),
             r#"{
                 "last_selected_model": "openai/gpt-4.1",
-                "last_thinking_level": "high"
+                "last_effort": "high"
             }"#,
         )
         .expect("write state");
 
-        let levels = load_last_thinking_levels(&dirs);
-        assert_eq!(
-            levels.get("openai/gpt-4.1"),
-            Some(&tau_proto::ThinkingLevel::High)
-        );
+        let levels = load_last_efforts(&dirs);
+        assert_eq!(levels.get("openai/gpt-4.1"), Some(&tau_proto::Effort::High));
     }
 
     #[test]
-    fn selected_thinking_level_is_model_specific_and_clamped() {
+    fn selected_effort_is_model_specific_and_clamped() {
         let td = TempDir::new().expect("tempdir");
         let config_dir = td.path().join("config");
         let state_dir = td.path().join("state");
@@ -5069,7 +5046,7 @@ mod tests {
         std::fs::write(
             config_dir.join("harness.json5"),
             r#"{
-                default_thinking_levels: {
+                default_efforts: {
                     "openai/gpt-4.1": "high",
                     "local/llama": "high",
                 },
@@ -5096,7 +5073,7 @@ mod tests {
             state_dir.join("harness-state.json"),
             r#"{
                 "last_selected_model": "openai/gpt-4.1",
-                "last_thinking_levels": {
+                "last_efforts": {
                     "openai/gpt-4.1": "minimal",
                     "local/llama": "high"
                 }
@@ -5109,22 +5086,12 @@ mod tests {
         let model_registry = tau_config::settings::load_models_in(&dirs).expect("load models");
 
         assert_eq!(
-            selected_thinking_level_for_model(
-                &dirs,
-                &harness_settings,
-                &model_registry,
-                "openai/gpt-4.1",
-            ),
-            tau_proto::ThinkingLevel::High
+            selected_effort_for_model(&dirs, &harness_settings, &model_registry, "openai/gpt-4.1",),
+            tau_proto::Effort::High
         );
         assert_eq!(
-            selected_thinking_level_for_model(
-                &dirs,
-                &harness_settings,
-                &model_registry,
-                "local/llama"
-            ),
-            tau_proto::ThinkingLevel::Off
+            selected_effort_for_model(&dirs, &harness_settings, &model_registry, "local/llama"),
+            tau_proto::Effort::Off
         );
     }
 

@@ -216,7 +216,7 @@ fn handle_chat_completions<W: Write>(
         system_prompt: &prompt.system_prompt,
         messages: &prompt.messages,
         tools: &prompt.tools,
-        thinking_level: prompt.thinking_level,
+        effort: prompt.effort,
     };
 
     match openai::chat_completion_stream(config, &request, |text_so_far| {
@@ -242,7 +242,7 @@ fn handle_responses<W: Write>(
         system_prompt: &prompt.system_prompt,
         messages: &prompt.messages,
         tools: &prompt.tools,
-        thinking_level: prompt.thinking_level,
+        effort: prompt.effort,
     };
 
     match responses::responses_stream(config, &request, |text_so_far| {

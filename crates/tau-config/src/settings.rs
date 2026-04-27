@@ -52,8 +52,8 @@ pub struct HarnessSettings {
     /// "anthropic/claude-sonnet-4-20250514").
     pub default_model: Option<String>,
 
-    /// Default thinking level per model (`provider/model` -> level).
-    pub default_thinking_levels: HashMap<String, tau_proto::ThinkingLevel>,
+    /// Default effort per model (`provider/model` -> level).
+    pub default_efforts: HashMap<String, tau_proto::Effort>,
 
     /// Extension table, keyed by name. Built-in entries (`agent`,
     /// `shell`) come pre-baked at the harness level; anything the
@@ -549,7 +549,7 @@ mod tests {
     fn default_harness_settings_have_no_model() {
         let s = HarnessSettings::default();
         assert!(s.default_model.is_none());
-        assert!(s.default_thinking_levels.is_empty());
+        assert!(s.default_efforts.is_empty());
     }
 
     #[test]
@@ -584,7 +584,7 @@ mod tests {
             dir.join("harness.json5"),
             r#"{
                 default_model: "anthropic/claude-sonnet-4-20250514",
-                default_thinking_levels: {
+                default_efforts: {
                     "anthropic/claude-sonnet-4-20250514": "high",
                 },
             }"#,
@@ -597,10 +597,10 @@ mod tests {
             Some("anthropic/claude-sonnet-4-20250514")
         );
         assert_eq!(
-            s.default_thinking_levels
+            s.default_efforts
                 .get("anthropic/claude-sonnet-4-20250514")
                 .copied(),
-            Some(tau_proto::ThinkingLevel::High)
+            Some(tau_proto::Effort::High)
         );
     }
 
@@ -821,7 +821,7 @@ mod tests {
         assert!(s.greeting);
         let h: HarnessSettings = load_json5_layered(td.path(), "harness").expect("load");
         assert!(h.default_model.is_none());
-        assert!(h.default_thinking_levels.is_empty());
+        assert!(h.default_efforts.is_empty());
         let m: ModelRegistry = load_json5_layered(td.path(), "models").expect("load");
         assert!(m.providers.is_empty());
     }

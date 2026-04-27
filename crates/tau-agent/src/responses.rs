@@ -227,8 +227,7 @@ fn build_request(config: &ResponsesConfig, request: &PromptPayload<'_>) -> Respo
     };
 
     let reasoning = if config.supports_reasoning_effort {
-        crate::openai::thinking_level_wire(request.thinking_level)
-            .map(|effort| ReasoningRequest { effort })
+        crate::openai::effort_wire(request.effort).map(|effort| ReasoningRequest { effort })
     } else {
         None
     };

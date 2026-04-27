@@ -3,8 +3,8 @@
   // The provider must be defined in models.json5.
   // default_model: "local/llama-3",
 
-  // Optional per-model default thinking levels.
-  // default_thinking_levels: {
+  // Optional per-model default efforts.
+  // default_efforts: {
   //   "local/llama-3": "high",
   // },
 

@@ -339,7 +339,7 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
             "Print the session tree (`/tree <id>` rewinds head to that node)",
         ),
         SlashCommand::new(
-            "/thinking",
+            "/effort",
             "Set reasoning effort: off, minimal, low, medium, high, xhigh (Shift+Tab to cycle)",
         ),
         SlashCommand::new(
@@ -381,10 +381,10 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
     let renderer_handle = handle.clone();
     let renderer_rx = event_rx;
     let renderer_completion_data = completion_data;
-    // Pre-build the renderer so we can grab its `thinking_state`
+    // Pre-build the renderer so we can grab its `effort_state`
     // handle for the input loop's Shift+Tab cycle.
     let renderer = EventRenderer::new(renderer_handle, renderer_completion_data, theme.clone());
-    let thinking_state = renderer.thinking_state();
+    let effort_state = renderer.effort_state();
     let _renderer = std::thread::spawn(move || {
         let mut renderer = renderer;
         while let Ok(cmd) = renderer_rx.recv() {
@@ -396,7 +396,7 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
     });
 
     // Terminal input loop — owns the writer, no locking needed. Theme
-    // clone is for printing local validation errors (e.g. `/thinking
+    // clone is for printing local validation errors (e.g. `/effort
     // foo`) through the same TermHandle as remote events, so they
     // don't garble the TUI like `eprintln!` would.
     let mut active_session_id = session_id.to_owned();
@@ -404,7 +404,7 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
         &mut term,
         &mut writer,
         &mut active_session_id,
-        thinking_state,
+        effort_state,
         theme,
         event_tx,
     )?;
@@ -469,12 +469,12 @@ fn terminal_input_loop(
     term: &mut tau_cli_term::HighTerm,
     writer: &mut EventWriter<BufWriter<UnixStream>>,
     session_id: &mut String,
-    thinking_state: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    effort_state: std::sync::Arc<std::sync::atomic::AtomicU8>,
     theme: tau_themes::Theme,
     renderer_tx: std::sync::mpsc::Sender<RendererCmd>,
 ) -> Result<InputLoopExit, CliError> {
     // Cloned `TermHandle` so we can `print_output` for client-side
-    // validation errors (`/thinking foo`, `/tree blah`) from this
+    // validation errors (`/effort foo`, `/tree blah`) from this
     // thread without borrowing `term` while the loop also holds
     // `&mut term` for `get_next_event`.
     let local_handle = term.handle().clone();
@@ -541,22 +541,19 @@ fn terminal_input_loop(
                     }
                     continue;
                 }
-                if let Some(arg) = text.strip_prefix("/thinking ") {
-                    match arg.trim().parse::<tau_proto::ThinkingLevel>() {
+                if let Some(arg) = text.strip_prefix("/effort ") {
+                    match arg.trim().parse::<tau_proto::Effort>() {
                         Ok(level) => {
-                            let _ = writer.write_event(&Event::UiSetThinkingLevel(
-                                tau_proto::UiSetThinkingLevel { level },
-                            ));
+                            let _ = writer
+                                .write_event(&Event::UiSetEffort(tau_proto::UiSetEffort { level }));
                             let _ = writer.flush();
                         }
-                        Err(msg) => print_local(&format!("/thinking: {msg}")),
+                        Err(msg) => print_local(&format!("/effort: {msg}")),
                     }
                     continue;
                 }
-                if text == "/thinking" {
-                    print_local(
-                        "/thinking <level> — one of: off, minimal, low, medium, high, xhigh",
-                    );
+                if text == "/effort" {
+                    print_local("/effort <level> — one of: off, minimal, low, medium, high, xhigh");
                     continue;
                 }
                 if text == "/diff" {
@@ -613,43 +610,41 @@ fn terminal_input_loop(
             TermEvent::Eof => return Ok(InputLoopExit::Quit),
             TermEvent::Resize { .. } | TermEvent::BufferChanged => {}
             TermEvent::BackTab => {
-                // Pi-style: cycle thinking level. Read the current
+                // Pi-style: cycle effort. Read the current
                 // level from the shared atomic the renderer keeps in
-                // sync with `HarnessThinkingLevelChanged`, advance,
+                // sync with `HarnessEffortChanged`, advance,
                 // send the request. The harness echoes back and the
                 // renderer updates the status block.
                 let current =
-                    thinking_from_u8(thinking_state.load(std::sync::atomic::Ordering::Relaxed));
+                    effort_from_u8(effort_state.load(std::sync::atomic::Ordering::Relaxed));
                 let next = current.next();
                 let _ =
-                    writer.write_event(&Event::UiSetThinkingLevel(tau_proto::UiSetThinkingLevel {
-                        level: next,
-                    }));
+                    writer.write_event(&Event::UiSetEffort(tau_proto::UiSetEffort { level: next }));
                 let _ = writer.flush();
             }
         }
     }
 }
 
-fn thinking_to_u8(level: tau_proto::ThinkingLevel) -> u8 {
+fn effort_to_u8(level: tau_proto::Effort) -> u8 {
     match level {
-        tau_proto::ThinkingLevel::Off => 0,
-        tau_proto::ThinkingLevel::Minimal => 1,
-        tau_proto::ThinkingLevel::Low => 2,
-        tau_proto::ThinkingLevel::Medium => 3,
-        tau_proto::ThinkingLevel::High => 4,
-        tau_proto::ThinkingLevel::XHigh => 5,
+        tau_proto::Effort::Off => 0,
+        tau_proto::Effort::Minimal => 1,
+        tau_proto::Effort::Low => 2,
+        tau_proto::Effort::Medium => 3,
+        tau_proto::Effort::High => 4,
+        tau_proto::Effort::XHigh => 5,
     }
 }
 
-fn thinking_from_u8(value: u8) -> tau_proto::ThinkingLevel {
+fn effort_from_u8(value: u8) -> tau_proto::Effort {
     match value {
-        1 => tau_proto::ThinkingLevel::Minimal,
-        2 => tau_proto::ThinkingLevel::Low,
-        3 => tau_proto::ThinkingLevel::Medium,
-        4 => tau_proto::ThinkingLevel::High,
-        5 => tau_proto::ThinkingLevel::XHigh,
-        _ => tau_proto::ThinkingLevel::Off,
+        1 => tau_proto::Effort::Minimal,
+        2 => tau_proto::Effort::Low,
+        3 => tau_proto::Effort::Medium,
+        4 => tau_proto::Effort::High,
+        5 => tau_proto::Effort::XHigh,
+        _ => tau_proto::Effort::Off,
     }
 }
 
@@ -1331,7 +1326,7 @@ struct EventRenderer {
     /// Live extension blocks keyed by instance_id. Shown in
     /// above_active while starting, moved to history when ready.
     extension_blocks: HashMap<tau_proto::ExtensionInstanceId, tau_cli_term::BlockId>,
-    /// Persistent status bar block showing the current model + thinking level.
+    /// Persistent status bar block showing the current model + effort.
     model_status_block: Option<tau_cli_term::BlockId>,
     /// Live history of completed write/edit blocks plus the data
     /// needed to re-render them. `/diff` flips `diffs_expanded` and
@@ -1341,11 +1336,11 @@ struct EventRenderer {
     /// Global expand-diffs toggle.
     diffs_expanded: bool,
     /// Current model id (cached so we can re-render the status bar
-    /// when the thinking level changes, and vice versa).
+    /// when the effort changes, and vice versa).
     current_model: tau_proto::ModelId,
-    /// Current thinking level. Mirrored into `thinking_state` so the
+    /// Current effort. Mirrored into `effort_state` so the
     /// input thread can read it for Shift+Tab cycling.
-    current_thinking: tau_proto::ThinkingLevel,
+    current_effort: tau_proto::Effort,
     /// Current model context usage percent. `None` when the context
     /// window is unknown for the selected model.
     current_context_percent: Option<u8>,
@@ -1354,8 +1349,8 @@ struct EventRenderer {
     current_context_input_tokens: Option<u64>,
     /// Current model context window, in tokens, if known.
     current_context_window: Option<u64>,
-    /// Shared thinking-level mirror for the input thread.
-    thinking_state: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    /// Shared effort mirror for the input thread.
+    effort_state: std::sync::Arc<std::sync::atomic::AtomicU8>,
 }
 
 /// One completed file-mutation tool block. Held so `/diff` can
@@ -1397,20 +1392,20 @@ impl EventRenderer {
             diff_blocks: Vec::new(),
             diffs_expanded: false,
             current_model: tau_proto::ModelId::from(""),
-            current_thinking: tau_proto::ThinkingLevel::Off,
+            current_effort: tau_proto::Effort::Off,
             current_context_percent: None,
             current_context_input_tokens: None,
             current_context_window: None,
-            thinking_state: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(thinking_to_u8(
-                tau_proto::ThinkingLevel::Off,
+            effort_state: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(effort_to_u8(
+                tau_proto::Effort::Off,
             ))),
         }
     }
 
-    /// Returns a clone of the shared thinking-level mirror, used by the
+    /// Returns a clone of the shared effort mirror, used by the
     /// input thread to read the current level for Shift+Tab cycling.
-    fn thinking_state(&self) -> std::sync::Arc<std::sync::atomic::AtomicU8> {
-        self.thinking_state.clone()
+    fn effort_state(&self) -> std::sync::Arc<std::sync::atomic::AtomicU8> {
+        self.effort_state.clone()
     }
 
     /// Flip the global expand-diffs flag and re-render every diff
@@ -1436,10 +1431,10 @@ impl EventRenderer {
         let label = if self.current_model.is_empty() {
             "no model selected".to_string()
         } else {
-            let level = if matches!(self.current_thinking, tau_proto::ThinkingLevel::Off) {
+            let level = if matches!(self.current_effort, tau_proto::Effort::Off) {
                 "none".to_owned()
             } else {
-                self.current_thinking.to_string()
+                self.current_effort.to_string()
             };
             let context = format_context_chip(
                 self.current_context_input_tokens,
@@ -1726,10 +1721,10 @@ impl EventRenderer {
                 self.current_context_percent = changed.percent_used;
                 self.render_model_status();
             }
-            Event::HarnessThinkingLevelChanged(changed) => {
-                self.current_thinking = changed.level;
-                self.thinking_state.store(
-                    thinking_to_u8(changed.level),
+            Event::HarnessEffortChanged(changed) => {
+                self.current_effort = changed.level;
+                self.effort_state.store(
+                    effort_to_u8(changed.level),
                     std::sync::atomic::Ordering::Relaxed,
                 );
                 self.render_model_status();
@@ -1739,14 +1734,14 @@ impl EventRenderer {
                 let seq = build_osc1337_set_user_var(&req.name, &req.value, in_tmux);
                 self.handle.print_terminal_escape(seq);
             }
-            Event::HarnessThinkingLevelsAvailable(avail) => {
+            Event::HarnessEffortsAvailable(avail) => {
                 let items: Vec<tau_cli_term::CompletionItem> = avail
                     .levels
                     .iter()
                     .map(|l| tau_cli_term::CompletionItem::plain(l.as_str()))
                     .collect();
                 self.completion_data
-                    .set_arg_completions(tau_cli_term::CommandName::new("/thinking"), items);
+                    .set_arg_completions(tau_cli_term::CommandName::new("/effort"), items);
             }
             Event::LifecycleDisconnect(disconnect) => {
                 let reason = disconnect.reason.as_deref().unwrap_or("disconnected");
@@ -2009,7 +2004,7 @@ mod tests {
             messages: Vec::new(),
             tools: Vec::new(),
             model: None,
-            thinking_level: tau_proto::ThinkingLevel::Off,
+            effort: tau_proto::Effort::Off,
         }));
         sync(&handle);
         assert!(vt.screen_contains(80, "…"));
@@ -2058,7 +2053,7 @@ mod tests {
             messages: Vec::new(),
             tools: Vec::new(),
             model: None,
-            thinking_level: tau_proto::ThinkingLevel::Off,
+            effort: tau_proto::Effort::Off,
         }));
 
         // Second prompt queued.
@@ -2095,7 +2090,7 @@ mod tests {
             messages: Vec::new(),
             tools: Vec::new(),
             model: None,
-            thinking_level: tau_proto::ThinkingLevel::Off,
+            effort: tau_proto::Effort::Off,
         }));
         sync(&handle);
         assert!(
@@ -2164,7 +2159,7 @@ mod tests {
                     messages: Vec::new(),
                     tools: Vec::new(),
                     model: None,
-                    thinking_level: tau_proto::ThinkingLevel::Off,
+                    effort: tau_proto::Effort::Off,
                 }));
             } else {
                 renderer.handle(&Event::SessionPromptQueued(SessionPromptQueued {
@@ -2185,7 +2180,7 @@ mod tests {
                     messages: Vec::new(),
                     tools: Vec::new(),
                     model: None,
-                    thinking_level: tau_proto::ThinkingLevel::Off,
+                    effort: tau_proto::Effort::Off,
                 }));
             }
             renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
@@ -2235,7 +2230,7 @@ mod tests {
             messages: Vec::new(),
             tools: Vec::new(),
             model: None,
-            thinking_level: tau_proto::ThinkingLevel::Off,
+            effort: tau_proto::Effort::Off,
         }));
         sync(&handle);
         assert!(vt.screen_contains(80, "…"));
@@ -2322,7 +2317,7 @@ mod tests {
             messages: Vec::new(),
             tools: Vec::new(),
             model: None,
-            thinking_level: tau_proto::ThinkingLevel::Off,
+            effort: tau_proto::Effort::Off,
         }));
         renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
             session_prompt_id: "sp-0".into(),
@@ -2588,7 +2583,7 @@ mod tests {
             messages: Vec::new(),
             tools: Vec::new(),
             model: None,
-            thinking_level: tau_proto::ThinkingLevel::Off,
+            effort: tau_proto::Effort::Off,
         }));
 
         // Agent starts streaming response 1.
@@ -2650,7 +2645,7 @@ mod tests {
             messages: Vec::new(),
             tools: Vec::new(),
             model: None,
-            thinking_level: tau_proto::ThinkingLevel::Off,
+            effort: tau_proto::Effort::Off,
         }));
         renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
             session_prompt_id: "sp-1".into(),
@@ -2677,7 +2672,7 @@ mod tests {
             messages: Vec::new(),
             tools: Vec::new(),
             model: None,
-            thinking_level: tau_proto::ThinkingLevel::Off,
+            effort: tau_proto::Effort::Off,
         }));
         renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
             session_prompt_id: "sp-2".into(),
@@ -2747,7 +2742,7 @@ mod tests {
             messages: Vec::new(),
             tools: Vec::new(),
             model: None,
-            thinking_level: tau_proto::ThinkingLevel::Off,
+            effort: tau_proto::Effort::Off,
         }));
 
         // Response with emoji followed by text on next line.
@@ -2808,7 +2803,7 @@ mod tests {
             messages: Vec::new(),
             tools: Vec::new(),
             model: None,
-            thinking_level: tau_proto::ThinkingLevel::Off,
+            effort: tau_proto::Effort::Off,
         }));
 
         // 3 emoji = 6 columns + "end" = 9 columns total.
@@ -2853,7 +2848,7 @@ mod tests {
             messages: Vec::new(),
             tools: Vec::new(),
             model: None,
-            thinking_level: tau_proto::ThinkingLevel::Off,
+            effort: tau_proto::Effort::Off,
         }));
 
         let partial = "stream 0\nstream 1\nstream 2\nstream 3\nPARTIAL ONLY";

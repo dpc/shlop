@@ -18,7 +18,7 @@ pub struct PromptPayload<'a> {
     /// Reasoning effort. `Off` disables; otherwise rendered into
     /// `reasoning_effort` (Chat Completions) or `reasoning.effort`
     /// (Responses), iff the provider supports it.
-    pub thinking_level: tau_proto::ThinkingLevel,
+    pub effort: tau_proto::Effort,
 }
 
 /// Configuration for the OpenAI-compatible backend.
@@ -214,7 +214,7 @@ struct CompletionRequest {
     stream: bool,
     /// Standard OpenAI Chat Completions reasoning control. Sent only
     /// when the provider supports it and the user picked a non-Off
-    /// thinking level.
+    /// effort.
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<&'static str>,
 }
@@ -294,7 +294,7 @@ fn build_request(
     };
 
     let reasoning_effort = if config.supports_reasoning_effort {
-        thinking_level_wire(request.thinking_level)
+        effort_wire(request.effort)
     } else {
         None
     };
@@ -309,11 +309,11 @@ fn build_request(
     }
 }
 
-/// Maps `ThinkingLevel` to the wire string the OpenAI Responses /
+/// Maps `Effort` to the wire string the OpenAI Responses /
 /// Chat Completions APIs accept. `Off` returns `None` so the field is
 /// omitted from the request entirely.
-pub(crate) fn thinking_level_wire(level: tau_proto::ThinkingLevel) -> Option<&'static str> {
-    use tau_proto::ThinkingLevel::*;
+pub(crate) fn effort_wire(level: tau_proto::Effort) -> Option<&'static str> {
+    use tau_proto::Effort::*;
     match level {
         Off => None,
         Minimal => Some("minimal"),

@@ -2337,7 +2337,7 @@ mod tests {
                 parameters: None,
             }],
             model: None,
-            thinking_level: tau_proto::ThinkingLevel::Off,
+            effort: tau_proto::Effort::Off,
         };
         let _ = bus.send_to(&agent_id, None, Event::SessionPromptCreated(prompt));
 
