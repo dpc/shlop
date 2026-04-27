@@ -235,15 +235,18 @@ fn prompt_cache_retention(
 }
 
 fn supports_prompt_cache_key(provider: &ProviderConfig, base_url: &str) -> bool {
-    provider.compat.supports_prompt_cache_key || is_public_openai_api(base_url)
+    provider.compat.supports_prompt_cache_key || is_builtin_openai_prompt_cache_api(base_url)
 }
 
 fn supports_prompt_cache_retention(provider: &ProviderConfig, base_url: &str) -> bool {
-    provider.compat.supports_prompt_cache_retention || is_public_openai_api(base_url)
+    provider.compat.supports_prompt_cache_retention || is_builtin_openai_prompt_cache_api(base_url)
 }
 
-fn is_public_openai_api(base_url: &str) -> bool {
-    base_url.trim_end_matches('/') == "https://api.openai.com/v1"
+fn is_builtin_openai_prompt_cache_api(base_url: &str) -> bool {
+    matches!(
+        base_url.trim_end_matches('/'),
+        "https://api.openai.com/v1" | "https://chatgpt.com/backend-api"
+    )
 }
 
 /// Parse `proxy-ep` from a Copilot token string.
@@ -515,6 +518,20 @@ mod tests {
         assert!(supports_prompt_cache_retention(
             &provider,
             "https://api.openai.com/v1/"
+        ));
+    }
+
+    #[test]
+    fn codex_backend_enables_prompt_cache_support() {
+        let provider = ProviderConfig::default();
+
+        assert!(supports_prompt_cache_key(
+            &provider,
+            "https://chatgpt.com/backend-api"
+        ));
+        assert!(supports_prompt_cache_retention(
+            &provider,
+            "https://chatgpt.com/backend-api/"
         ));
     }
 
