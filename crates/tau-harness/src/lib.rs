@@ -703,6 +703,7 @@ impl Harness {
         harness.wait_for_extensions_ready()?;
         harness.register_harness_tools();
         harness.check_config_exists();
+        harness.check_config_parses();
 
         // Eager session init for the default session. INTENTIONAL —
         // do NOT "simplify" this to lazy-on-first-prompt.
@@ -839,6 +840,7 @@ impl Harness {
         harness.wait_for_extensions_ready()?;
         harness.register_harness_tools();
         harness.check_config_exists();
+        harness.check_config_parses();
 
         harness.start_session_init(
             eager_session_id.into(),
@@ -1244,8 +1246,7 @@ impl Harness {
                     self.selected_model = select.model.clone();
                     self.selected_thinking_level = selected_thinking_level_for_model(
                         &self.dirs,
-                        &tau_config::settings::load_harness_settings_in(&self.dirs)
-                            .unwrap_or_default(),
+                        &load_harness_settings_or_warn(&self.dirs),
                         &self.model_registry,
                         self.selected_model.as_str(),
                     );
@@ -1613,6 +1614,19 @@ impl Harness {
                     "no config found; run `tau init` to create sample config files",
                 );
             }
+        }
+    }
+
+    /// Re-parse `harness.json5`. If parsing fails the harness has
+    /// already fallen back to defaults (with a stderr warning), but
+    /// stderr is easy to miss when the TUI takes over the terminal
+    /// right after startup. Surface the error through `HarnessInfo`
+    /// so it shows up as a system info block inline in the UI.
+    fn check_config_parses(&mut self) {
+        if let Err(error) = tau_config::settings::load_harness_settings_in(&self.dirs) {
+            self.emit_info_important(&format!(
+                "harness.json5 failed to parse — extensions and model selection from it are being IGNORED.\n{error}"
+            ));
         }
     }
 
@@ -2803,7 +2817,7 @@ fn load_model_list(
     tau_config::settings::HarnessSettings,
 ) {
     let model_registry = tau_config::settings::load_models_in(dirs).unwrap_or_default();
-    let harness_settings = tau_config::settings::load_harness_settings_in(dirs).unwrap_or_default();
+    let harness_settings = load_harness_settings_or_warn(dirs);
     let mut available: Vec<ModelId> = Vec::new();
     for (provider_name, provider_cfg) in &model_registry.providers {
         for model in &provider_cfg.models {
@@ -3362,6 +3376,24 @@ fn latest_agent_preview(session: &tau_core::SessionTree) -> Option<String> {
 /// individual fields (or set `enable: false`) per entry in
 /// `harness.json5` under `extensions: { name: { … } }`.
 #[must_use]
+/// Load `harness.json5` and fall back to defaults on parse error,
+/// after writing a warning to stderr. Without the warning a malformed
+/// file silently disables every user-configured extension and the
+/// only symptom is "my extension isn't running" with no clue why.
+fn load_harness_settings_or_warn(
+    dirs: &tau_config::settings::TauDirs,
+) -> tau_config::settings::HarnessSettings {
+    match tau_config::settings::load_harness_settings_in(dirs) {
+        Ok(settings) => settings,
+        Err(error) => {
+            eprintln!(
+                "tau: failed to load harness.json5: {error}\ntau: falling back to default harness settings — extensions and model selection from harness.json5 will be ignored"
+            );
+            tau_config::settings::HarnessSettings::default()
+        }
+    }
+}
+
 pub fn builtin_extensions() -> Vec<tau_config::settings::BuiltinExtension> {
     use tau_config::settings::BuiltinExtension;
 
@@ -3832,8 +3864,10 @@ fn resolve_config(_explicit_path: Option<&Path>) -> Result<Config, Box<dyn std::
     // Extensions live in `harness.json5` under `extensions: { ... }`.
     // We start from the built-in agent + tools defaults and apply the
     // user's overrides on top; a malformed harness.json5 falls back
-    // to defaults rather than failing the whole startup.
-    let settings = tau_config::settings::load_harness_settings().unwrap_or_default();
+    // to defaults rather than failing the whole startup, but we warn
+    // on stderr so the user can see why their config is being
+    // ignored.
+    let settings = load_harness_settings_or_warn(&tau_config::settings::TauDirs::default());
     let extensions = settings.resolve_extensions(builtin_extensions())?;
     Ok(Config {
         core: CoreConfig {
