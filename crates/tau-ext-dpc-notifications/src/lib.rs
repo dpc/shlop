@@ -6,10 +6,11 @@
 //! Events emitted (all via `Osc1337SetUserVar`):
 //! - `agent.prompt_submitted` → `user-notification = protoss-probe-ack`
 //! - `agent.response_finished` → `user-notification = protoss-upgrade-complete`
-//! - 15s after `agent.response_finished` (with no intervening user prompt) →
+//! - After `idle_seconds` (default 60) of inactivity following a response →
 //!   `user-text-notification = {"urgency": "...", "title": "...", "body":
 //!   "..."}`. The idle timer resets on every `ui.prompt_submitted` /
-//!   `agent.prompt_submitted`.
+//!   `agent.prompt_submitted`. Tunable via the extension's
+//!   `config.idle_seconds` field in `harness.json5`.
 //!
 //! The downstream tooling (typically a terminal multiplexer status
 //! line or a `user-notification.sh` consumer wired to a sound file)
@@ -24,8 +25,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use tau_proto::{
-    ClientKind, Event, EventReader, EventSelector, EventWriter, LifecycleHello, LifecycleReady,
-    LifecycleSubscribe, Osc1337SetUserVar, PROTOCOL_VERSION,
+    ClientKind, Event, EventReader, EventSelector, EventWriter, LifecycleConfigError,
+    LifecycleHello, LifecycleReady, LifecycleSubscribe, Osc1337SetUserVar, PROTOCOL_VERSION,
 };
 
 /// `tracing` target for events emitted from this extension. Matches
@@ -46,9 +47,27 @@ pub const VALUE_AGENT_START: &str = "protoss-probe-ack";
 /// Sound key emitted at the end of an agent turn.
 pub const VALUE_AGENT_END: &str = "protoss-upgrade-complete";
 
-/// How long the agent must stay idle after a response before the
-/// extension nudges the user via a text notification.
-pub const IDLE_DURATION: Duration = Duration::from_secs(15);
+/// Default idle window before the extension nudges the user via a
+/// text notification, in seconds. Override via the `idle_seconds`
+/// field of the extension's `config` block in `harness.json5`.
+pub const DEFAULT_IDLE_SECONDS: u64 = 60;
+
+/// User-supplied configuration for this extension. Mirrors the
+/// schema documented next to `DEFAULT_IDLE_SECONDS`.
+#[derive(serde::Deserialize, Debug)]
+#[serde(default, deny_unknown_fields)]
+struct ExtConfig {
+    /// Idle window, in seconds.
+    idle_seconds: u64,
+}
+
+impl Default for ExtConfig {
+    fn default() -> Self {
+        Self {
+            idle_seconds: DEFAULT_IDLE_SECONDS,
+        }
+    }
+}
 
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
     tau_extension::init_logging();
@@ -60,7 +79,7 @@ where
     R: Read + Send + 'static,
     W: Write,
 {
-    run_with_idle(reader, writer, IDLE_DURATION)
+    run_with_idle(reader, writer, Duration::from_secs(DEFAULT_IDLE_SECONDS))
 }
 
 /// Inbound message on the main thread's channel: either a decoded
@@ -77,7 +96,7 @@ enum InMsg {
 pub fn run_with_idle<R, W>(
     reader: R,
     writer: W,
-    idle_duration: Duration,
+    mut idle_duration: Duration,
 ) -> Result<(), Box<dyn Error>>
 where
     R: Read + Send + 'static,
@@ -95,6 +114,7 @@ where
             EventSelector::Exact(tau_proto::EventName::AGENT_PROMPT_SUBMITTED),
             EventSelector::Exact(tau_proto::EventName::AGENT_RESPONSE_FINISHED),
             EventSelector::Exact(tau_proto::EventName::UI_PROMPT_SUBMITTED),
+            EventSelector::Exact(tau_proto::EventName::LIFECYCLE_CONFIGURE),
             EventSelector::Exact(tau_proto::EventName::LIFECYCLE_DISCONNECT),
         ],
     }))?;
@@ -166,6 +186,28 @@ where
                 let (_, inner) = event.peel_log();
                 tracing::trace!(target: LOG_TARGET, name = %inner.name(), "event received");
                 match inner {
+                    Event::LifecycleConfigure(msg) => match parse_config(&msg.config) {
+                        Ok(cfg) => {
+                            idle_duration = Duration::from_secs(cfg.idle_seconds);
+                            tracing::info!(
+                                target: LOG_TARGET,
+                                idle_seconds = cfg.idle_seconds,
+                                "applied config",
+                            );
+                        }
+                        Err(error) => {
+                            let message = error.to_string();
+                            tracing::warn!(
+                                target: LOG_TARGET,
+                                %error,
+                                "rejecting config",
+                            );
+                            writer.write_event(&Event::LifecycleConfigError(
+                                LifecycleConfigError { message },
+                            ))?;
+                            writer.flush()?;
+                        }
+                    },
                     Event::AgentPromptSubmitted(_) => {
                         idle_deadline = None;
                         writer.write_event(&sound_event(VALUE_AGENT_START))?;
@@ -223,6 +265,19 @@ where
     }
 
     Ok(())
+}
+
+/// Decode the harness-provided `config` (a CBOR value) into the
+/// extension's typed config struct. Roundtrips through CBOR bytes
+/// because `ciborium::value::Value` doesn't expose a direct
+/// `Deserializer` impl.
+fn parse_config(
+    value: &tau_proto::CborValue,
+) -> Result<ExtConfig, ciborium::de::Error<std::io::Error>> {
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(value, &mut bytes)
+        .map_err(|e| ciborium::de::Error::Io(std::io::Error::other(e.to_string())))?;
+    ciborium::de::from_reader(bytes.as_slice())
 }
 
 fn sound_event(value: &str) -> Event {
@@ -358,6 +413,51 @@ mod tests {
         assert_eq!(payload["urgency"], "normal");
         assert_eq!(payload["title"], "Tau");
         assert_eq!(payload["body"], "Agent is waiting for input");
+    }
+
+    /// A bogus `config` value (one that doesn't match `ExtConfig`)
+    /// must trigger a `LifecycleConfigError` carrying a human-readable
+    /// message, so the harness can surface it to the user.
+    #[test]
+    fn invalid_config_emits_lifecycle_config_error() {
+        use tau_proto::{LifecycleConfigure, LifecycleDisconnect};
+
+        // Build a config CBOR value that doesn't match ExtConfig:
+        // an unknown field, which `deny_unknown_fields` rejects.
+        let bad_config = tau_proto::json_to_cbor(&serde_json::json!({
+            "totally_unknown_field": 7,
+        }));
+
+        let mut input = Vec::new();
+        let mut writer = EventWriter::new(&mut input);
+        writer
+            .write_event(&Event::LifecycleConfigure(LifecycleConfigure {
+                config: bad_config,
+            }))
+            .expect("write");
+        writer
+            .write_event(&Event::LifecycleDisconnect(LifecycleDisconnect {
+                reason: None,
+            }))
+            .expect("write");
+        writer.flush().expect("flush");
+
+        let mut output = Vec::new();
+        run_with_idle(Cursor::new(input), &mut output, Duration::from_secs(3600)).expect("run");
+
+        let mut reader = EventReader::new(Cursor::new(output));
+        drain_lifecycle(&mut reader);
+
+        let err = reader
+            .read_event()
+            .expect("read")
+            .expect("config error event");
+        match err {
+            Event::LifecycleConfigError(e) => {
+                assert!(!e.message.is_empty(), "config error must carry a message",);
+            }
+            other => panic!("expected LifecycleConfigError, got {other:?}"),
+        }
     }
 
     /// A user prompt arriving inside the idle window must cancel the
