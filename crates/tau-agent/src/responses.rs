@@ -46,7 +46,8 @@ pub fn responses_stream(
     let body = build_request(config, request);
     let body_str = serde_json::to_string(&body).map_err(OpenAiError::Json)?;
 
-    let mut req = ureq::post(&url)
+    let mut req = tau_provider::oauth::proxy_agent()
+        .post(&url)
         .set("Content-Type", "application/json")
         .set("Accept", "text/event-stream")
         .set("Authorization", &format!("Bearer {}", config.api_key))

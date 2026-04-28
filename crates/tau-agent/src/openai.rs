@@ -143,7 +143,8 @@ pub fn chat_completion_stream(
     let body = build_request(config, request, true);
     let body_str = serde_json::to_string(&body).map_err(OpenAiError::Json)?;
 
-    let response = ureq::post(&url)
+    let response = tau_provider::oauth::proxy_agent()
+        .post(&url)
         .set("Content-Type", "application/json")
         .set("Authorization", &format!("Bearer {}", config.api_key))
         .send_string(&body_str)

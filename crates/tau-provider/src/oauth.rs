@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::io;
+use std::sync::LazyLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
@@ -9,6 +10,41 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 use url::Url;
+
+/// A ureq::Agent configured to respect HTTPS_PROXY / HTTP_PROXY / NO_PROXY
+/// environment variables (both upper and lowercase).
+pub fn proxy_agent() -> &'static ureq::Agent {
+    static AGENT: LazyLock<ureq::Agent> = LazyLock::new(|| {
+        let mut builder = ureq::AgentBuilder::new();
+
+        // Check all common env-var spellings for proxy settings.
+        for key in [
+            "HTTPS_PROXY",
+            "https_proxy",
+            "HTTP_PROXY",
+            "http_proxy",
+            "NO_PROXY",
+            "no_proxy",
+        ] {
+            if let Ok(val) = std::env::var(key) {
+                if val.is_empty() {
+                    continue;
+                }
+                if let Ok(proxy) = ureq::Proxy::new(&val) {
+                    if key.starts_with('N') || key.starts_with('n') {
+                        // NO_PROXY — handled internally by ureq's Agent;
+                        // we skip adding it to avoid confusion.
+                    } else {
+                        builder = builder.proxy(proxy);
+                    }
+                }
+            }
+        }
+
+        builder.build()
+    });
+    &AGENT
+}
 
 // ---------------------------------------------------------------------------
 // PKCE helpers
@@ -66,7 +102,7 @@ pub fn openai_codex_auth_url() -> (String, String, String) {
     let state = generate_state();
 
     let url = format!(
-        "{OPENAI_AUTH_URL}?client_id={client_id}&redirect_uri={redirect}&response_type=code&scope={scope}&code_challenge={challenge}&code_challenge_method=S256&state={state}&codex_cli_simplified_flow=true",
+        "{OPENAI_AUTH_URL}?client_id={client_id}&redirect_uri={redirect}&response_type=code&scope={scope}&code_challenge={challenge}&code_challenge_method=S256&state={state}&codex_cli_simplified_flow=true&id_token_add_organizations=true",
         client_id = OPENAI_CLIENT_ID,
         redirect = urlencoding(OPENAI_REDIRECT_URI),
         scope = urlencoding("openid profile email offline_access"),
@@ -242,7 +278,8 @@ pub fn github_device_code_poll(device_code: &str, interval: u64) -> Result<Strin
 
 /// Exchange GitHub access token for a Copilot token.
 pub fn github_copilot_token(github_token: &str) -> Result<OAuthTokens, io::Error> {
-    let resp = ureq::get(GITHUB_COPILOT_TOKEN_URL)
+    let resp = proxy_agent()
+        .get(GITHUB_COPILOT_TOKEN_URL)
         .set("Authorization", &format!("Bearer {github_token}"))
         .set("Accept", "application/json")
         .call()
@@ -272,7 +309,8 @@ pub fn github_copilot_token(github_token: &str) -> Result<OAuthTokens, io::Error
 
 /// POST a form-encoded body and parse JSON response.
 fn post_form(url: &str, body: &str) -> Result<serde_json::Value, io::Error> {
-    let resp = ureq::post(url)
+    let resp = proxy_agent()
+        .post(url)
         .set("Content-Type", "application/x-www-form-urlencoded")
         .send_string(body)
         .map_err(|e| io::Error::other(e.to_string()))?;
@@ -286,7 +324,8 @@ fn post_form_with_accept(
     body: &str,
     accept: &str,
 ) -> Result<serde_json::Value, io::Error> {
-    let resp = ureq::post(url)
+    let resp = proxy_agent()
+        .post(url)
         .set("Content-Type", "application/x-www-form-urlencoded")
         .set("Accept", accept)
         .send_string(body)

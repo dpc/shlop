@@ -15,4 +15,4 @@ sha2.workspace = true
 tau-config.workspace = true
 tau-proto.workspace = true
 tau-provider.workspace = true
-ureq = { workspace = true, features = ["tls"] }
+ureq.workspace = true
