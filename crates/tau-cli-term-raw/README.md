@@ -65,6 +65,74 @@ Scrollback is cleared on resize because the old scrollback contains lines
 wrapped at the old terminal width. Re-rendering everything produces correctly
 reflowed content for the new width.
 
+## When mutations need a full redraw
+
+The diff renderer (Path 1) only repaints the **visible viewport** — the last
+`height` rows of `all_lines`. Anything above that lives in the terminal's
+scrollback buffer and is unreachable by cursor positioning or differential
+updates. Mutating a block whose rendered rows have scrolled into scrollback
+without forcing a `full_render` leaves a *fossilized* copy in scrollback that
+no longer matches the program's state.
+
+The layout from top to bottom:
+
+```
+history          ← oldest, scrolls into scrollback first
+above_active     ← live blocks (streaming responses, in-flight thinking)
+above_sticky     ← pinned blocks (model status chip, queued user prompt)
+input line       ← the prompt
+suggestions      ← completion menu
+below            ← anything below suggestions
+```
+
+Everything from `above_active` down is **bottom-anchored** — it sits at the
+tail of `all_lines`, near the input cursor. As long as the bottom-anchored
+zones fit in `height` rows, they are entirely inside the visible viewport and
+the diff renderer can update them in place.
+
+### Safe mutations (just call `TermHandle::redraw()`)
+
+- Editing the input buffer or prompt.
+- Updating the model status chip, suggestions, anything in `below`.
+- `set_block` on a streaming live block in `above_active` — the most
+  common case (response text appending, in-flight thinking growing,
+  tool-progress updates).
+- `print_output` of a brand-new block. The new block lands at the
+  bottom of `all_lines`, so by definition it appears in the visible
+  window when first emitted; its arrival may push earlier content into
+  scrollback (Path 2), which is the natural way scrollback gets
+  populated.
+
+### Mutations that require `TermHandle::invalidate_screen()` (Path 3)
+
+`invalidate_screen()` sets a flag that forces the next redraw through
+`full_render` — clear screen + clear scrollback (`\x1b[2J\x1b[H\x1b[3J`),
+then re-emit every line from `all_lines`. Use it for:
+
+- **`set_block` on a block that may have scrolled out of the viewport.**
+  Anything in `history`, including the most recent finalized block once
+  later content has arrived. Examples: toggling diff expand/compact via
+  `/show-diff`, hiding/showing thinking via `/show-thinking`.
+- **Reordering the zone lists in a way that affects past rows.** A block
+  that's still in `history` but has scrolled off can't be moved by
+  `set_block` alone — diff render won't reach it.
+- **Any geometry change.** Resize and `resume_after_external` already do
+  this internally.
+
+### The one edge case: live blocks larger than `height`
+
+A live block in `above_active` can in theory grow taller than the visible
+viewport. When that happens, its top rows have been written to the terminal
+and scrolled into scrollback while its tail is still being updated. In-place
+`set_block` updates only repaint the visible tail of the block; the
+scrollback fossil is now stale.
+
+This is currently invisible because streaming is **append-only**: text only
+grows, characters are never retracted mid-stream, and `set_block` calls only
+extend the tail. If we ever wanted retractable streaming or out-of-order
+edits within a long live block, those updates would also need
+`invalidate_screen()`.
+
 ## Known limitations
 
 - **Resize clears scrollback history.** Any terminal output from *before* tau

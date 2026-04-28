@@ -183,6 +183,15 @@ impl TermHandle {
     ///
     /// Call this after updating one or more blocks/zones. Multiple
     /// calls coalesce into a single repaint.
+    ///
+    /// This goes through the differential update path — only the
+    /// visible viewport is repainted. Use it for any mutation
+    /// guaranteed to be inside the viewport (input, status chip,
+    /// streaming live blocks, newly-printed blocks). For mutations
+    /// to past blocks that may have scrolled into scrollback, use
+    /// [`invalidate_screen`](Self::invalidate_screen) instead. See
+    /// `README.md` § "When mutations need a full redraw" for the
+    /// full rule.
     pub fn redraw(&self) {
         self.redraw.notify();
     }
@@ -192,11 +201,13 @@ impl TermHandle {
     /// and re-emit every line from `all_lines`. Overflow scrolls
     /// naturally into the (now-empty) scrollback.
     ///
-    /// Use this when zone-list changes affect rows that have
-    /// already scrolled into terminal scrollback (e.g. toggling
-    /// visibility of a block from a past turn). The diff renderer
-    /// only repaints the visible window, so it can't otherwise
-    /// undo what's already in scrollback.
+    /// Use this when a mutation affects rows that may already be in
+    /// terminal scrollback — e.g. toggling visibility of a block
+    /// from a past turn (`/show-diff`, `/show-thinking`). The
+    /// differential renderer only repaints the visible window, so
+    /// without invalidation those scrolled-out rows would remain as
+    /// stale fossils that disagree with current state. See
+    /// `README.md` § "When mutations need a full redraw".
     pub fn invalidate_screen(&self) {
         self.lock().invalidate_screen = true;
         self.redraw.notify();
