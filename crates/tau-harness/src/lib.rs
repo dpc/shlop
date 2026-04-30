@@ -3063,11 +3063,7 @@ fn parse_effort(value: &str) -> Option<tau_proto::Effort> {
 fn load_last_efforts(
     dirs: &tau_config::settings::TauDirs,
 ) -> std::collections::HashMap<String, tau_proto::Effort> {
-    let Some(path) = dirs
-        .state_dir
-        .as_ref()
-        .map(|d| d.join("harness.json5"))
-    else {
+    let Some(path) = dirs.state_dir.as_ref().map(|d| d.join("harness.json5")) else {
         return std::collections::HashMap::new();
     };
     let Ok(text) = std::fs::read_to_string(path) else {

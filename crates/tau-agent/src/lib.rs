@@ -215,11 +215,7 @@ fn resolve_backend(
     }
 }
 
-fn prompt_cache_key(
-    provider: &ProviderConfig,
-    base_url: &str,
-    model_id: &str,
-) -> Option<String> {
+fn prompt_cache_key(provider: &ProviderConfig, base_url: &str, model_id: &str) -> Option<String> {
     if !supports_prompt_cache_key(provider, base_url) {
         return None;
     }
