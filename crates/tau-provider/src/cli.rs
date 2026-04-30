@@ -465,8 +465,8 @@ fn build_provider_entry(kind: &ProviderKind) -> serde_json::Value {
             "auth": "api-key",
             "api": "openai-chat",
             "models": [
-                { "id": "gpt-5.4", "contextWindow": 200000 },
-                { "id": "gpt-5.4-mini", "contextWindow": 200000 },
+                { "id": "gpt-5.5", "contextWindow": 200000 },
+                { "id": "gpt-5.5-mini", "contextWindow": 200000 },
                 { "id": "o3-mini", "contextWindow": 200000 },
             ],
         }),
@@ -474,8 +474,8 @@ fn build_provider_entry(kind: &ProviderKind) -> serde_json::Value {
             "auth": "openai-codex",
             "api": "openai-chat",
             "models": [
-                { "id": "gpt-5.4", "contextWindow": 200000 },
-                { "id": "gpt-5.4-mini", "contextWindow": 200000 },
+                { "id": "gpt-5.5", "contextWindow": 200000 },
+                { "id": "gpt-5.5-mini", "contextWindow": 200000 },
                 { "id": "o3-mini", "contextWindow": 200000 },
             ],
         }),
@@ -493,7 +493,7 @@ fn build_provider_entry(kind: &ProviderKind) -> serde_json::Value {
             "api": "openai-chat",
             "models": [
                 { "id": "claude-sonnet-4.6", "contextWindow": 200000 },
-                { "id": "gpt-5.4", "contextWindow": 200000 },
+                { "id": "gpt-5.5", "contextWindow": 200000 },
                 { "id": "gemini-3-pro", "contextWindow": 1000000 },
             ],
         }),
