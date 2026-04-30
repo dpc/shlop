@@ -41,6 +41,12 @@ impl CursorShape {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum KeyDirection {
+    Up,
+    Down,
+}
+
 /// Mutable state shared between the input loop, redraw thread, and
 /// any [`TermHandle`] holders.
 struct SharedState {
@@ -68,6 +74,7 @@ struct SharedState {
     input_history: Vec<String>,
     history_nav_entries: Vec<String>,
     history_nav_index: Option<usize>,
+    last_key_direction: Option<KeyDirection>,
     width: usize,
     height: usize,
     /// Set by Term::drop to signal the redraw thread to exit.
@@ -438,6 +445,7 @@ impl Term {
             input_history: Vec::new(),
             history_nav_entries: Vec::new(),
             history_nav_index: None,
+            last_key_direction: None,
             width,
             height,
             shutdown: false,
@@ -517,6 +525,7 @@ impl Term {
             input_history: Vec::new(),
             history_nav_entries: Vec::new(),
             history_nav_index: None,
+            last_key_direction: None,
             width,
             height,
             shutdown: false,
@@ -576,6 +585,14 @@ impl Term {
 
             match raw {
                 RawEvent::Key(key) => {
+                    {
+                        let mut st = self.state.lock().expect("term state mutex poisoned");
+                        st.last_key_direction = match key.code {
+                            KeyCode::Up => Some(KeyDirection::Up),
+                            KeyCode::Down => Some(KeyDirection::Down),
+                            _ => None,
+                        };
+                    }
                     if let Some(event) = self.handle_key(key)? {
                         self.redraw.notify();
                         return Ok(event);
@@ -636,6 +653,36 @@ impl Term {
             // still observes the channel/stdin as "blocking".
             _ => self.next_raw(),
         }
+    }
+
+    /// Moves the cursor/history as if Up was pressed outside completion.
+    pub fn move_up(&self) {
+        move_up_in_state(&self.state);
+        self.redraw.notify();
+    }
+
+    /// Moves the cursor/history as if Down was pressed outside completion.
+    pub fn move_down(&self) {
+        move_down_in_state(&self.state);
+        self.redraw.notify();
+    }
+
+    /// Returns true if the last raw event read by this terminal was Up.
+    pub fn last_key_was_up(&self) -> bool {
+        self.state
+            .lock()
+            .expect("term state mutex poisoned")
+            .last_key_direction
+            == Some(KeyDirection::Up)
+    }
+
+    /// Returns true if the last raw event read by this terminal was Down.
+    pub fn last_key_was_down(&self) -> bool {
+        self.state
+            .lock()
+            .expect("term state mutex poisoned")
+            .last_key_direction
+            == Some(KeyDirection::Down)
     }
 
     /// Releases the terminal for an external program (e.g. `$EDITOR`):
@@ -852,21 +899,13 @@ impl Term {
             }
 
             KeyCode::Up => {
-                let mut st = self.state.lock().expect("term state mutex poisoned");
-                if let Some(new_cursor) = move_cursor_vertical(&st, -1) {
-                    st.cursor = new_cursor;
-                } else {
-                    st.navigate_history(-1);
-                }
+                move_up_in_state(&self.state);
+                return Ok(Some(Event::BufferChanged));
             }
 
             KeyCode::Down => {
-                let mut st = self.state.lock().expect("term state mutex poisoned");
-                if let Some(new_cursor) = move_cursor_vertical(&st, 1) {
-                    st.cursor = new_cursor;
-                } else {
-                    st.navigate_history(1);
-                }
+                move_down_in_state(&self.state);
+                return Ok(Some(Event::BufferChanged));
             }
 
             KeyCode::Home => {
@@ -1254,6 +1293,24 @@ fn move_cursor_vertical(st: &SharedState, delta: isize) -> Option<usize> {
         width,
         left_cols,
     ))
+}
+
+fn move_up_in_state(state: &Arc<Mutex<SharedState>>) {
+    let mut st = state.lock().expect("term state mutex poisoned");
+    if let Some(new_cursor) = move_cursor_vertical(&st, -1) {
+        st.cursor = new_cursor;
+    } else {
+        st.navigate_history(-1);
+    }
+}
+
+fn move_down_in_state(state: &Arc<Mutex<SharedState>>) {
+    let mut st = state.lock().expect("term state mutex poisoned");
+    if let Some(new_cursor) = move_cursor_vertical(&st, 1) {
+        st.cursor = new_cursor;
+    } else {
+        st.navigate_history(1);
+    }
 }
 
 fn term_size() -> (usize, usize) {
@@ -1680,7 +1737,7 @@ mod tests {
             Event::BufferChanged
         ));
         assert_eq!(handle.get_buffer(), "abc\ndef");
-        assert_eq!(handle.get_cursor(), 3);
+        assert_eq!(handle.get_cursor(), 1);
     }
 
     #[test]

@@ -95,7 +95,15 @@ impl HighTerm {
 
             match raw {
                 RawEvent::BufferChanged => {
-                    self.completer.on_buffer_changed(&self.handle);
+                    if self.completer.is_active() && self.term.last_key_was_up() {
+                        self.term.move_down();
+                        self.completer.cycle_selection(-1, &self.handle);
+                    } else if self.completer.is_active() && self.term.last_key_was_down() {
+                        self.term.move_up();
+                        self.completer.cycle_selection(1, &self.handle);
+                    } else {
+                        self.completer.on_buffer_changed(&self.handle);
+                    }
                     self.handle.redraw();
                     return Ok(Event::BufferChanged);
                 }
