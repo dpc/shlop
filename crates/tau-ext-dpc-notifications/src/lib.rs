@@ -4,10 +4,11 @@
 //! extensions.
 //!
 //! Events emitted (all via `Osc1337SetUserVar`):
-//! - `agent.prompt_submitted` → `user-notification = protoss-probe-ack`
-//! - `agent.response_finished` → `user-notification = protoss-upgrade-complete`
-//! - After `idle_seconds` (default 60) of inactivity following a response →
-//!   `user-text-notification = {"urgency": "...", "title": "...", "body":
+//! - `ui.prompt_submitted` → `user-notification = protoss-probe-ack`
+//! - final `agent.response_finished` (only when `tool_calls` is empty) →
+//!   `user-notification = protoss-upgrade-complete`
+//! - After `idle_seconds` (default 60) of inactivity following a final response
+//!   → `user-text-notification = {"urgency": "...", "title": "...", "body":
 //!   "..."}`. The idle timer resets on every `ui.prompt_submitted` /
 //!   `agent.prompt_submitted`. Tunable via the extension's
 //!   `config.idle_seconds` field in `harness.json5`.
@@ -41,7 +42,7 @@ pub const SOUND_VAR_NAME: &str = "user-notification";
 /// `user-text-notification.sh`).
 pub const TEXT_VAR_NAME: &str = "user-text-notification";
 
-/// Sound key emitted at the start of an agent turn.
+/// Sound key emitted when the user submits a prompt.
 pub const VALUE_AGENT_START: &str = "protoss-probe-ack";
 
 /// Sound key emitted at the end of an agent turn.
@@ -154,6 +155,7 @@ where
 
     let mut idle_deadline: Option<Instant> = None;
     let mut input_closed = false;
+    let mut waiting_for_final_response = false;
     loop {
         let recv_result = match (idle_deadline, input_closed) {
             // Channel still live; wait either bounded (deadline set)
@@ -213,11 +215,14 @@ where
                     }
                     Event::AgentPromptSubmitted(_) => {
                         idle_deadline = None;
-                        writer.write_event(&sound_event(VALUE_AGENT_START))?;
-                        writer.flush()?;
                     }
                     Event::UiPromptSubmitted(_) => {
                         idle_deadline = None;
+                        if !waiting_for_final_response {
+                            writer.write_event(&sound_event(VALUE_AGENT_START))?;
+                            writer.flush()?;
+                            waiting_for_final_response = true;
+                        }
                     }
                     Event::AgentResponseFinished(finished) => {
                         // The agent emits one `AgentResponseFinished`
@@ -238,6 +243,7 @@ where
                         }
                         writer.write_event(&sound_event(VALUE_AGENT_END))?;
                         writer.flush()?;
+                        waiting_for_final_response = false;
                         idle_deadline = Some(Instant::now() + idle_duration);
                         tracing::debug!(
                             target: LOG_TARGET,
@@ -311,8 +317,8 @@ mod tests {
     use std::io::Cursor;
 
     use tau_proto::{
-        AgentPromptSubmitted, AgentResponseFinished, Event, EventReader, EventWriter,
-        LifecycleDisconnect,
+        AgentResponseFinished, Event, EventReader, EventWriter, LifecycleDisconnect,
+        UiPromptSubmitted,
     };
 
     use super::*;
@@ -329,8 +335,9 @@ mod tests {
         let mut input = Vec::new();
         let mut writer = EventWriter::new(&mut input);
         writer
-            .write_event(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
-                session_prompt_id: "sp-0".into(),
+            .write_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
+                session_id: "s1".into(),
+                text: "hello".into(),
             }))
             .expect("write");
         writer
@@ -389,8 +396,9 @@ mod tests {
         let mut input = Vec::new();
         let mut writer = EventWriter::new(&mut input);
         writer
-            .write_event(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
-                session_prompt_id: "sp-0".into(),
+            .write_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
+                session_id: "s1".into(),
+                text: "hello".into(),
             }))
             .expect("write");
         // Mid-turn finish: text=None, tool_calls non-empty. No
@@ -422,8 +430,8 @@ mod tests {
         let mut reader = EventReader::new(Cursor::new(output));
         drain_lifecycle(&mut reader);
 
-        // We expect the start sound but NO end sound, because the
-        // tool-bearing AgentResponseFinished is mid-turn.
+        // We expect the user-submit sound but NO end sound, because
+        // the tool-bearing AgentResponseFinished is mid-turn.
         let start = reader.read_event().expect("read").expect("start");
         match start {
             Event::Osc1337SetUserVar(osc) => {
@@ -570,8 +578,71 @@ mod tests {
         };
         assert_eq!(osc.value, VALUE_AGENT_END);
 
-        // Nothing else should follow — the user prompt cancelled the
-        // idle deadline and stdin then closed.
+        // The follow-up user prompt should emit the user-submit
+        // sound and cancel the idle deadline.
+        let next = reader
+            .read_event()
+            .expect("read")
+            .expect("user-submit event");
+        let Event::Osc1337SetUserVar(osc) = next else {
+            panic!("expected user-submit sound OSC");
+        };
+        assert_eq!(osc.value, VALUE_AGENT_START);
+
+        assert!(reader.read_event().expect("read eof").is_none());
+    }
+
+    #[test]
+    fn duplicate_ui_prompt_submitted_during_same_turn_emits_one_start_sound() {
+        let mut input = Vec::new();
+        let mut writer = EventWriter::new(&mut input);
+        writer
+            .write_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
+                session_id: "s1".into(),
+                text: "hello".into(),
+            }))
+            .expect("write");
+        writer
+            .write_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
+                session_id: "s1".into(),
+                text: "internal replay".into(),
+            }))
+            .expect("write");
+        writer
+            .write_event(&Event::AgentResponseFinished(AgentResponseFinished {
+                session_prompt_id: "sp-0".into(),
+                text: Some("done".into()),
+                tool_calls: Vec::new(),
+                input_tokens: None,
+                cached_tokens: None,
+                thinking: None,
+            }))
+            .expect("write");
+        writer
+            .write_event(&Event::LifecycleDisconnect(LifecycleDisconnect {
+                reason: None,
+            }))
+            .expect("write");
+        writer.flush().expect("flush");
+
+        let mut output = Vec::new();
+        run_with_idle(Cursor::new(input), &mut output, Duration::from_secs(3600)).expect("run");
+
+        let mut reader = EventReader::new(Cursor::new(output));
+        drain_lifecycle(&mut reader);
+
+        let first = reader.read_event().expect("read").expect("first OSC");
+        let Event::Osc1337SetUserVar(osc) = first else {
+            panic!("expected first sound OSC");
+        };
+        assert_eq!(osc.value, VALUE_AGENT_START);
+
+        let second = reader.read_event().expect("read").expect("second OSC");
+        let Event::Osc1337SetUserVar(osc) = second else {
+            panic!("expected second sound OSC");
+        };
+        assert_eq!(osc.value, VALUE_AGENT_END);
+
         assert!(reader.read_event().expect("read eof").is_none());
     }
 }
