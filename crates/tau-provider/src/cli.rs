@@ -1,7 +1,7 @@
 //! CLI entrypoint for `tau provider` subcommands.
 
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use dialoguer::{Confirm, Input, Select};
 
@@ -179,12 +179,7 @@ fn cmd_remove(name_arg: Option<&str>) -> Result<(), Box<dyn std::error::Error>> 
 
             if had_it {
                 let json = serde_json::to_string_pretty(&root)?;
-                let new_path = path.with_extension("json5.new");
-                std::fs::write(&new_path, &json)?;
-                if path.exists() {
-                    std::fs::remove_file(&path)?;
-                }
-                std::fs::rename(&new_path, &path)?;
+                atomic_write_following_symlink(&path, &json)?;
                 eprintln!("Removed '{name}' from models.json5.");
                 removed_anything = true;
             }
@@ -550,8 +545,8 @@ fn print_provider_entry(name: &str, entry: &serde_json::Value) {
 
 /// Read existing models.json5, insert the provider, and atomically
 /// replace the file via write-new + rename.
-fn write_provider_to_models_json5(
-    path: &std::path::Path,
+pub(crate) fn write_provider_to_models_json5(
+    path: &Path,
     name: &str,
     entry: &serde_json::Value,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -579,13 +574,106 @@ fn write_provider_to_models_json5(
 
     let json = serde_json::to_string_pretty(&root)?;
 
-    // Atomic replace: write .new, remove old, rename.
-    let new_path = path.with_extension("json5.new");
-    std::fs::write(&new_path, &json)?;
-    if path.exists() {
-        std::fs::remove_file(path)?;
-    }
-    std::fs::rename(&new_path, path)?;
+    atomic_write_following_symlink(path, &json)?;
 
     Ok(())
+}
+
+/// Atomically write `contents` by creating a randomized sibling temporary file
+/// and renaming it over the destination. If `path` is a symlink, replace the
+/// symlink target instead of unlinking the symlink itself.
+fn atomic_write_following_symlink(path: &Path, contents: &str) -> std::io::Result<()> {
+    let destination = symlink_target_or_path(path)?;
+
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let mut temp_path = destination.clone();
+    loop {
+        let suffix: u64 = rand::random();
+        let file_name = destination
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("models.json5");
+        temp_path.set_file_name(format!(".{file_name}.{suffix:016x}.tmp"));
+
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+        {
+            Ok(mut file) => {
+                file.write_all(contents.as_bytes())?;
+                file.sync_all()?;
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+
+    if let Err(error) = std::fs::rename(&temp_path, &destination) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error);
+    }
+
+    Ok(())
+}
+
+fn symlink_target_or_path(path: &Path) -> std::io::Result<PathBuf> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(path.to_path_buf()),
+        Err(error) => return Err(error),
+    };
+
+    if !metadata.file_type().is_symlink() {
+        return Ok(path.to_path_buf());
+    }
+
+    let target = std::fs::read_link(path)?;
+    if target.is_absolute() {
+        Ok(target)
+    } else if let Some(parent) = path.parent() {
+        Ok(parent.join(target))
+    } else {
+        Ok(target)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn write_provider_to_models_json5_preserves_symlink() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let target = temp_dir.path().join("target.json5");
+        let link = temp_dir.path().join("models.json5");
+        std::fs::write(&target, r#"{ providers: {} }"#).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        write_provider_to_models_json5(
+            &link,
+            "openai",
+            &serde_json::json!({
+                "auth": "api-key",
+                "api": "openai-chat",
+                "models": [],
+            }),
+        )
+        .unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+
+        let updated = std::fs::read_to_string(target).unwrap();
+        assert!(updated.contains("openai"));
+    }
 }

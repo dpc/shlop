@@ -21,3 +21,6 @@ sha2.workspace = true
 tau-config.workspace = true
 url.workspace = true
 ureq = { workspace = true }
+
+[dev-dependencies]
+tempfile.workspace = true
