@@ -1,5 +1,6 @@
 //! CLI entrypoint for `tau provider` subcommands.
 
+use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -589,6 +590,10 @@ fn atomic_write_following_symlink(path: &Path, contents: &str) -> std::io::Resul
         std::fs::create_dir_all(parent)?;
     }
 
+    let existing_permissions = std::fs::metadata(&destination)
+        .ok()
+        .map(|metadata| metadata.permissions());
+
     let mut temp_path = destination.clone();
     loop {
         let suffix: u64 = rand::random();
@@ -604,6 +609,9 @@ fn atomic_write_following_symlink(path: &Path, contents: &str) -> std::io::Resul
             .open(&temp_path)
         {
             Ok(mut file) => {
+                if let Some(permissions) = existing_permissions.clone() {
+                    file.set_permissions(permissions)?;
+                }
                 file.write_all(contents.as_bytes())?;
                 file.sync_all()?;
                 break;
@@ -616,6 +624,17 @@ fn atomic_write_following_symlink(path: &Path, contents: &str) -> std::io::Resul
     if let Err(error) = std::fs::rename(&temp_path, &destination) {
         let _ = std::fs::remove_file(&temp_path);
         return Err(error);
+    }
+
+    sync_parent_dir(&destination)?;
+
+    Ok(())
+}
+
+fn sync_parent_dir(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        File::open(parent)?.sync_all()?;
     }
 
     Ok(())
@@ -644,6 +663,8 @@ fn symlink_target_or_path(path: &Path) -> std::io::Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
     use super::*;
 
     #[test]
@@ -654,6 +675,8 @@ mod tests {
         let link = temp_dir.path().join("models.json5");
         std::fs::write(&target, r#"{ providers: {} }"#).unwrap();
         std::os::unix::fs::symlink(&target, &link).unwrap();
+        let permissions = std::fs::Permissions::from_mode(0o640);
+        std::fs::set_permissions(&target, permissions).unwrap();
 
         write_provider_to_models_json5(
             &link,
@@ -673,7 +696,11 @@ mod tests {
                 .is_symlink()
         );
 
-        let updated = std::fs::read_to_string(target).unwrap();
+        let updated = std::fs::read_to_string(&target).unwrap();
         assert!(updated.contains("openai"));
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
     }
 }
