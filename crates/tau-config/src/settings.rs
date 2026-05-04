@@ -112,8 +112,8 @@ pub struct HarnessSettings {
     /// Default effort per model (`provider/model` -> level).
     pub default_efforts: HashMap<String, tau_proto::Effort>,
 
-    /// Extension table, keyed by name. Built-in entries (`agent`,
-    /// `shell`) come pre-baked at the harness level; anything the
+    /// Extension table, keyed by name. Built-in entries (`core-agent`,
+    /// `core-shell`) come pre-baked at the harness level; anything the
     /// user writes here overrides those per-field, or adds a new
     /// extension.
     ///
@@ -122,9 +122,9 @@ pub struct HarnessSettings {
     /// {
     ///   extensions: {
     ///     // disable the built-in shell extension
-    ///     shell: { enable: false },
+    ///     "core-shell": { enable: false },
     ///     // run the agent through ssh on a remote box
-    ///     agent: { prefix: ["ssh", "user@host"] },
+    ///     "core-agent": { prefix: ["ssh", "user@host"] },
     ///     // a third-party extension
     ///     mything: { command: ["/usr/local/bin/my-tau-ext"] },
     ///   },
@@ -728,21 +728,21 @@ mod tests {
     fn builtins() -> Vec<BuiltinExtension> {
         vec![
             BuiltinExtension {
-                name: "agent",
+                name: "core-agent",
                 command: vec!["tau".into(), "ext".into(), "agent".into()],
                 role: Some("agent"),
                 enable: true,
                 config: serde_json::json!({}),
             },
             BuiltinExtension {
-                name: "shell",
+                name: "core-shell",
                 command: vec!["tau".into(), "ext".into(), "ext-shell".into()],
                 role: Some("tool"),
                 enable: true,
                 config: serde_json::json!({}),
             },
             BuiltinExtension {
-                name: "test_dummy",
+                name: "test-dummy",
                 command: vec!["tau".into(), "ext".into(), "ext-test-dummy".into()],
                 role: Some("tool"),
                 enable: false,
@@ -763,25 +763,25 @@ mod tests {
         let s = HarnessSettings::default();
         let resolved = s.resolve_extensions(builtins()).expect("resolve");
         assert_eq!(resolved.len(), 2);
-        assert_eq!(resolved[0].name, "agent");
+        assert_eq!(resolved[0].name, "core-agent");
         assert_eq!(resolved[0].command, "tau");
         assert_eq!(resolved[0].args, vec!["ext", "agent"]);
         assert_eq!(resolved[0].role.as_deref(), Some("agent"));
-        assert_eq!(resolved[1].name, "shell");
+        assert_eq!(resolved[1].name, "core-shell");
     }
 
     #[test]
     fn resolve_extensions_builtin_can_start_disabled() {
         let s = HarnessSettings::default();
         let resolved = s.resolve_extensions(builtins()).expect("resolve");
-        assert!(resolved.iter().all(|e| e.name != "test_dummy"));
+        assert!(resolved.iter().all(|e| e.name != "test-dummy"));
     }
 
     #[test]
     fn resolve_extensions_disable_drops_entry() {
         let mut s = HarnessSettings::default();
         s.extensions.insert(
-            "shell".into(),
+            "core-shell".into(),
             ExtensionEntry {
                 enable: false,
                 ..Default::default()
@@ -789,21 +789,24 @@ mod tests {
         );
         let resolved = s.resolve_extensions(builtins()).expect("resolve");
         assert_eq!(resolved.len(), 1);
-        assert_eq!(resolved[0].name, "agent");
+        assert_eq!(resolved[0].name, "core-agent");
     }
 
     #[test]
     fn resolve_extensions_prefix_wraps_builtin_command() {
         let mut s = HarnessSettings::default();
         s.extensions.insert(
-            "agent".into(),
+            "core-agent".into(),
             ExtensionEntry {
                 prefix: vec!["ssh".into(), "user@host".into()],
                 ..Default::default()
             },
         );
         let resolved = s.resolve_extensions(builtins()).expect("resolve");
-        let agent = resolved.iter().find(|e| e.name == "agent").expect("agent");
+        let agent = resolved
+            .iter()
+            .find(|e| e.name == "core-agent")
+            .expect("agent");
         // argv[0] is the wrapper; original command moves into args.
         assert_eq!(agent.command, "ssh");
         assert_eq!(agent.args, vec!["user@host", "tau", "ext", "agent"]);
@@ -813,14 +816,17 @@ mod tests {
     fn resolve_extensions_user_command_replaces_builtin_command() {
         let mut s = HarnessSettings::default();
         s.extensions.insert(
-            "agent".into(),
+            "core-agent".into(),
             ExtensionEntry {
                 command: vec!["/usr/local/bin/my-agent".into(), "--flag".into()],
                 ..Default::default()
             },
         );
         let resolved = s.resolve_extensions(builtins()).expect("resolve");
-        let agent = resolved.iter().find(|e| e.name == "agent").expect("agent");
+        let agent = resolved
+            .iter()
+            .find(|e| e.name == "core-agent")
+            .expect("agent");
         assert_eq!(agent.command, "/usr/local/bin/my-agent");
         assert_eq!(agent.args, vec!["--flag"]);
         // Role is preserved from the built-in default.
@@ -872,9 +878,9 @@ mod tests {
             dir.join("harness.json5"),
             r#"{
                 extensions: {
-                    shell: { enable: false },
-                    test_dummy: { enable: true },
-                    agent: { prefix: ["ssh", "host"] },
+                    "core-shell": { enable: false },
+                    "test-dummy": { enable: true },
+                    "core-agent": { prefix: ["ssh", "host"] },
                     mything: { command: ["/bin/foo"] },
                 },
             }"#,
@@ -884,9 +890,9 @@ mod tests {
         let s: HarnessSettings = load_json5_layered(dir, "harness").expect("load");
         let resolved = s.resolve_extensions(builtins()).expect("resolve");
         let names: Vec<&str> = resolved.iter().map(|e| e.name.as_str()).collect();
-        // shell dropped (disable). test_dummy enabled. agent kept
-        // (prefix-wrapped). mything appended.
-        assert_eq!(names, vec!["agent", "test_dummy", "mything"]);
+        // core-shell dropped (disable). test-dummy enabled. core-agent
+        // kept (prefix-wrapped). mything appended.
+        assert_eq!(names, vec!["core-agent", "test-dummy", "mything"]);
         let agent = &resolved[0];
         assert_eq!(agent.command, "ssh");
         assert_eq!(agent.args, vec!["host", "tau", "ext", "agent"]);

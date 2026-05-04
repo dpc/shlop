@@ -24,7 +24,7 @@ pub(crate) fn load_harness_settings_or_warn(
 ///
 /// Each entry's `command` is `[<current-exe>, "ext", <name>]`, so a
 /// fresh `tau` install with no `harness.json5` runs the in-binary
-/// agent and ext-shell extensions out of the box. Users can override
+/// core-agent and core-shell extensions out of the box. Users can override
 /// individual fields (or set `enable: false`) per entry in
 /// `harness.json5` under `extensions: { name: { … } }`.
 #[must_use]
@@ -37,21 +37,21 @@ pub fn builtin_extensions() -> Vec<tau_config::settings::BuiltinExtension> {
 
     vec![
         BuiltinExtension {
-            name: "agent",
+            name: "core-agent",
             command: vec![tau_binary.clone(), "ext".to_owned(), "agent".to_owned()],
             role: Some("agent"),
             enable: true,
             config: serde_json::json!({}),
         },
         BuiltinExtension {
-            name: "shell",
+            name: "core-shell",
             command: vec![tau_binary.clone(), "ext".to_owned(), "ext-shell".to_owned()],
             role: Some("tool"),
             enable: true,
             config: serde_json::json!({}),
         },
         BuiltinExtension {
-            name: "test_dummy",
+            name: "test-dummy",
             command: vec![
                 tau_binary.clone(),
                 "ext".to_owned(),
@@ -97,7 +97,7 @@ pub(crate) fn resolve_config(
     use tau_config::{Config, CoreConfig, CoreMode};
 
     // Extensions live in `harness.json5` under `extensions: { ... }`.
-    // We start from the built-in agent + tools defaults and apply the
+    // We start from the built-in core-agent + tools defaults and apply the
     // user's overrides on top; a malformed harness.json5 falls back
     // to defaults rather than failing the whole startup, but we warn
     // on stderr so the user can see why their config is being

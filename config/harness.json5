@@ -10,6 +10,8 @@
 
   // Optional built-in extension overrides.
   // extensions: {
-  //   test_dummy: { enable: true },
+  //   "core-shell": { enable: false },
+  //   "core-agent": { enable: false },
+  //   "test-dummy": { enable: true },
   // },
 }
