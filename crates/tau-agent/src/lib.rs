@@ -16,8 +16,15 @@ use tau_proto::{
     LifecycleSubscribe, PROTOCOL_VERSION,
 };
 
+/// `tracing` target for events emitted from the agent. Matches the
+/// convention described in [`tau_extension`]: a short identifier the
+/// user can name in `TAU_EXT_LOG=agent=trace` to dump every prompt
+/// the harness hands the agent.
+pub const LOG_TARGET: &str = "agent";
+
 /// Runs the agent on stdin/stdout.
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
+    tau_extension::init_logging();
     run(std::io::stdin(), std::io::stdout())
 }
 
@@ -60,6 +67,26 @@ where
         match inner {
             Event::SessionPromptCreated(prompt) => {
                 let session_prompt_id = prompt.session_prompt_id.clone();
+
+                // Full prompt dump for debugging. Off by default;
+                // enable with `TAU_EXT_LOG=agent=trace`. Pretty JSON
+                // is the most readable form for a multi-screen
+                // payload, and the prompt is already fully
+                // serializable.
+                if tracing::enabled!(target: LOG_TARGET, tracing::Level::TRACE) {
+                    match serde_json::to_string_pretty(&prompt) {
+                        Ok(json) => tracing::trace!(
+                            target: LOG_TARGET,
+                            session_prompt_id = %session_prompt_id,
+                            "agent prompt:\n{json}"
+                        ),
+                        Err(error) => tracing::trace!(
+                            target: LOG_TARGET,
+                            session_prompt_id = %session_prompt_id,
+                            "agent prompt (failed to serialize for log: {error})"
+                        ),
+                    }
+                }
 
                 // Announce we accepted the prompt.
                 writer.write_event(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
