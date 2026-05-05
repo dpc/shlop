@@ -1945,6 +1945,32 @@ impl Harness {
         self.pending_prompts.clear();
         self.pending_request_sessions.clear();
         self.pending_tool_invocations.clear();
+        self.tool_conversations.clear();
+        self.pending_tool_names.clear();
+        self.pending_tool_providers.clear();
+        self.prompt_conversations.clear();
+
+        // Rebind the default conversation to the new session and drop
+        // any side conversations that were tied to the old one. Without
+        // this, the next `dispatch_user_prompt` would assert because
+        // `conversations[default].session_id` still points at the old
+        // session id.
+        let default_id = self.default_conversation_id.clone();
+        let new_head = self
+            .store
+            .session(new_session_id.as_str())
+            .and_then(|t| t.head());
+        self.conversations.clear();
+        self.conversations.insert(
+            default_id.clone(),
+            Conversation::new(
+                default_id,
+                new_session_id.clone(),
+                tau_proto::PromptOriginator::User,
+                new_head,
+                None,
+            ),
+        );
 
         self.current_session_id = new_session_id.clone();
 

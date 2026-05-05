@@ -2075,6 +2075,53 @@ fn queued_prompt_extends_completed_first_prompt() {
     h.shutdown().expect("shutdown");
 }
 
+#[test]
+fn switch_session_rebinds_default_conversation() {
+    // Regression: `/new` flips `current_session_id` but used to leave
+    // the default conversation pointing at the old session, which made
+    // the next user prompt panic in `dispatch_user_prompt`'s
+    // assert_eq!.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start"); // bound to "s1"
+    h.selected_model = "test/model".into();
+
+    let cid = h.default_conversation_id.clone();
+    assert_eq!(h.conversations[&cid].session_id.as_str(), "s1");
+
+    let shell_conn = h
+        .extension_connection_id("shell")
+        .expect("shell")
+        .to_owned();
+
+    h.switch_session("s2".into(), tau_proto::SessionStartReason::New)
+        .expect("switch");
+
+    assert_eq!(h.current_session_id.as_str(), "s2");
+    assert_eq!(
+        h.conversations[&cid].session_id.as_str(),
+        "s2",
+        "default conversation must follow the bound session id",
+    );
+
+    // Drive the new session through init so submit_user_prompt
+    // actually dispatches (rather than queuing).
+    h.handle_extension_event(
+        &shell_conn,
+        Event::ExtensionContextReady(tau_proto::ExtensionContextReady {
+            session_id: "s2".into(),
+        }),
+    )
+    .expect("ready");
+
+    let submission = h
+        .submit_user_prompt("s2".into(), "hello".to_owned())
+        .expect("submit");
+    assert_eq!(submission, PromptSubmission::Dispatched);
+
+    h.shutdown().expect("shutdown");
+}
+
 fn read_prompt_created(h: &Harness, spid: &SessionPromptId) -> SessionPromptCreated {
     let mut cursor = 0;
     loop {
