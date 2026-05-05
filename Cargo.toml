@@ -7,6 +7,7 @@ members = [
   "crates/tau-core",
   "crates/tau-ext-dpc-notifications",
   "crates/tau-ext-shell",
+  "crates/tau-ext-websearch-exa",
   "crates/tau-ext-test-dummy",
   "crates/tau-extension",
   "crates/tau-harness",
@@ -50,6 +51,7 @@ tau-config = { path = "crates/tau-config" }
 tau-core = { path = "crates/tau-core" }
 tau-ext-dpc-notifications = { path = "crates/tau-ext-dpc-notifications" }
 tau-ext-shell = { path = "crates/tau-ext-shell" }
+tau-ext-websearch-exa = { path = "crates/tau-ext-websearch-exa" }
 tau-ext-test-dummy = { path = "crates/tau-ext-test-dummy" }
 tau-extension = { path = "crates/tau-extension" }
 tau-harness = { path = "crates/tau-harness" }

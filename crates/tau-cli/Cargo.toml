@@ -26,6 +26,7 @@ tau-agent.workspace = true
 tau-ext-dpc-notifications.workspace = true
 tau-ext-shell.workspace = true
 tau-ext-test-dummy.workspace = true
+tau-ext-websearch-exa.workspace = true
 
 [build-dependencies]
 built.workspace = true

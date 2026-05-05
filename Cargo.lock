@@ -1477,6 +1477,7 @@ dependencies = [
  "tau-ext-dpc-notifications",
  "tau-ext-shell",
  "tau-ext-test-dummy",
+ "tau-ext-websearch-exa",
  "tau-harness",
  "tau-proto",
  "tau-provider",
@@ -1567,6 +1568,17 @@ dependencies = [
  "rand",
  "serde_json",
  "tau-proto",
+]
+
+[[package]]
+name = "tau-ext-websearch-exa"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tau-extension",
+ "tau-proto",
+ "tracing",
+ "ureq",
 ]
 
 [[package]]
