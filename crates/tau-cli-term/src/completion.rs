@@ -293,6 +293,22 @@ impl Completer {
         self.state.reset();
     }
 
+    pub(crate) fn dismiss_menu(&mut self, handle: &TermHandle) {
+        self.hide_menu(handle);
+        self.state.reset();
+    }
+
+    pub(crate) fn original_buffer(&self) -> String {
+        self.state.original_buffer.clone().unwrap_or_default()
+    }
+
+    pub(crate) fn is_preview_buffer(&self, buffer: &str) -> bool {
+        self.state
+            .selected
+            .and_then(|idx| self.state.candidates.get(idx))
+            .is_some_and(|candidate| candidate.buffer_text == buffer)
+    }
+
     /// Rebuild the menu at the current size (e.g. after resize).
     pub(crate) fn rebuild_menu(&mut self, handle: &TermHandle) {
         if self.state.is_active() {

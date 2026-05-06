@@ -74,7 +74,10 @@ struct SharedState {
     input_history: Vec<String>,
     history_nav_entries: Vec<String>,
     history_nav_index: Option<usize>,
+    history_nav_active: bool,
     last_key_direction: Option<KeyDirection>,
+    last_key_started_history_nav: bool,
+    last_key_buffer_before: String,
     width: usize,
     height: usize,
     /// Set by Term::drop to signal the redraw thread to exit.
@@ -106,6 +109,7 @@ impl SharedState {
     fn reset_history_nav(&mut self) {
         self.history_nav_entries.clear();
         self.history_nav_index = None;
+        self.history_nav_active = false;
     }
 
     fn save_buffer_to_history_nav(&mut self) {
@@ -131,7 +135,9 @@ impl SharedState {
             self.history_nav_entries = self.input_history.clone();
             self.history_nav_entries.push(self.buffer.clone());
             self.history_nav_index = Some(self.history_nav_entries.len() - 1);
-        } else {
+        } else if let Some(index) = self.history_nav_index
+            && index + 1 == self.history_nav_entries.len()
+        {
             self.save_buffer_to_history_nav();
         }
 
@@ -144,7 +150,12 @@ impl SharedState {
         }
 
         self.apply_history_nav_entry(new_index as usize);
+        self.history_nav_active = true;
         true
+    }
+
+    fn set_history_nav_active(&mut self, active: bool) {
+        self.history_nav_active = active;
     }
 }
 
@@ -461,7 +472,10 @@ impl Term {
             input_history: Vec::new(),
             history_nav_entries: Vec::new(),
             history_nav_index: None,
+            history_nav_active: false,
             last_key_direction: None,
+            last_key_started_history_nav: false,
+            last_key_buffer_before: String::new(),
             width,
             height,
             shutdown: false,
@@ -541,7 +555,10 @@ impl Term {
             input_history: Vec::new(),
             history_nav_entries: Vec::new(),
             history_nav_index: None,
+            history_nav_active: false,
             last_key_direction: None,
+            last_key_started_history_nav: false,
+            last_key_buffer_before: String::new(),
             width,
             height,
             shutdown: false,
@@ -619,6 +636,8 @@ impl Term {
                 RawEvent::Key(key) => {
                     {
                         let mut st = self.state.lock().expect("term state mutex poisoned");
+                        st.last_key_started_history_nav = st.history_nav_active;
+                        st.last_key_buffer_before = st.buffer.clone();
                         st.last_key_direction = match key.code {
                             KeyCode::Up => Some(KeyDirection::Up),
                             KeyCode::Down => Some(KeyDirection::Down),
@@ -717,6 +736,67 @@ impl Term {
             == Some(KeyDirection::Down)
     }
 
+    /// Returns the input buffer before the current raw key was handled.
+    pub fn last_key_buffer_before(&self) -> String {
+        self.state
+            .lock()
+            .expect("term state mutex poisoned")
+            .last_key_buffer_before
+            .clone()
+    }
+
+    /// Returns true if the current raw key began while input-history navigation
+    /// was active.
+    pub fn last_key_started_history_navigation(&self) -> bool {
+        self.state
+            .lock()
+            .expect("term state mutex poisoned")
+            .last_key_started_history_nav
+    }
+
+    /// Clears the marker for the current raw key's initial history-navigation
+    /// state.
+    pub fn clear_last_key_started_history_navigation(&self) {
+        self.state
+            .lock()
+            .expect("term state mutex poisoned")
+            .last_key_started_history_nav = false;
+    }
+
+    /// Returns true while Up/Down is navigating input history.
+    pub fn is_history_navigation_active(&self) -> bool {
+        self.state
+            .lock()
+            .expect("term state mutex poisoned")
+            .history_nav_active
+    }
+
+    /// Leaves input-history navigation mode without changing the buffer.
+    pub fn reset_history_navigation(&self) {
+        self.state
+            .lock()
+            .expect("term state mutex poisoned")
+            .reset_history_nav();
+    }
+
+    /// Marks whether the current buffer is actively being selected from input
+    /// history.
+    pub fn set_history_navigation_active(&self, active: bool) {
+        self.state
+            .lock()
+            .expect("term state mutex poisoned")
+            .set_history_nav_active(active);
+    }
+
+    /// Removes the most recently submitted input-history entry if it matches
+    /// `line`.
+    pub fn remove_last_history_entry_if_eq(&self, line: &str) {
+        let mut st = self.state.lock().expect("term state mutex poisoned");
+        if st.input_history.last().is_some_and(|entry| entry == line) {
+            st.input_history.pop();
+        }
+    }
+
     /// Releases the terminal for an external program (e.g. `$EDITOR`):
     /// disables raw mode + bracketed paste and clears the screen so
     /// the editor starts on a clean canvas.
@@ -787,6 +867,7 @@ impl Term {
             KeyCode::Enter => {
                 let line = {
                     let mut st = self.state.lock().expect("term state mutex poisoned");
+                    st.last_key_started_history_nav = false;
                     st.cursor = st.buffer.len();
                     let line = std::mem::take(&mut st.buffer);
                     st.cursor = 0;
@@ -871,6 +952,7 @@ impl Term {
             KeyCode::Char(ch) => {
                 {
                     let mut st = self.state.lock().expect("term state mutex poisoned");
+                    st.last_key_direction = None;
                     let cursor = st.cursor;
                     st.buffer.insert(cursor, ch);
                     st.cursor += ch.len_utf8();
@@ -882,6 +964,7 @@ impl Term {
             KeyCode::Backspace => {
                 let changed = {
                     let mut st = self.state.lock().expect("term state mutex poisoned");
+                    st.last_key_direction = None;
                     if st.cursor > 0 {
                         let prev = prev_char_boundary(&st.buffer, st.cursor);
                         let cursor = st.cursor;
@@ -901,6 +984,7 @@ impl Term {
             KeyCode::Delete => {
                 let changed = {
                     let mut st = self.state.lock().expect("term state mutex poisoned");
+                    st.last_key_direction = None;
                     if st.cursor < st.buffer.len() {
                         let next = next_char_boundary(&st.buffer, st.cursor);
                         let cursor = st.cursor;
@@ -1329,7 +1413,9 @@ fn move_cursor_vertical(st: &SharedState, delta: isize) -> Option<usize> {
 
 fn move_up_in_state(state: &Arc<Mutex<SharedState>>) {
     let mut st = state.lock().expect("term state mutex poisoned");
-    if let Some(new_cursor) = move_cursor_vertical(&st, -1) {
+    if st.history_nav_index.is_some() {
+        st.navigate_history(-1);
+    } else if let Some(new_cursor) = move_cursor_vertical(&st, -1) {
         st.cursor = new_cursor;
     } else {
         st.navigate_history(-1);
@@ -1338,7 +1424,9 @@ fn move_up_in_state(state: &Arc<Mutex<SharedState>>) {
 
 fn move_down_in_state(state: &Arc<Mutex<SharedState>>) {
     let mut st = state.lock().expect("term state mutex poisoned");
-    if let Some(new_cursor) = move_cursor_vertical(&st, 1) {
+    if st.history_nav_index.is_some() {
+        st.navigate_history(1);
+    } else if let Some(new_cursor) = move_cursor_vertical(&st, 1) {
         st.cursor = new_cursor;
     } else {
         st.navigate_history(1);

@@ -9,6 +9,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+crossterm.workspace = true
 tau-cli-term-raw.workspace = true
 tau-themes.workspace = true
 tempfile.workspace = true

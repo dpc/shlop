@@ -10,11 +10,15 @@
 
 mod completion;
 pub mod resolve;
+#[cfg(test)]
+mod tests;
 
 use std::io;
 
 pub use completion::{CommandName, Completer, CompletionData, CompletionItem, SlashCommand};
 use tau_cli_term_raw::Event as RawEvent;
+#[cfg(test)]
+pub(crate) use tau_cli_term_raw::RawEvent as TestRawEvent;
 pub use tau_cli_term_raw::{
     Align, BlockId, Cell, Color, CursorShape, Span, Style, StyledBlock, StyledText, TermHandle,
 };
@@ -72,6 +76,27 @@ impl HighTerm {
         ))
     }
 
+    #[cfg(test)]
+    pub(crate) fn new_for_test(
+        term: tau_cli_term_raw::Term,
+        handle: TermHandle,
+        commands: Vec<SlashCommand>,
+        theme: Theme,
+    ) -> (Self, CompletionData) {
+        let data = CompletionData::new();
+        let data_clone = data.clone();
+        let completer = Completer::new(commands, data, theme.clone());
+        (
+            Self {
+                term,
+                handle,
+                completer,
+                theme,
+            },
+            data_clone,
+        )
+    }
+
     /// Returns a reference to the [`TermHandle`].
     pub fn handle(&self) -> &TermHandle {
         &self.handle
@@ -100,13 +125,32 @@ impl HighTerm {
 
             match raw {
                 RawEvent::BufferChanged => {
-                    if self.completer.is_active() && self.term.last_key_was_up() {
-                        self.term.move_down();
-                        self.completer.cycle_selection(-1, &self.handle);
-                    } else if self.completer.is_active() && self.term.last_key_was_down() {
-                        self.term.move_up();
-                        self.completer.cycle_selection(1, &self.handle);
-                    } else {
+                    let arrow = self.term.last_key_was_up() || self.term.last_key_was_down();
+                    if arrow
+                        && self.completer.is_active()
+                        && !self.term.last_key_started_history_navigation()
+                        && (!self.term.is_history_navigation_active()
+                            || self.handle.get_buffer() == self.completer.original_buffer()
+                            || self
+                                .completer
+                                .is_preview_buffer(&self.term.last_key_buffer_before()))
+                    {
+                        if self.term.last_key_was_up() {
+                            self.term.move_down();
+                            self.term.reset_history_navigation();
+                            self.term.set_history_navigation_active(false);
+                            self.completer.cycle_selection(-1, &self.handle);
+                        } else {
+                            self.term.move_up();
+                            self.term.reset_history_navigation();
+                            self.term.set_history_navigation_active(false);
+                            self.completer.cycle_selection(1, &self.handle);
+                        }
+                    } else if arrow && self.completer.is_active() {
+                        self.completer.dismiss_menu(&self.handle);
+                        self.term.set_history_navigation_active(true);
+                    } else if !arrow {
+                        self.term.reset_history_navigation();
                         self.completer.on_buffer_changed(&self.handle);
                     }
                     self.handle.redraw();
@@ -139,8 +183,13 @@ impl HighTerm {
                 }
 
                 RawEvent::Line(line) => {
+                    self.term.reset_history_navigation();
+                    self.term.clear_last_key_started_history_navigation();
                     if self.completer.is_active() && self.completer.has_selection() {
                         self.completer.accept_selection(&self.handle);
+                        self.term.remove_last_history_entry_if_eq(&line);
+                        self.term.reset_history_navigation();
+                        self.term.clear_last_key_started_history_navigation();
                         self.handle.redraw();
                         continue;
                     }

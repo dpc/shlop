@@ -1491,6 +1491,7 @@ dependencies = [
 name = "tau-cli-term"
 version = "0.1.0"
 dependencies = [
+ "crossterm 0.28.1",
  "tau-cli-term-raw",
  "tau-themes",
  "tempfile",
