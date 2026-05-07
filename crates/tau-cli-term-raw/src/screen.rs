@@ -417,7 +417,21 @@ fn apply_style(w: &mut impl Write, style: &Style) -> io::Result<()> {
 /// Handles newlines within spans (each newline starts a new logical
 /// line) and wraps at the terminal width. Always returns at least one
 /// (possibly empty) line.
-pub fn layout_lines(content: &StyledText, width: usize) -> Vec<Vec<Cell>> {
+///
+/// By default a single trailing empty logical line — the one
+/// introduced by a `\n` at the very end of the input — is collapsed
+/// away. That's what static blocks (agent responses, tool output,
+/// anything ending with the LLM/shell's terminating `\n`) want so
+/// they don't render a phantom blank row at the bottom. Pass
+/// `preserve_last_newline(true)` for the live input buffer, where a
+/// buffer ending in `\n` (after Shift+Enter / Alt+Enter) needs the
+/// extra row for the cursor to sit on.
+#[bon::builder]
+pub fn layout_lines(
+    content: &StyledText,
+    width: usize,
+    #[builder(default = false)] preserve_last_newline: bool,
+) -> Vec<Vec<Cell>> {
     let width = width.max(1);
 
     // Split into logical lines at newlines.
@@ -435,8 +449,10 @@ pub fn layout_lines(content: &StyledText, width: usize) -> Vec<Vec<Cell>> {
         }
     }
 
-    // Match str::lines() behaviour: drop a single trailing empty line.
-    if logical_lines.len() > 1 && logical_lines.last().is_some_and(|l| l.is_empty()) {
+    if !preserve_last_newline
+        && logical_lines.len() > 1
+        && logical_lines.last().is_some_and(|l| l.is_empty())
+    {
         logical_lines.pop();
     }
 
@@ -483,7 +499,10 @@ pub fn layout_block(block: &StyledBlock, width: usize) -> Vec<Vec<Cell>> {
     let mr = block.margin_right as usize;
     let content_width = width.saturating_sub(ml + mr).max(1);
 
-    let content_lines = layout_lines(&block.content, content_width);
+    let content_lines = layout_lines()
+        .content(&block.content)
+        .width(content_width)
+        .call();
 
     let fill_style = Style {
         bg: block.bg,

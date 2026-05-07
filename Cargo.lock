@@ -1670,6 +1670,7 @@ dependencies = [
 name = "tau-cli-term-raw"
 version = "0.1.0"
 dependencies = [
+ "bon",
  "crossterm 0.28.1",
  "tau-blocking-notify-channel",
  "unicode-width",

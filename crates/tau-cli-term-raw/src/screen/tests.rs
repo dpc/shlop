@@ -22,7 +22,7 @@ impl TestTerm {
     fn render(&mut self, content: &str, cursor_char_offset: usize) {
         let width = self.screen.width();
         let styled: StyledText = content.into();
-        let desired = layout_lines(&styled, width);
+        let desired = layout_lines().content(&styled).width(width).call();
         let cursor = (cursor_char_offset / width, cursor_char_offset % width);
         let mut buf = Vec::new();
         self.screen
@@ -70,25 +70,25 @@ fn line_chars(lines: &[Vec<Cell>]) -> Vec<String> {
 
 #[test]
 fn layout_empty_produces_one_empty_line() {
-    let lines = layout_lines(&StyledText::new(), 80);
+    let lines = layout_lines().content(&StyledText::new()).width(80).call();
     assert_eq!(line_chars(&lines), vec![""]);
 }
 
 #[test]
 fn layout_short_produces_one_line() {
-    let lines = layout_lines(&StyledText::from("abc"), 80);
+    let lines = layout_lines().content(&StyledText::from("abc")).width(80).call();
     assert_eq!(line_chars(&lines), vec!["abc"]);
 }
 
 #[test]
 fn layout_wraps_at_width() {
-    let lines = layout_lines(&StyledText::from("abcde"), 3);
+    let lines = layout_lines().content(&StyledText::from("abcde")).width(3).call();
     assert_eq!(line_chars(&lines), vec!["abc", "de"]);
 }
 
 #[test]
 fn layout_exact_width_is_one_line() {
-    let lines = layout_lines(&StyledText::from("abc"), 3);
+    let lines = layout_lines().content(&StyledText::from("abc")).width(3).call();
     assert_eq!(line_chars(&lines), vec!["abc"]);
 }
 
@@ -96,7 +96,7 @@ fn layout_exact_width_is_one_line() {
 fn layout_preserves_styles() {
     let style = Style::default().fg(Color::Red);
     let styled = StyledText::from(vec![Span::plain("ab"), Span::new("cd", style)]);
-    let lines = layout_lines(&styled, 80);
+    let lines = layout_lines().content(&styled).width(80).call();
     assert_eq!(lines.len(), 1);
     assert_eq!(lines[0].len(), 4);
     assert_eq!(lines[0][0], Cell::plain('a'));
@@ -107,13 +107,13 @@ fn layout_preserves_styles() {
 
 #[test]
 fn layout_handles_newlines() {
-    let lines = layout_lines(&StyledText::from("abc\ndef"), 80);
+    let lines = layout_lines().content(&StyledText::from("abc\ndef")).width(80).call();
     assert_eq!(line_chars(&lines), vec!["abc", "def"]);
 }
 
 #[test]
 fn layout_newline_and_wrap() {
-    let lines = layout_lines(&StyledText::from("abc\ndef"), 3);
+    let lines = layout_lines().content(&StyledText::from("abc\ndef")).width(3).call();
     assert_eq!(line_chars(&lines), vec!["abc", "def"]);
 }
 
@@ -326,7 +326,7 @@ fn styled_content_renders_with_color() {
     let mut t = TestTerm::new(24, 80);
     let style = Style::default().fg(Color::Blue);
     let styled = StyledText::from(vec![Span::plain("hi "), Span::new("world", style)]);
-    let desired = layout_lines(&styled, 80);
+    let desired = layout_lines().content(&styled).width(80).call();
     let mut buf = Vec::new();
     t.screen.update(&mut buf, &desired, (0, 8)).expect("ok");
     t.term.process(&buf);
@@ -359,7 +359,7 @@ fn styled_diff_only_rerenders_changed_styles() {
 
     // Second render: same text but bold.
     let styled = StyledText::from(Span::new("hello", bold));
-    let desired = layout_lines(&styled, 80);
+    let desired = layout_lines().content(&styled).width(80).call();
     let mut buf = Vec::new();
     t.screen.update(&mut buf, &desired, (0, 5)).expect("ok");
     t.term.process(&buf);
@@ -385,13 +385,13 @@ fn build_prompt_layout(
         0
     } else {
         let above_styled: StyledText = above.into();
-        desired.extend(layout_lines(&above_styled, width));
+        desired.extend(layout_lines().content(&above_styled).width(width).call());
         desired.len()
     };
 
     let content = format!("{left}{input}");
     let content_styled: StyledText = content.into();
-    let mut input_lines = layout_lines(&content_styled, width);
+    let mut input_lines = layout_lines().content(&content_styled).width(width).call();
 
     // Right prompt on first input line if it fits and input is single-line.
     if !right.is_empty() && !input_lines.is_empty() {

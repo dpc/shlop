@@ -907,6 +907,25 @@ fn live_block_growth_scrolls_updated_lines_into_scrollback() {
 /// covers terminals that speak the kitty keyboard protocol;
 /// Alt+Enter (the `\e\r` byte sequence) is the universal fallback
 /// for terminals that don't.
+/// A buffer ending in `\n` (as produced by Shift+Enter / Alt+Enter)
+/// must render with an extra blank row so the cursor visibly lands
+/// on a new line — otherwise the prompt height doesn't grow until
+/// the next character is typed.
+#[test]
+fn trailing_newline_buffer_grows_prompt_height() {
+    let buf = SharedBuffer::new();
+    let mut parser = vt100::Parser::new(5, 10, 20);
+
+    let (_term, handle, _input_tx) =
+        Term::new_virtual(10, 5, "> ", Box::new(buf.clone()), CursorShape::Bar);
+
+    handle.set_buffer("abc\n".to_owned(), "abc\n".len());
+    flush_redraws(&handle, &buf, &mut parser);
+
+    assert_eq!(vt100_rows(&parser, 10), vec!["> abc", "", "", "", ""]);
+    assert_eq!(parser.screen().cursor_position(), (1, 0));
+}
+
 #[test]
 fn shift_or_alt_enter_inserts_newline_without_submitting() {
     let buf = SharedBuffer::new();

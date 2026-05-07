@@ -1305,7 +1305,15 @@ fn layout_all(st: &SharedState) -> LayoutAll {
 
     let mut input_content = st.left_prompt.clone();
     input_content.push(Span::plain(&st.buffer));
-    let mut input_lines = layout_lines(&input_content, width);
+    // Preserve a trailing-newline blank row so a buffer ending in
+    // `\n` (the user just hit Shift+Enter / Alt+Enter) gives the
+    // cursor somewhere to sit and the prompt grows immediately
+    // rather than only after the next typed character.
+    let mut input_lines = layout_lines()
+        .content(&input_content)
+        .width(width)
+        .preserve_last_newline(true)
+        .call();
 
     if !st.right_prompt.is_empty() && !input_lines.is_empty() {
         let first_line = &input_lines[0];

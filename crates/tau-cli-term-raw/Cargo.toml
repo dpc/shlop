@@ -9,6 +9,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+bon.workspace = true
 crossterm.workspace = true
 tau-blocking-notify-channel.workspace = true
 unicode-width.workspace = true
