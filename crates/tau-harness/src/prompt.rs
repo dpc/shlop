@@ -207,12 +207,16 @@ pub(crate) fn assemble_conversation_from(
                         }],
                     });
                 }
-                ToolActivityOutcome::Error { message, .. } => {
+                ToolActivityOutcome::Error { message, details } => {
+                    let content = match details {
+                        Some(d) => format!("{message}\n{}", cbor_to_text(d)),
+                        None => message.clone(),
+                    };
                     messages.push(ConversationMessage {
                         role: ConversationRole::User,
                         content: vec![ContentBlock::ToolResult {
                             tool_use_id: activity.call_id.clone(),
-                            content: message.clone(),
+                            content,
                             is_error: true,
                         }],
                     });
@@ -284,6 +288,8 @@ pub(crate) fn cbor_to_text(v: &tau_proto::CborValue) -> String {
 
 #[cfg(test)]
 mod tests {
+    use tau_proto::{Event, ToolError, ToolRequest};
+
     use super::*;
 
     #[test]
@@ -292,5 +298,71 @@ mod tests {
         let prompt = build_system_prompt(&[], &skills, "/tmp/work");
         assert!(prompt.contains("TAU_VERSION contains Tau's release version"));
         assert!(prompt.contains("TAU_BUILD contains Tau's git revision"));
+    }
+
+    /// Tool errors must surface their `details` payload to the LLM,
+    /// not just the bare `message`. The shell extension stuffs
+    /// stdout/stderr/exit_code into `details` on failure; without
+    /// this, the model sees only "command exited with status 1" and
+    /// has to re-run the command with `2>&1 | tail` to recover the
+    /// diagnostic output.
+    #[test]
+    fn assemble_conversation_includes_tool_error_details() {
+        let mut tree = tau_core::SessionTree::from_events("session-1".into(), &[]);
+        tree.apply_event(&Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
+            text: "build firefox".to_owned(),
+            session_id: "session-1".into(),
+            originator: tau_proto::PromptOriginator::default(),
+        }));
+        tree.apply_event(&Event::ToolRequest(ToolRequest {
+            call_id: "call-1".into(),
+            tool_name: "shell".into(),
+            arguments: CborValue::Null,
+        }));
+        let details = CborValue::Map(vec![
+            (
+                CborValue::Text("stdout".to_owned()),
+                CborValue::Text("compiling".to_owned()),
+            ),
+            (
+                CborValue::Text("stderr".to_owned()),
+                CborValue::Text("patch 73cbb9ff failed to apply".to_owned()),
+            ),
+            (
+                CborValue::Text("status".to_owned()),
+                CborValue::Integer(1.into()),
+            ),
+        ]);
+        tree.apply_event(&Event::ToolError(ToolError {
+            call_id: "call-1".into(),
+            tool_name: "shell".into(),
+            message: "command exited with status 1".to_owned(),
+            details: Some(details),
+        }));
+
+        let messages = assemble_conversation_from(&tree, tree.head());
+        let tool_result = messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .find_map(|b| match b {
+                ContentBlock::ToolResult {
+                    content, is_error, ..
+                } if *is_error => Some(content.clone()),
+                _ => None,
+            })
+            .expect("error tool result should be present");
+
+        assert!(
+            tool_result.contains("command exited with status 1"),
+            "missing message: {tool_result}"
+        );
+        assert!(
+            tool_result.contains("patch 73cbb9ff failed to apply"),
+            "missing stderr: {tool_result}"
+        );
+        assert!(
+            tool_result.contains("compiling"),
+            "missing stdout: {tool_result}"
+        );
     }
 }
