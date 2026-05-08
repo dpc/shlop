@@ -17,7 +17,7 @@ use tau_proto::{
 pub const LOG_TARGET: &str = "core-delegate";
 pub const TOOL_NAME: &str = "delegate";
 
-const DELEGATE_PREFIX: &str = "You are a delegated sub-agent. Complete the task below using the available context and tools. Respond only with the final information useful to the original agent. Do not include reasoning, tool history, or status chatter.\n\nTask:\n";
+const DELEGATE_PREFIX: &str = "You are a delegated sub-agent. Complete the task below fully using your tools — don't gold-plate, but don't leave it half-done.\n\nReturn only the final information useful to the parent agent: the answer, plus any absolute file paths and short code snippets that are load-bearing. Do not include reasoning, tool history, or status chatter. Do not write report/summary .md files; the parent reads your final message, not files you create.\n\nTask:\n";
 
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
     tau_extension::init_logging();
@@ -154,7 +154,7 @@ fn tool_spec() -> ToolSpec {
     ToolSpec {
         name: TOOL_NAME.into(),
         description: Some(
-            "Delegate a self-contained sub-task to a sub-agent. Use for work that may require many tool calls, searches, or file reads, where only the final result matters and intermediate details would waste this conversation's context. Returns only the sub-agent's final answer."
+            "Delegate a self-contained sub-task to a fresh sub-agent that runs with its own context and tools, and returns only its final text answer. Use it for: open-ended exploration where step count is unpredictable; large search/read sweeps whose intermediate output would otherwise clutter this conversation; parallel work — multiple `read_only: true` delegations dispatched in the same turn run concurrently. Skip it when the target is already known (use direct tools like `read`/`grep`/`shell` instead) or when the task requires synthesis you should do yourself — don't push 'based on findings, fix the bug' onto a sub-agent; investigate first, then delegate the concrete change. The sub-agent's conversation is branched from the most recent completed user turn here, so it inherits prior completed turns as cached context — but it does NOT see the in-flight turn that triggered this delegation. Brief it for what is unique to the sub-task; you don't need to re-explain context already established earlier in this conversation."
                 .to_owned(),
         ),
         parameters: Some(serde_json::json!({
@@ -166,11 +166,11 @@ fn tool_spec() -> ToolSpec {
                 },
                 "prompt": {
                     "type": "string",
-                    "description": "Task for the delegated sub-agent. Include all constraints and what information you need back."
+                    "description": "Task for the sub-agent. The sub-agent inherits this conversation's completed turns as context, so don't re-explain what's already been said — but DO state what is specific to the sub-task: the goal, any new constraints, and exactly what information you need back. Terse command-style prompts produce shallow work."
                 },
                 "read_only": {
                     "type": "boolean",
-                    "description": "Set true ONLY when the sub-task is fully read-only (no file writes, no shell commands with side effects, no network mutation, no nested delegations that mutate). Read-only delegations are scheduled like a `Pure` tool call and may run concurrently with other read-only tool calls / delegations on the same conversation. Default: false (treated as `Mutating` — runs sequentially with other mutating work)."
+                    "description": "Set true ONLY when the sub-task is fully read-only (no file writes, no shell commands with side effects, no network mutation, no nested delegations that mutate). Read-only delegations dispatched in the same turn run concurrently with each other and with other read-only tool calls — set this whenever applicable to enable parallelism. Default: false (treated as `Mutating` — runs sequentially with other mutating work)."
                 }
             },
             "required": ["task_name", "prompt"]

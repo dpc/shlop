@@ -1,3 +1,5 @@
 - These old session directories are already accumulating. After harness started, it could spin a thread that would go over very old session state directories and clean them up. We can have configurable retention policy, default to like 60 days.
 
 - filesystem autocompletion
+
+- Fix: don't update screen while in $EDITOR
