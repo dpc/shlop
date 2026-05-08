@@ -137,6 +137,9 @@ struct SharedState {
     height: usize,
     /// Set by Term::drop to signal the redraw thread to exit.
     shutdown: bool,
+    /// Set while the terminal is released to an external program.
+    /// The redraw thread must not write to stdout in this state.
+    external_paused: bool,
     /// Set by `resume_after_external` (and similar) to force the
     /// next redraw to wipe its `Screen` cache and repaint from
     /// scratch. The redraw loop reads-and-clears this flag.
@@ -605,6 +608,7 @@ impl Term {
             width,
             height,
             shutdown: false,
+            external_paused: false,
             invalidate_screen: false,
             sync_requested: 0,
             sync_completed: 0,
@@ -693,6 +697,7 @@ impl Term {
             width,
             height,
             shutdown: false,
+            external_paused: false,
             invalidate_screen: false,
             sync_requested: 0,
             sync_completed: 0,
@@ -897,6 +902,10 @@ impl Term {
         if !self.owns_raw_mode {
             return Ok(());
         }
+        {
+            let mut st = self.state.lock().expect("term state mutex poisoned");
+            st.external_paused = true;
+        }
         let _ = crossterm::execute!(
             io::stdout(),
             PopKeyboardEnhancementFlags,
@@ -935,6 +944,7 @@ impl Term {
         );
         {
             let mut st = self.state.lock().expect("term state mutex poisoned");
+            st.external_paused = false;
             st.invalidate_screen = true;
         }
         self.redraw.notify();
@@ -1410,6 +1420,11 @@ fn redraw_loop(
         }
 
         let mut st = state.lock().expect("term state mutex poisoned");
+        if st.external_paused {
+            st.sync_completed = st.sync_requested;
+            sync_condvar.notify_all();
+            continue;
+        }
         let width = st.width;
         let height = st.height.max(1);
         let size_changed = prev_width != width || prev_height != height;
