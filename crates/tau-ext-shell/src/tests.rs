@@ -34,6 +34,20 @@ impl<R: std::io::Read> EventReader<R> {
             }
         }
     }
+    fn read_message(&mut self) -> Result<Option<Message>, tau_proto::DecodeError> {
+        loop {
+            match self.inner.read_frame()? {
+                None => return Ok(None),
+                Some(frame) => {
+                    let (_log_id, peeled) = frame.peel_log();
+                    match peeled {
+                        Frame::Event(_) => continue,
+                        Frame::Message(message) => return Ok(Some(message)),
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Test-side wrapper around [`FrameWriter`] that accepts `Event` directly.
@@ -526,7 +540,7 @@ fn edit_errors_use_short_reasons() {
         panic!("expected tool error");
     };
     assert_eq!(error.tool_name, EDIT_TOOL_NAME);
-    assert_eq!(error.message, "not found");
+    assert_eq!(error.message, "no match");
 
     writer
         .write_frame(&disconnect_frame(None))
@@ -575,7 +589,7 @@ fn edit_errors_include_path_details() {
         panic!("expected tool error");
     };
     assert_eq!(error.tool_name, EDIT_TOOL_NAME);
-    assert_eq!(error.message, "not found");
+    assert_eq!(error.message, "no match");
     let details = error.details.expect("details");
     let path = cbor_map_text(&details, "path").expect("path");
     assert_eq!(path, file_path.display().to_string());
@@ -704,6 +718,91 @@ fn shell_tool_reports_progress_and_success() {
         optional_argument_text(&result.result, "stdout"),
         Some("hello".to_owned())
     );
+
+    writer
+        .write_frame(&disconnect_frame(None))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+}
+
+#[test]
+fn shell_tool_applies_configured_prefix_and_command() {
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+
+    writer
+        .write_frame(&Frame::Message(Message::Configure(tau_proto::Configure {
+            config: CborValue::Map(vec![(
+                CborValue::Text("shell".to_owned()),
+                CborValue::Map(vec![
+                    (
+                        CborValue::Text("prefix".to_owned()),
+                        CborValue::Array(vec![
+                            CborValue::Text("env".to_owned()),
+                            CborValue::Text("TAU_SHELL_PREFIX_TEST=ok".to_owned()),
+                        ]),
+                    ),
+                    (
+                        CborValue::Text("command".to_owned()),
+                        CborValue::Text("sh".to_owned()),
+                    ),
+                ]),
+            )]),
+        })))
+        .expect("configure");
+    writer
+        .write_event(&Event::ToolInvoke(ToolInvoke {
+            call_id: "call-1".into(),
+            tool_name: SHELL_TOOL_NAME.into(),
+            arguments: CborValue::Map(vec![(
+                CborValue::Text("command".to_owned()),
+                CborValue::Text("printf %s \"$TAU_SHELL_PREFIX_TEST\"".to_owned()),
+            )]),
+        }))
+        .expect("invoke");
+    writer.flush().expect("flush");
+
+    let _progress = reader.read_event().expect("read").expect("progress");
+    let result = reader.read_event().expect("read").expect("result");
+    let Event::ToolResult(result) = result else {
+        panic!("expected tool result");
+    };
+    assert_eq!(
+        optional_argument_text(&result.result, "stdout"),
+        Some("ok".to_owned())
+    );
+
+    writer
+        .write_frame(&disconnect_frame(None))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+}
+
+#[test]
+fn shell_extension_rejects_invalid_config() {
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+
+    writer
+        .write_frame(&Frame::Message(Message::Configure(tau_proto::Configure {
+            config: CborValue::Map(vec![(
+                CborValue::Text("shell".to_owned()),
+                CborValue::Map(vec![(
+                    CborValue::Text("prefix".to_owned()),
+                    CborValue::Text("nope".to_owned()),
+                )]),
+            )]),
+        })))
+        .expect("configure");
+    writer.flush().expect("flush");
+
+    let error = loop {
+        let message = reader.read_message().expect("read").expect("message");
+        if let Message::ConfigError(error) = message {
+            break error;
+        }
+    };
+    assert!(error.message.contains("invalid type"));
 
     writer
         .write_frame(&disconnect_frame(None))

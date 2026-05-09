@@ -53,8 +53,8 @@ impl Drop for SemaphoreGuard<'_> {
 }
 
 use tau_proto::{
-    Ack, CborValue, ClientKind, Event, EventSelector, Frame, FrameReader, FrameWriter, Hello,
-    LogEventId, Message, PROTOCOL_VERSION, Ready, SessionStarted, Subscribe, ToolError,
+    Ack, CborValue, ClientKind, ConfigError, Event, EventSelector, Frame, FrameReader, FrameWriter,
+    Hello, LogEventId, Message, PROTOCOL_VERSION, Ready, SessionStarted, Subscribe, ToolError,
     ToolProgress, ToolRegister, ToolResult, ToolSideEffects, ToolSpec,
 };
 
@@ -66,6 +66,48 @@ pub const SHELL_TOOL_NAME: &str = "shell";
 pub const GREP_TOOL_NAME: &str = "grep";
 pub const FIND_TOOL_NAME: &str = "find";
 pub const LS_TOOL_NAME: &str = "ls";
+
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ExtConfig {
+    shell: ShellConfig,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ShellConfig {
+    /// Executable used for `shell` tool invocations and `!`/`!!` UI
+    /// commands. It is invoked as `<command> -c <user command>`.
+    command: String,
+    /// argv prefix prepended before the shell command. The effective
+    /// argv is `prefix ++ [command, "-c", user_command]`.
+    prefix: Vec<String>,
+}
+
+impl Default for ShellConfig {
+    fn default() -> Self {
+        Self {
+            command: "sh".to_owned(),
+            prefix: Vec::new(),
+        }
+    }
+}
+
+impl ShellConfig {
+    fn command_for(&self, command: &str) -> Command {
+        let mut argv = self.prefix.clone();
+        argv.push(self.command.clone());
+        let Some((program, args)) = argv.split_first() else {
+            // `command` default is non-empty, and serde default prevents
+            // this for missing config. An explicit empty string is still
+            // a bad config; let spawn fail with a useful OS error.
+            return Command::new("");
+        };
+        let mut child_cmd = Command::new(program);
+        child_cmd.args(args).arg("-c").arg(command);
+        child_cmd
+    }
+}
 
 struct DiscoveredAgentsFile {
     file_path: PathBuf,
@@ -353,6 +395,8 @@ where
         Ok(())
     });
 
+    let mut config = ExtConfig::default();
+
     // Reader loop: dispatch each tool invocation to a worker thread.
     //
     // ToolInvoke is sent point-to-point (not via the harness event log)
@@ -367,12 +411,23 @@ where
         };
         let (log_id, inner) = frame.peel_log();
         match inner {
+            Frame::Message(Message::Configure(msg)) => {
+                match tau_extension::parse_config::<ExtConfig>(&msg.config) {
+                    Ok(cfg) => config = cfg,
+                    Err(message) => {
+                        tx.send(Frame::Message(Message::ConfigError(ConfigError {
+                            message,
+                        })))?;
+                    }
+                }
+            }
             Frame::Event(Event::ToolInvoke(invoke)) => {
                 let tx = tx.clone();
                 let sem = Arc::clone(&sem);
+                let shell_config = config.shell.clone();
                 std::thread::spawn(move || {
                     let _permit = sem.acquire();
-                    dispatch_tool_invoke(invoke, include_echo, &tx);
+                    dispatch_tool_invoke(invoke, include_echo, shell_config, &tx);
                 });
             }
             Frame::Event(Event::SessionStarted(started)) => {
@@ -383,9 +438,10 @@ where
                 // and stream chunks out via the same tx writer.
                 let tx = tx.clone();
                 let sem = Arc::clone(&sem);
+                let shell_config = config.shell.clone();
                 std::thread::spawn(move || {
                     let _permit = sem.acquire();
-                    dispatch_user_shell_command(cmd, &tx);
+                    dispatch_user_shell_command(cmd, shell_config, &tx);
                 });
             }
             Frame::Message(Message::Disconnect(_)) => break,
@@ -409,9 +465,10 @@ where
 fn dispatch_tool_invoke(
     invoke: tau_proto::ToolInvoke,
     include_echo: bool,
+    shell_config: ShellConfig,
     tx: &mpsc::Sender<Frame>,
 ) {
-    let events = execute_tool(invoke, include_echo);
+    let events = execute_tool(invoke, include_echo, &shell_config);
     for event in events {
         let _ = tx.send(Frame::Event(event));
     }
@@ -427,13 +484,15 @@ fn dispatch_session_started(started: SessionStarted, tx: &mpsc::Sender<Frame>) {
 /// stderr back as `ShellCommandProgress` chunks while they arrive and
 /// emitting `ShellCommandFinished` with the full (truncated-tail)
 /// output when the child exits.
-fn dispatch_user_shell_command(cmd: tau_proto::UiShellCommand, tx: &mpsc::Sender<Frame>) {
+fn dispatch_user_shell_command(
+    cmd: tau_proto::UiShellCommand,
+    shell_config: ShellConfig,
+    tx: &mpsc::Sender<Frame>,
+) {
     use std::io::Read;
 
-    let mut child_cmd = Command::new("sh");
+    let mut child_cmd = shell_config.command_for(&cmd.command);
     child_cmd
-        .arg("-c")
-        .arg(&cmd.command)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     apply_command_isolation(&mut child_cmd);
@@ -598,7 +657,11 @@ fn build_session_started_events(started: SessionStarted) -> Vec<Event> {
 }
 
 /// Execute a tool and return the response event(s).
-fn execute_tool(invoke: tau_proto::ToolInvoke, include_echo: bool) -> Vec<Event> {
+fn execute_tool(
+    invoke: tau_proto::ToolInvoke,
+    include_echo: bool,
+    shell_config: &ShellConfig,
+) -> Vec<Event> {
     let error_details = standard_tool_error_details(&invoke.tool_name, &invoke.arguments);
 
     if include_echo && invoke.tool_name == ECHO_TOOL_NAME {
@@ -712,7 +775,7 @@ fn execute_tool(invoke: tau_proto::ToolInvoke, include_echo: bool) -> Vec<Event>
             message: Some("running shell command".to_owned()),
             progress: None,
         })];
-        match run_command(&invoke.arguments) {
+        match run_command(&invoke.arguments, shell_config) {
             Ok(result) => events.push(Event::ToolResult(ToolResult {
                 call_id: invoke.call_id,
                 tool_name: invoke.tool_name,
@@ -1013,7 +1076,7 @@ fn edit_file(arguments: &CborValue) -> Result<CborValue, String> {
             .ok_or_else(|| "each edit must have a string newText".to_owned())?;
 
         let Some(start) = original.find(old_text) else {
-            return Err("not found".to_owned());
+            return Err("no match".to_owned());
         };
         let end = start + old_text.len();
 
@@ -1795,7 +1858,10 @@ fn apply_command_isolation(cmd: &mut Command) {
     }
 }
 
-fn run_command(arguments: &CborValue) -> Result<CborValue, (String, Option<CborValue>)> {
+fn run_command(
+    arguments: &CborValue,
+    shell_config: &ShellConfig,
+) -> Result<CborValue, (String, Option<CborValue>)> {
     let command = argument_text(arguments, "command").map_err(|message| (message, None))?;
     let cwd = optional_argument_text(arguments, "cwd");
     let timeout_secs = optional_argument_int(arguments, "timeout")
@@ -1803,10 +1869,8 @@ fn run_command(arguments: &CborValue) -> Result<CborValue, (String, Option<CborV
         .unwrap_or(DEFAULT_TIMEOUT_SECS);
     let timeout = std::time::Duration::from_secs(timeout_secs);
 
-    let mut child_cmd = Command::new("sh");
+    let mut child_cmd = shell_config.command_for(&command);
     child_cmd
-        .arg("-c")
-        .arg(&command)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     if let Some(cwd) = &cwd {
