@@ -5,8 +5,8 @@ use tau_cli_term::TermHandle;
 use tau_cli_term_raw::Term;
 use tau_proto::{
     AgentResponseFinished, AgentResponseUpdated, CborValue, Event, ExtAgentsMdAvailable,
-    HarnessModelSelected, SessionPromptCreated, SessionPromptQueued, SessionStartReason,
-    SessionStarted, ToolResult, UiPromptSubmitted,
+    ExtensionReady, HarnessModelSelected, SessionPromptCreated, SessionPromptQueued,
+    SessionStartReason, SessionStarted, ToolResult, UiPromptSubmitted,
 };
 
 use super::EventRenderer;
@@ -138,6 +138,34 @@ fn new_session_clears_session_ui_state() {
     assert!(!vt.screen_contains(80, "old response"));
     assert!(!vt.screen_contains(80, "read src/lib.rs"));
     assert!(!vt.screen_contains(80, "no model selected"));
+}
+
+#[test]
+fn new_session_replays_startup_context_and_kept_extensions() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+
+    renderer.handle(&Event::ExtAgentsMdAvailable(ExtAgentsMdAvailable {
+        file_path: std::path::PathBuf::from("/tmp/AGENTS.md"),
+        content: "# Test\n".into(),
+    }));
+    renderer.handle(&Event::ExtensionReady(ExtensionReady {
+        instance_id: 1.into(),
+        extension_name: "core-shell".into(),
+        pid: Some(123),
+    }));
+    renderer.handle(&Event::SessionStarted(SessionStarted {
+        session_id: "s2".into(),
+        reason: SessionStartReason::New,
+    }));
+    sync(&handle);
+
+    assert!(vt.screen_contains(80, "tau"));
+    assert!(vt.screen_contains(80, "extension core-shell kept"));
 }
 
 #[test]

@@ -5,7 +5,7 @@ pub mod cli;
 
 mod ui_logging;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::fs::OpenOptions;
 use std::io::{self, BufReader, BufWriter};
@@ -2125,6 +2125,9 @@ struct EventRenderer {
     /// Live extension blocks keyed by instance_id. Shown in
     /// above_active while starting, moved to history when ready.
     extension_blocks: HashMap<tau_proto::ExtensionInstanceId, tau_cli_term::BlockId>,
+    /// Extensions that are already up in this daemon. `/new` starts a
+    /// fresh session, but these processes are intentionally kept.
+    ready_extensions: HashSet<String>,
     /// Persistent status bar block showing the current model + effort.
     model_status_block: Option<tau_cli_term::BlockId>,
     /// Live history of completed write/edit blocks plus the data
@@ -2249,6 +2252,7 @@ impl EventRenderer {
             sub_agent_call_ids: std::collections::HashSet::new(),
             shell_blocks: HashMap::new(),
             extension_blocks: HashMap::new(),
+            ready_extensions: HashSet::new(),
             model_status_block: None,
             diff_blocks: Vec::new(),
             prompt_started_at: HashMap::new(),
@@ -2384,8 +2388,39 @@ impl EventRenderer {
         self.current_context_cached_tokens = None;
         self.last_turn_latency = None;
         self.handle.clear_output();
+        self.render_session_preamble();
         if !self.current_model.is_empty() {
             self.render_model_status();
+        }
+    }
+
+    fn render_session_preamble(&mut self) {
+        use tau_cli_term::{StyledBlock, StyledText};
+        use tau_themes::names;
+
+        let logo = tau_cli_term::resolve::resolve(&self.theme, names::BANNER_LOGO);
+        let name = tau_cli_term::resolve::resolve(&self.theme, names::BANNER_NAME);
+        let version_style = tau_cli_term::resolve::resolve(&self.theme, names::BANNER_VERSION);
+        let build_style = tau_cli_term::resolve::resolve(&self.theme, names::BANNER_BUILD);
+        let pun_style = tau_cli_term::resolve::resolve(&self.theme, names::BANNER_PUN);
+        let pun = random_startup_pun();
+        let (version, build) = build_label_parts();
+        let banner = StyledText::from(vec![
+            tau_cli_term::Span::new("▀█▀▀ ", logo),
+            tau_cli_term::Span::new("tau", name),
+            tau_cli_term::Span::new(version.trim_start_matches("tau"), version_style),
+            tau_cli_term::Span::new(" ", Default::default()),
+            tau_cli_term::Span::new(build, build_style),
+            tau_cli_term::Span::new("\n", Default::default()),
+            tau_cli_term::Span::new(" █▄▖ ", logo),
+            tau_cli_term::Span::new(pun, pun_style),
+        ]);
+        self.handle.print_output(StyledBlock::new(banner));
+        let mut extensions: Vec<_> = self.ready_extensions.iter().collect();
+        extensions.sort();
+        for extension_name in extensions {
+            self.handle
+                .print_output(extension_status_block(&self.theme, extension_name, "kept"));
         }
     }
 
@@ -2863,6 +2898,8 @@ impl EventRenderer {
                 if let Some(bid) = self.extension_blocks.remove(&ready.instance_id) {
                     self.handle.remove_block(bid);
                 }
+                self.ready_extensions
+                    .insert(ready.extension_name.to_string());
                 self.handle.print_output(extension_status_block(
                     &self.theme,
                     &ready.extension_name,
@@ -2873,6 +2910,7 @@ impl EventRenderer {
                 if let Some(bid) = self.extension_blocks.remove(&exited.instance_id) {
                     self.handle.remove_block(bid);
                 }
+                self.ready_extensions.remove(exited.extension_name.as_str());
                 self.handle.print_output(extension_status_block(
                     &self.theme,
                     &exited.extension_name,
