@@ -20,6 +20,7 @@ members = [
   "crates/tau-supervisor",
   "crates/tau-blocking-notify-channel",
   "crates/tau-test-support",
+  "crates/tau-term-screen",
   "crates/tau-cli-term-raw",
   "crates/tau-cli-term",
   "crates/tau-themes",
@@ -64,6 +65,7 @@ tau-skills = { path = "crates/tau-skills" }
 tau-provider = { path = "crates/tau-provider" }
 tau-socket = { path = "crates/tau-socket" }
 tau-supervisor = { path = "crates/tau-supervisor" }
+tau-term-screen = { path = "crates/tau-term-screen" }
 tau-test-support = { path = "crates/tau-test-support" }
 tau-themes = { path = "crates/tau-themes" }
 

@@ -1,5 +1,5 @@
 [package]
-name = "tau-cli-term-raw"
+name = "tau-term-screen"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,14 +11,7 @@ workspace = true
 [dependencies]
 bon.workspace = true
 crossterm.workspace = true
-tau-blocking-notify-channel.workspace = true
-tracing.workspace = true
-tau-term-screen.workspace = true
 unicode-width.workspace = true
-
-[[bin]]
-name = "tau-cli-term-raw-demo"
-path = "src/main.rs"
 
 [dev-dependencies]
 vt100.workspace = true

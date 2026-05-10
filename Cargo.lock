@@ -1515,7 +1515,8 @@ dependencies = [
 name = "tau-cli-picker"
 version = "0.1.0"
 dependencies = [
- "console",
+ "crossterm",
+ "tau-term-screen",
 ]
 
 [[package]]
@@ -1536,6 +1537,7 @@ dependencies = [
  "bon",
  "crossterm",
  "tau-blocking-notify-channel",
+ "tau-term-screen",
  "tracing",
  "unicode-width",
  "vt100",
@@ -1712,6 +1714,16 @@ version = "0.1.0"
 dependencies = [
  "tau-core",
  "tau-proto",
+]
+
+[[package]]
+name = "tau-term-screen"
+version = "0.1.0"
+dependencies = [
+ "bon",
+ "crossterm",
+ "unicode-width",
+ "vt100",
 ]
 
 [[package]]
