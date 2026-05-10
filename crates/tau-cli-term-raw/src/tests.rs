@@ -333,6 +333,87 @@ fn down_from_non_empty_draft_creates_fresh_prompt_and_history_entry() {
 }
 
 #[test]
+fn down_at_wip_slot_in_nav_mode_pushes_and_resets() {
+    // Repro: after a Down has pushed once, navigating Up then
+    // editing the WIP slot and pressing Down should push again.
+    let buf = SharedBuffer::new();
+    let (term, handle, input_tx) = Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+
+    handle.set_buffer("first".to_owned(), 5);
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )))
+        .expect("send down");
+    assert!(matches!(
+        term.get_next_event().expect("event"),
+        Event::BufferChanged
+    ));
+    assert_eq!(handle.get_buffer(), "");
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::NONE,
+        )))
+        .expect("send up");
+    assert!(matches!(
+        term.get_next_event().expect("event"),
+        Event::BufferChanged
+    ));
+    assert_eq!(handle.get_buffer(), "first");
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )))
+        .expect("send down");
+    assert!(matches!(
+        term.get_next_event().expect("event"),
+        Event::BufferChanged
+    ));
+    assert_eq!(handle.get_buffer(), "");
+
+    for ch in "second".chars() {
+        input_tx
+            .send(RawEvent::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+            )))
+            .expect("send char");
+        let _ = term.get_next_event().expect("event");
+    }
+    assert_eq!(handle.get_buffer(), "second");
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )))
+        .expect("send down");
+    assert!(matches!(
+        term.get_next_event().expect("event"),
+        Event::BufferChanged
+    ));
+    assert_eq!(handle.get_buffer(), "");
+    assert_eq!(handle.get_cursor(), 0);
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::NONE,
+        )))
+        .expect("send up");
+    assert!(matches!(
+        term.get_next_event().expect("event"),
+        Event::BufferChanged
+    ));
+    assert_eq!(handle.get_buffer(), "second");
+}
+
+#[test]
 fn down_from_empty_prompt_does_not_create_history_entry() {
     let buf = SharedBuffer::new();
     let (term, handle, input_tx) = Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);

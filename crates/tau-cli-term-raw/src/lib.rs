@@ -267,8 +267,22 @@ impl SharedState {
 
         let nav = self.history_nav.as_mut().expect("checked above");
         let new_index = nav.index as isize + delta;
-        if new_index < 0 || new_index >= nav.entries.len() as isize {
+        if new_index < 0 {
             return false;
+        }
+        if new_index >= nav.entries.len() as isize {
+            // Past the WIP slot: leave nav mode. If the WIP buffer
+            // has content, push it to history and open a fresh
+            // empty prompt — same behaviour as Down from `Editing`.
+            let wip = nav.entries.last().cloned().unwrap_or_default();
+            self.history_nav = None;
+            if wip.is_empty() {
+                return false;
+            }
+            self.input_history.push(wip);
+            self.buffer.clear();
+            self.cursor = 0;
+            return true;
         }
         nav.index = new_index as usize;
         self.buffer = nav.entries[nav.index].clone();
