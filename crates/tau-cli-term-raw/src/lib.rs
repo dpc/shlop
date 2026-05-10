@@ -127,6 +127,14 @@ struct SharedState {
     right_prompt: StyledText,
     buffer: String,
     cursor: usize,
+    /// Visual column the cursor "wants" to be on for vertical motion
+    /// (Up/Down within the buffer and across history). Lazily set on
+    /// the first vertical motion after a horizontal motion or edit,
+    /// then preserved across consecutive vertical motions so jumping
+    /// over short or empty lines doesn't permanently truncate the
+    /// column. Cleared by any cursor change that isn't a vertical
+    /// motion.
+    sticky_col: Option<usize>,
     /// Append-only log of submitted lines.
     input_history: Vec<String>,
     /// Active history navigation, if any. Independent of `completion`.
@@ -199,6 +207,18 @@ impl SharedState {
         byte_offset_for_buffer_position(&self.buffer, target_row, target_col, width, left_cols)
     }
 
+    /// Visual column to use for the next vertical motion: returns the
+    /// sticky column if one is set, otherwise captures the current
+    /// cursor's visual column and stores it as sticky.
+    fn vertical_target_col(&mut self) -> usize {
+        if let Some(col) = self.sticky_col {
+            return col;
+        }
+        let (_, col) = self.visual_cursor_position();
+        self.sticky_col = Some(col);
+        col
+    }
+
     /// Cycles the completion menu selection by `delta` (+1 forward,
     /// -1 backward) and updates the buffer to preview the new
     /// selection (or restore `original_buffer` when wrapping past the
@@ -230,6 +250,7 @@ impl SharedState {
                 self.cursor = self.buffer.len();
             }
         }
+        self.sticky_col = None;
         true
     }
 
@@ -243,6 +264,7 @@ impl SharedState {
         if menu.selected.is_some() {
             self.buffer = menu.original_buffer;
             self.cursor = menu.original_cursor;
+            self.sticky_col = None;
         }
         true
     }
@@ -275,7 +297,7 @@ impl SharedState {
     /// stepping forward lands on the next entry's first visual row,
     /// both at (or clamped to) the column the cursor was on.
     fn step_history(&mut self, delta: isize) -> bool {
-        let (_, target_col) = self.visual_cursor_position();
+        let target_col = self.vertical_target_col();
 
         if self.history_nav.is_none() {
             if 0 < delta {
@@ -284,6 +306,7 @@ impl SharedState {
                 }
                 self.input_history.push(std::mem::take(&mut self.buffer));
                 self.cursor = 0;
+                self.sticky_col = None;
                 return true;
             }
             if self.input_history.is_empty() {
@@ -316,6 +339,7 @@ impl SharedState {
             self.input_history.push(wip);
             self.buffer.clear();
             self.cursor = 0;
+            self.sticky_col = None;
             return true;
         }
         nav.index = new_index as usize;
@@ -606,6 +630,7 @@ impl TermHandle {
         st.cursor = cursor.min(text.len());
         st.buffer = text;
         st.history_nav = None;
+        st.sticky_col = None;
         st.completion = None;
     }
 
@@ -702,6 +727,7 @@ impl Term {
             cursor: 0,
             input_history: Vec::new(),
             history_nav: None,
+            sticky_col: None,
             completion: None,
             width,
             height,
@@ -792,6 +818,7 @@ impl Term {
             cursor: 0,
             input_history: Vec::new(),
             history_nav: None,
+            sticky_col: None,
             completion: None,
             width,
             height,
@@ -904,6 +931,7 @@ impl Term {
                         let cursor = st.cursor;
                         st.buffer.insert_str(cursor, &text);
                         st.cursor = cursor + text.len();
+                        st.sticky_col = None;
                         st.sync_buffer_to_history_nav();
                     }
                     self.refresh_completion();
@@ -1132,6 +1160,7 @@ impl Term {
                     let cursor = st.cursor;
                     st.buffer.insert(cursor, '\n');
                     st.cursor = cursor + 1;
+                    st.sticky_col = None;
                     st.sync_buffer_to_history_nav();
                 }
                 self.refresh_completion();
@@ -1152,6 +1181,7 @@ impl Term {
                     let mut st = self.state.lock().expect("term state mutex poisoned");
                     st.completion = None;
                     st.history_nav = None;
+                    st.sticky_col = None;
                     st.cursor = st.buffer.len();
                     let line = std::mem::take(&mut st.buffer);
                     st.cursor = 0;
@@ -1181,6 +1211,7 @@ impl Term {
                 st.buffer.clear();
                 st.cursor = 0;
                 st.history_nav = None;
+                st.sticky_col = None;
                 st.completion = None;
                 drop(st);
                 return Ok(Some(Event::BufferChanged));
@@ -1192,6 +1223,7 @@ impl Term {
                     let cursor = st.cursor;
                     st.buffer.drain(..cursor);
                     st.cursor = 0;
+                    st.sticky_col = None;
                     st.sync_buffer_to_history_nav();
                 }
                 self.refresh_completion();
@@ -1210,6 +1242,7 @@ impl Term {
                         let cursor = st.cursor;
                         st.buffer.drain(new_end..cursor);
                         st.cursor = new_end;
+                        st.sticky_col = None;
                         st.sync_buffer_to_history_nav();
                         true
                     } else {
@@ -1223,12 +1256,15 @@ impl Term {
             }
 
             KeyCode::Char('a') if ctrl => {
-                self.state.lock().expect("term state mutex poisoned").cursor = 0;
+                let mut st = self.state.lock().expect("term state mutex poisoned");
+                st.cursor = 0;
+                st.sticky_col = None;
             }
 
             KeyCode::Char('e') if ctrl => {
                 let mut st = self.state.lock().expect("term state mutex poisoned");
                 st.cursor = st.buffer.len();
+                st.sticky_col = None;
             }
 
             KeyCode::Char(_ch)
@@ -1265,6 +1301,7 @@ impl Term {
                     let cursor = st.cursor;
                     st.buffer.insert(cursor, ch);
                     st.cursor += ch.len_utf8();
+                    st.sticky_col = None;
                     st.sync_buffer_to_history_nav();
                 }
                 self.refresh_completion();
@@ -1279,6 +1316,7 @@ impl Term {
                         let cursor = st.cursor;
                         st.buffer.drain(prev..cursor);
                         st.cursor = prev;
+                        st.sticky_col = None;
                         st.sync_buffer_to_history_nav();
                         true
                     } else {
@@ -1298,6 +1336,7 @@ impl Term {
                         let next = next_char_boundary(&st.buffer, st.cursor);
                         let cursor = st.cursor;
                         st.buffer.drain(cursor..next);
+                        st.sticky_col = None;
                         st.sync_buffer_to_history_nav();
                         true
                     } else {
@@ -1314,6 +1353,7 @@ impl Term {
                 let mut st = self.state.lock().expect("term state mutex poisoned");
                 if st.cursor > 0 {
                     st.cursor = prev_char_boundary(&st.buffer, st.cursor);
+                    st.sticky_col = None;
                 }
             }
 
@@ -1321,6 +1361,7 @@ impl Term {
                 let mut st = self.state.lock().expect("term state mutex poisoned");
                 if st.cursor < st.buffer.len() {
                     st.cursor = next_char_boundary(&st.buffer, st.cursor);
+                    st.sticky_col = None;
                 }
             }
 
@@ -1334,7 +1375,8 @@ impl Term {
                 if st.cycle_completion(-1) {
                     return Ok(Some(Event::BufferChanged));
                 }
-                if let Some(new_cursor) = move_cursor_vertical(&st, -1) {
+                let target_col = st.vertical_target_col();
+                if let Some(new_cursor) = move_cursor_vertical(&st, -1, target_col) {
                     st.cursor = new_cursor;
                     return Ok(Some(Event::BufferChanged));
                 }
@@ -1351,7 +1393,8 @@ impl Term {
                 if st.cycle_completion(1) {
                     return Ok(Some(Event::BufferChanged));
                 }
-                if let Some(new_cursor) = move_cursor_vertical(&st, 1) {
+                let target_col = st.vertical_target_col();
+                if let Some(new_cursor) = move_cursor_vertical(&st, 1, target_col) {
                     st.cursor = new_cursor;
                     return Ok(Some(Event::BufferChanged));
                 }
@@ -1362,12 +1405,15 @@ impl Term {
             }
 
             KeyCode::Home => {
-                self.state.lock().expect("term state mutex poisoned").cursor = 0;
+                let mut st = self.state.lock().expect("term state mutex poisoned");
+                st.cursor = 0;
+                st.sticky_col = None;
             }
 
             KeyCode::End => {
                 let mut st = self.state.lock().expect("term state mutex poisoned");
                 st.cursor = st.buffer.len();
+                st.sticky_col = None;
             }
 
             KeyCode::Tab => {
@@ -1759,11 +1805,10 @@ fn full_render(
 
 // --- Helpers ---
 
-fn move_cursor_vertical(st: &SharedState, delta: isize) -> Option<usize> {
+fn move_cursor_vertical(st: &SharedState, delta: isize, target_col: usize) -> Option<usize> {
     let width = st.width.max(1);
     let left_cols = st.left_prompt.char_count();
-    let (current_row, current_col) =
-        buffer_position_for_byte(&st.buffer, st.cursor, width, left_cols);
+    let (current_row, _) = buffer_position_for_byte(&st.buffer, st.cursor, width, left_cols);
 
     let target_row = current_row as isize + delta;
     if target_row < 0 {
@@ -1777,11 +1822,7 @@ fn move_cursor_vertical(st: &SharedState, delta: isize) -> Option<usize> {
     }
 
     Some(byte_offset_for_buffer_position(
-        &st.buffer,
-        target_row,
-        current_col,
-        width,
-        left_cols,
+        &st.buffer, target_row, target_col, width, left_cols,
     ))
 }
 

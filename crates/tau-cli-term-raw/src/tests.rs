@@ -429,6 +429,130 @@ fn down_lands_at_first_row_same_col_in_next_entry() {
 }
 
 #[test]
+fn down_preserves_sticky_column_across_short_line_in_buffer() {
+    let buf = SharedBuffer::new();
+    let (term, handle, input_tx) = Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+
+    // Three rows: long / short / long. Cursor on row 0 visual col 6
+    // (byte 4 = "abcd|ef").
+    handle.set_buffer("abcdef\nx\nabcdef".to_owned(), 4);
+
+    // Down truncates onto "x" at byte 8 (just after 'x', visual col 1).
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )))
+        .expect("down");
+    let _ = term.get_next_event().expect("event");
+    assert_eq!(handle.get_cursor(), 8);
+
+    // Down again restores visual col 6 (sticky preserved through the
+    // short row): byte 15 = end of buffer ("abcdef" on row 2).
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )))
+        .expect("down");
+    let _ = term.get_next_event().expect("event");
+    assert_eq!(handle.get_cursor(), 15);
+}
+
+#[test]
+fn typing_clears_sticky_column() {
+    let buf = SharedBuffer::new();
+    let (term, handle, input_tx) = Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+
+    handle.set_buffer("abcdef\nx\nabcdef".to_owned(), 4);
+
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )))
+        .expect("down");
+    let _ = term.get_next_event().expect("event");
+    assert_eq!(handle.get_cursor(), 8);
+
+    // Typing a char clears sticky and re-bases the column at the new
+    // cursor (visual col 2 after "xy").
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Char('y'),
+            KeyModifiers::NONE,
+        )))
+        .expect("y");
+    let _ = term.get_next_event().expect("event");
+    assert_eq!(handle.get_cursor(), 9);
+
+    // Down lands at visual col 2 of row 2, NOT the original col 6:
+    // byte 12 ("ab|cdef") instead of byte 16 (end).
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )))
+        .expect("down");
+    let _ = term.get_next_event().expect("event");
+    assert_eq!(handle.get_cursor(), 12);
+}
+
+#[test]
+fn step_history_preserves_sticky_column_across_empty_entry() {
+    let buf = SharedBuffer::new();
+    let (term, handle, input_tx) = Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+
+    for line in ["abcdef", "", "xyzabc"] {
+        handle.set_buffer(line.to_owned(), line.len());
+        input_tx
+            .send(RawEvent::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            )))
+            .expect("enter");
+        let _ = term.get_next_event().expect("event");
+    }
+
+    // Draft "draft" cursor=4 → visual col 6 ("draf|t").
+    handle.set_buffer("draft".to_owned(), 4);
+
+    // Up → "xyzabc" at visual col 6 → byte 4.
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::NONE,
+        )))
+        .expect("up");
+    let _ = term.get_next_event().expect("event");
+    assert_eq!(handle.get_buffer(), "xyzabc");
+    assert_eq!(handle.get_cursor(), 4);
+
+    // Up → "" (empty middle entry).
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::NONE,
+        )))
+        .expect("up");
+    let _ = term.get_next_event().expect("event");
+    assert_eq!(handle.get_buffer(), "");
+    assert_eq!(handle.get_cursor(), 0);
+
+    // Up → "abcdef": sticky col 6 survived the empty entry, so cursor
+    // lands at byte 4 ("abcd|ef") rather than the start of the line.
+    input_tx
+        .send(RawEvent::Key(KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::NONE,
+        )))
+        .expect("up");
+    let _ = term.get_next_event().expect("event");
+    assert_eq!(handle.get_buffer(), "abcdef");
+    assert_eq!(handle.get_cursor(), 4);
+}
+
+#[test]
 fn down_at_wip_slot_in_nav_mode_pushes_and_resets() {
     // Repro: after a Down has pushed once, navigating Up then
     // editing the WIP slot and pressing Down should push again.
