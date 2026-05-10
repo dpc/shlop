@@ -54,7 +54,7 @@ pub struct ServeOptions {
     pub max_clients: Option<usize>,
     /// When set, the daemon exits as soon as the last attached UI
     /// socket disconnects. When clear, the daemon keeps running with
-    /// no attached UIs — a later `tau run --attach` can pick up the
+    /// no attached UIs — a later `tau --attach` can pick up the
     /// session. The `ui.detach_request` event flips this at runtime.
     ///
     /// Default `false`: daemon is long-lived unless explicitly told

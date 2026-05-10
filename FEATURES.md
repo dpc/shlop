@@ -31,8 +31,8 @@ to an earlier turn keeps the abandoned branch on disk.
 ```
 $ tau session-list
 $ tau session-show --session-id <id>
-$ tau run -r              # resume the latest session for this cwd
-$ tau run -r <id>         # resume a specific one
+$ tau -r                  # resume the latest session for this cwd
+$ tau -r <id>             # resume a specific one
 ```
 
 Inside the UI, `/tree` prints the branch graph and `/tree <node-id>` rewinds
@@ -341,7 +341,7 @@ full style key list.
 ### Session resume and detach
 
 `/detach` leaves the harness daemon running so the agent can keep working in
-the background; `tau run --attach` reconnects later. `tau run -r` resumes the
-most recent session for the current `cwd`, `tau run -r <id>` picks a specific
+the background; `tau --attach` reconnects later. `tau -r` resumes the
+most recent session for the current `cwd`, `tau -r <id>` picks a specific
 one. The session tree, including abandoned branches, is preserved across
 restarts.

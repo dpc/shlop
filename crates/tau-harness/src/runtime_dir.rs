@@ -6,7 +6,7 @@
 //! - `tau.sock` — Unix socket for client connections
 //! - `tau.dir` — project root path (discovery marker)
 //! - `tau.pid` — daemon process ID
-//! - `tau.session_id` — bound session id (so `tau run -a` can resume it)
+//! - `tau.session_id` — bound session id (so `tau -a` can resume it)
 //!
 //! Finding `tau.dir` guarantees the socket is already bound (the marker
 //! is written *after* binding the socket).
@@ -70,7 +70,7 @@ impl DaemonDir {
         std::fs::write(self.path.join(PID_FILENAME), std::process::id().to_string())
     }
 
-    /// Writes the bound session id so `tau run -a` can join that
+    /// Writes the bound session id so `tau -a` can join that
     /// specific session instead of minting a fresh one.
     pub fn write_session_id(&self, session_id: &str) -> Result<(), std::io::Error> {
         std::fs::write(self.path.join(SESSION_ID_FILENAME), session_id.as_bytes())

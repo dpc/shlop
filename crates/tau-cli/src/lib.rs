@@ -150,7 +150,7 @@ const STARTUP_PUNS: &[&str] = &[
     "Agents, tools, sockets, loops: a well-rounded lineup.",
     "Ready, set, Tau!",
     "Tau day to code.",
-    "Tau-tal control.",
+    "Tau-tau control.",
     "Tau-tally operational.",
     "Tau much power in one terminal.",
     "Tau infinity and beyond.",
@@ -273,7 +273,7 @@ impl Drop for DaemonHandle {
         }
         // Attached, or Owned-after-leak: do nothing. The daemon keeps
         // running so other UIs can still use it, or this same UI can
-        // `tau run -a` back in later.
+        // `tau -a` back in later.
     }
 }
 
@@ -282,7 +282,7 @@ impl Drop for DaemonHandle {
 ///
 /// The fresh-spawn path passes `session_id` to the daemon via the
 /// `TAU_SESSION_ID` env var, so its eager-init targets the right session.
-/// Resolves the session id for one `tau run` invocation.
+/// Resolves the session id for one `tau` invocation.
 ///
 /// - `None` → mint `<basename(cwd)>-<rand6>`.
 /// - `Some("")` (bare `-r`) → resume the most recent session whose
@@ -443,7 +443,7 @@ fn start_daemon(
         .env("TAU_BUILD", build_revision())
         .envs(build_last_modified().map(|date| ("TAU_LAST_MODIFIED", date)))
         // Default-enable harness startup debug in the child process so
-        // `tau run` captures timing without requiring an env var. Users
+        // `tau` captures timing without requiring an env var. Users
         // can still override/filter with `TAU_LOG`.
         .env(
             "TAU_LOG",
@@ -3200,24 +3200,24 @@ pub fn main_with_args() -> std::process::ExitCode {
     use clap::Parser;
 
     fn run() -> Result<(), CliError> {
-        let parsed = cli::Cli::parse();
-        if parsed.version {
+        let cli::Cli {
+            version,
+            run,
+            command,
+        } = cli::Cli::parse();
+        if version {
             println!("{}", version_label());
             return Ok(());
         }
 
-        let command = parsed.command.unwrap_or(cli::Command::Run {
-            resume: None,
-            config: None,
-            attach: false,
-        });
+        let command = command.unwrap_or(cli::Command::Run(run));
 
         match command {
-            cli::Command::Run {
+            cli::Command::Run(cli::RunArgs {
                 resume,
                 config: _config,
                 attach,
-            } => {
+            }) => {
                 let (session_id, session_status) = if attach {
                     let cwd = std::env::current_dir()?;
                     let daemon_dir =

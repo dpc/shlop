@@ -71,7 +71,7 @@ You can edit `models.json5` to configure local models, and use `tau provider add
 
 By default, `tau` starts the harness daemon and the CLI UI.
 
-To explore other entry points, run `tau run -h`.
+To explore other entry points, run `tau -h`.
 
 
 ## Contributing & Contact

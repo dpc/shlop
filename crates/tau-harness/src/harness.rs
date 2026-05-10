@@ -1421,7 +1421,7 @@ impl Harness {
             }
             // `exit_on_disconnect`: once at least one UI has been
             // attached, exiting the moment the last one leaves lets
-            // `tau run` behave like a normal foreground command.
+            // `tau` behave like a normal foreground command.
             // Before any UI attaches we wait — otherwise a slightly
             // late first connect would race us into immediate exit.
             if exit_on_disconnect && ever_attached && self.client_writers.is_empty() {
@@ -1443,7 +1443,7 @@ impl Harness {
                     match origin {
                         Some(ConnectionOrigin::Socket) => {
                             // `/detach` → stay alive even after this
-                            // UI leaves; a later `tau run --attach`
+                            // UI leaves; a later `tau --attach`
                             // can pick up right here.
                             if matches!(frame.as_ref(), Frame::Event(Event::UiDetachRequest(_))) {
                                 exit_on_disconnect = false;

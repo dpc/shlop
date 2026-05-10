@@ -957,7 +957,7 @@ pub struct UiModelSelect {
 }
 
 /// The UI is detaching and wants the daemon to stay alive after it
-/// leaves, so a later `tau run --attach` can pick up the same
+/// leaves, so a later `tau --attach` can pick up the same
 /// session. The harness flips its `exit_on_disconnect` flag to
 /// `false` on receipt.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]

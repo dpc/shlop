@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use tau_harness::{default_session_id, default_state_dir};
 
 #[derive(Parser)]
@@ -14,39 +14,45 @@ pub struct Cli {
     #[arg(short = 'V', long = "version", global = true)]
     pub version: bool,
 
+    #[command(flatten)]
+    pub run: RunArgs,
+
     #[command(subcommand)]
     pub command: Option<Command>,
+}
+
+#[derive(Args)]
+pub struct RunArgs {
+    /// Resume an existing session.
+    ///
+    /// Bare `-r` resumes the most recent session whose `meta.json.cwd`
+    /// matches the current working directory. `-r <id>` resumes that
+    /// specific session id. Without `-r`, a fresh session id is minted
+    /// (`<basename(cwd)>-<rand6>`).
+    #[arg(short = 'r', long = "resume", num_args = 0..=1, default_missing_value = "")]
+    pub resume: Option<String>,
+
+    /// Path to extension configuration file
+    #[arg(long)]
+    pub config: Option<PathBuf>,
+
+    /// Attach to an existing harness daemon for this project instead of
+    /// spawning a new one. Errors if no daemon is running.
+    #[arg(short = 'a', long)]
+    pub attach: bool,
 }
 
 #[derive(Subcommand)]
 pub enum Command {
     /// Run an interactive agent session.
     ///
-    /// By default, `tau run` spawns a new harness daemon and attaches
-    /// to it for the duration of the session. Pass `--attach` (or
-    /// `-a`) to connect to an already-running daemon for the current
-    /// project instead — useful for a second UI, or for reconnecting
-    /// after `/detach`.
-    Run {
-        /// Resume an existing session.
-        ///
-        /// Bare `-r` resumes the most recent session whose `meta.json.cwd`
-        /// matches the current working directory. `-r <id>` resumes that
-        /// specific session id. Without `-r`, a fresh session id is minted
-        /// (`<basename(cwd)>-<rand6>`).
-        #[arg(short = 'r', long = "resume", num_args = 0..=1, default_missing_value = "")]
-        resume: Option<String>,
-
-        /// Path to extension configuration file
-        #[arg(long)]
-        config: Option<PathBuf>,
-
-        /// Attach to an existing harness daemon for this project
-        /// instead of spawning a new one. Errors if no daemon is
-        /// running.
-        #[arg(short = 'a', long)]
-        attach: bool,
-    },
+    /// By default, `tau` spawns a new harness daemon and attaches to it
+    /// for the duration of the session. Pass `--attach` (or `-a`) to
+    /// connect to an already-running daemon for the current project
+    /// instead — useful for a second UI, or for reconnecting after
+    /// `/detach`.
+    #[command(hide = true)]
+    Run(RunArgs),
 
     /// List all sessions
     SessionList {
