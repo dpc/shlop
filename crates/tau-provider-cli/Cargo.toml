@@ -17,12 +17,7 @@ workspace = true
 [dependencies]
 comfy-table.workspace = true
 dialoguer.workspace = true
-json5.workspace = true
-rand.workspace = true
 serde_json.workspace = true
 tau-cli-picker.workspace = true
 tau-config.workspace = true
 tau-provider.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true

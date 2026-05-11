@@ -370,29 +370,37 @@ pub struct ModelRegistry {
 }
 
 /// One LLM provider configuration.
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ProviderConfig {
     /// Base URL for the API endpoint.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
     /// API protocol: "anthropic", "openai-completions", etc.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub api: Option<String>,
     /// Authentication method: "api-key" (default when `apiKey` is set),
     /// "openai-codex", "github-copilot", or "none". Kept as a raw
     /// `Option<String>` so that the typed view from
     /// [`ProviderConfig::auth_type`] can localize unknown values to the
     /// offending provider entry rather than failing whole-file load.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub auth: Option<String>,
     /// API key or environment variable name. Prefix with `!` for
     /// shell command execution (Pi convention).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
     /// Extra HTTP headers (key → value or env var name).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub headers: Option<HashMap<String, String>>,
     /// Optional provider-side prompt cache retention policy.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_cache_retention: Option<PromptCacheRetention>,
     /// Compatibility flags for non-standard providers.
+    #[serde(skip_serializing_if = "ProviderCompat::is_default")]
     pub compat: ProviderCompat,
     /// Models available from this provider.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<ModelConfig>,
 }
 
@@ -455,7 +463,7 @@ impl ProviderConfig {
 }
 
 /// Compatibility flags for providers that don't support all features.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ProviderCompat {
     pub supports_developer_role: bool,
@@ -487,8 +495,14 @@ impl Default for ProviderCompat {
     }
 }
 
+impl ProviderCompat {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
 /// Provider-side prompt cache retention policy.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub enum PromptCacheRetention {
     #[serde(rename = "in_memory")]
     InMemory,
@@ -507,16 +521,19 @@ impl PromptCacheRetention {
 }
 
 /// One model available from a provider.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelConfig {
     /// Model identifier (e.g. "claude-sonnet-4-20250514").
     pub id: String,
     /// Optional display name.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Max output tokens override.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u64>,
     /// Total context window size, in tokens.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u64>,
 }
 
@@ -687,6 +704,97 @@ fn load_json5_layered<T: for<'de> Deserialize<'de> + Default>(
 
     let config = builder.build()?;
     config.try_deserialize().map_err(SettingsError::from)
+}
+
+// ---------------------------------------------------------------------------
+// Typed writes against `models.json5`
+// ---------------------------------------------------------------------------
+
+/// Add or update a provider entry in `~/.config/tau/models.json5`.
+///
+/// Reads the existing file (preserving unknown top-level keys and other
+/// provider entries), inserts or replaces `providers[name]` with the
+/// serialized `provider`, and writes atomically. Comments and trailing
+/// commas in the source file are NOT preserved across the round-trip;
+/// the caller is responsible for warning the user.
+///
+/// Returns the path of the file that was written.
+pub fn add_provider(name: &str, provider: &ProviderConfig) -> std::io::Result<PathBuf> {
+    add_provider_in(&TauDirs::default(), name, provider)
+}
+
+/// Like [`add_provider`] but writes against an explicit directory layout.
+pub fn add_provider_in(
+    dirs: &TauDirs,
+    name: &str,
+    provider: &ProviderConfig,
+) -> std::io::Result<PathBuf> {
+    let dir = dirs.config_dir.as_ref().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no config directory available",
+        )
+    })?;
+    let path = dir.join("models.json5");
+    let mut root = read_models_root(&path)?;
+    let entry = serde_json::to_value(provider).map_err(invalid_data)?;
+
+    root.as_object_mut()
+        .ok_or_else(|| invalid_data("models.json5 root is not an object"))?
+        .entry("providers")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| invalid_data("providers is not an object"))?
+        .insert(name.to_owned(), entry);
+
+    let json = serde_json::to_string_pretty(&root).map_err(invalid_data)?;
+    crate::atomic::atomic_write_following_symlink(&path, json.as_bytes(), None)?;
+    Ok(path)
+}
+
+/// Remove a provider entry from `~/.config/tau/models.json5`.
+///
+/// Returns `Ok(true)` if the provider was present and removed, `Ok(false)`
+/// if the file or the named entry does not exist.
+pub fn remove_provider(name: &str) -> std::io::Result<bool> {
+    remove_provider_in(&TauDirs::default(), name)
+}
+
+/// Like [`remove_provider`] but operates against an explicit directory layout.
+pub fn remove_provider_in(dirs: &TauDirs, name: &str) -> std::io::Result<bool> {
+    let dir = dirs.config_dir.as_ref().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no config directory available",
+        )
+    })?;
+    let path = dir.join("models.json5");
+    if !path.exists() {
+        return Ok(false);
+    }
+    let mut root = read_models_root(&path)?;
+    let removed = root
+        .as_object_mut()
+        .and_then(|o| o.get_mut("providers"))
+        .and_then(|p| p.as_object_mut())
+        .is_some_and(|providers| providers.remove(name).is_some());
+    if removed {
+        let json = serde_json::to_string_pretty(&root).map_err(invalid_data)?;
+        crate::atomic::atomic_write_following_symlink(&path, json.as_bytes(), None)?;
+    }
+    Ok(removed)
+}
+
+fn read_models_root(path: &Path) -> std::io::Result<serde_json::Value> {
+    if !path.exists() {
+        return Ok(serde_json::json!({ "providers": {} }));
+    }
+    let text = std::fs::read_to_string(path)?;
+    json5::from_str(&text).map_err(invalid_data)
+}
+
+fn invalid_data<E: std::fmt::Display>(error: E) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
 }
 
 #[cfg(test)]

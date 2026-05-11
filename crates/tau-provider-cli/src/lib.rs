@@ -1,12 +1,11 @@
 //! CLI entrypoint for `tau provider` subcommands.
 
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use dialoguer::{Confirm, Input};
 use tau_cli_picker::{PickerItem, pick};
-use tau_config::settings::AuthType;
-use tau_provider::atomic::atomic_write_following_symlink;
+use tau_config::settings::{AuthType, ModelConfig, ProviderConfig};
 use tau_provider::oauth;
 use tau_provider::storage::{self, Credentials, ProviderKind};
 
@@ -164,26 +163,9 @@ fn cmd_remove(name_arg: Option<&str>) -> Result<(), Box<dyn std::error::Error>> 
         removed_anything = true;
     }
 
-    // Remove from models.json5.
-    if let Some(path) = models_json5_path() {
-        if path.exists() {
-            let text = std::fs::read_to_string(&path)?;
-            let mut root: serde_json::Value = json5::from_str(&text)?;
-
-            let had_it = root
-                .as_object_mut()
-                .and_then(|o| o.get_mut("providers"))
-                .and_then(|p| p.as_object_mut())
-                .map(|providers| providers.remove(&name).is_some())
-                .unwrap_or(false);
-
-            if had_it {
-                let json = serde_json::to_string_pretty(&root)?;
-                atomic_write_following_symlink(&path, json.as_bytes(), None)?;
-                eprintln!("Removed '{name}' from models.json5.");
-                removed_anything = true;
-            }
-        }
+    if tau_config::settings::remove_provider(&name)? {
+        eprintln!("Removed '{name}' from models.json5.");
+        removed_anything = true;
     }
 
     if !removed_anything {
@@ -432,55 +414,66 @@ fn run_github_copilot_login(
 // models.json5 update
 // ---------------------------------------------------------------------------
 
-/// Build a `serde_json::Value` for the new provider entry.
-fn build_provider_entry(kind: &ProviderKind) -> serde_json::Value {
-    match kind {
-        ProviderKind::Ollama => serde_json::json!({
-            "baseUrl": "http://localhost:11434/v1",
-            "auth": "none",
-            "api": "openai-completions",
-            "compat": {
-                "supportsLlamaCppCache": true,
-            },
-            "models": [{ "id": "llama3:70b", "contextWindow": 8192 }],
-        }),
-        ProviderKind::Openai => serde_json::json!({
-            "auth": "api-key",
-            "api": "openai-chat",
-            "models": [
-                { "id": "gpt-5.5", "contextWindow": 200000 },
-                { "id": "gpt-5.5-mini", "contextWindow": 200000 },
-                { "id": "o3-mini", "contextWindow": 200000 },
-            ],
-        }),
-        ProviderKind::OpenaiCodex => serde_json::json!({
-            "auth": "openai-codex",
-            "api": "openai-chat",
-            "models": [
-                { "id": "gpt-5.5", "contextWindow": 200000 },
-                { "id": "gpt-5.5-mini", "contextWindow": 200000 },
-                { "id": "o3-mini", "contextWindow": 200000 },
-            ],
-        }),
-        ProviderKind::Anthropic => serde_json::json!({
-            "baseUrl": "https://api.anthropic.com/v1",
-            "auth": "api-key",
-            "api": "anthropic",
-            "models": [
-                { "id": "claude-opus-4-20250514", "contextWindow": 200000 },
-                { "id": "claude-sonnet-4-20250514", "contextWindow": 200000 },
-            ],
-        }),
-        ProviderKind::GithubCopilot => serde_json::json!({
-            "auth": "github-copilot",
-            "api": "openai-chat",
-            "models": [
-                { "id": "claude-sonnet-4.6", "contextWindow": 200000 },
-                { "id": "gpt-5.5", "contextWindow": 200000 },
-                { "id": "gemini-3-pro", "contextWindow": 1000000 },
-            ],
-        }),
+/// Build a typed [`ProviderConfig`] with sensible defaults for the chosen
+/// [`ProviderKind`]. The user is expected to edit the result afterwards;
+/// the entries here are only starting points.
+fn build_provider_entry(kind: &ProviderKind) -> ProviderConfig {
+    fn model(id: &str, context_window: u64) -> ModelConfig {
+        ModelConfig {
+            id: id.to_owned(),
+            name: None,
+            max_output_tokens: None,
+            context_window: Some(context_window),
+        }
     }
+
+    let mut config = ProviderConfig::default();
+    match kind {
+        ProviderKind::Ollama => {
+            config.base_url = Some("http://localhost:11434/v1".to_owned());
+            config.auth = Some(AuthType::None.as_str().to_owned());
+            config.api = Some("openai-completions".to_owned());
+            config.compat.supports_llama_cpp_cache = true;
+            config.models = vec![model("llama3:70b", 8192)];
+        }
+        ProviderKind::Openai => {
+            config.auth = Some(AuthType::ApiKey.as_str().to_owned());
+            config.api = Some("openai-chat".to_owned());
+            config.models = vec![
+                model("gpt-5.5", 200_000),
+                model("gpt-5.5-mini", 200_000),
+                model("o3-mini", 200_000),
+            ];
+        }
+        ProviderKind::OpenaiCodex => {
+            config.auth = Some(AuthType::OpenaiCodex.as_str().to_owned());
+            config.api = Some("openai-chat".to_owned());
+            config.models = vec![
+                model("gpt-5.5", 200_000),
+                model("gpt-5.5-mini", 200_000),
+                model("o3-mini", 200_000),
+            ];
+        }
+        ProviderKind::Anthropic => {
+            config.base_url = Some("https://api.anthropic.com/v1".to_owned());
+            config.auth = Some(AuthType::ApiKey.as_str().to_owned());
+            config.api = Some("anthropic".to_owned());
+            config.models = vec![
+                model("claude-opus-4-20250514", 200_000),
+                model("claude-sonnet-4-20250514", 200_000),
+            ];
+        }
+        ProviderKind::GithubCopilot => {
+            config.auth = Some(AuthType::GithubCopilot.as_str().to_owned());
+            config.api = Some("openai-chat".to_owned());
+            config.models = vec![
+                model("claude-sonnet-4.6", 200_000),
+                model("gpt-5.5", 200_000),
+                model("gemini-3-pro", 1_000_000),
+            ];
+        }
+    }
+    config
 }
 
 /// Path to `~/.config/tau/models.json5`.
@@ -492,7 +485,7 @@ fn models_json5_path() -> Option<PathBuf> {
 /// print just the new section for the user to paste manually.
 fn update_or_print_models_json5(
     name: &str,
-    entry: &serde_json::Value,
+    entry: &ProviderConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path = models_json5_path();
     let can_write = path
@@ -506,14 +499,17 @@ fn update_or_print_models_json5(
             .interact()?;
 
         if update {
-            let path = path.expect("checked above");
-            match write_provider_to_models_json5(&path, name, entry) {
-                Ok(()) => {
-                    eprintln!("Updated: {}", path.display());
+            match tau_config::settings::add_provider(name, entry) {
+                Ok(written_path) => {
+                    eprintln!("Updated: {}", written_path.display());
                     return Ok(());
                 }
                 Err(e) => {
-                    eprintln!("Failed to update {}: {e}", path.display());
+                    let displayed = path
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "<unknown>".to_owned());
+                    eprintln!("Failed to update {displayed}: {e}");
                     eprintln!("Falling back to printing the entry instead.");
                 }
             }
@@ -525,46 +521,10 @@ fn update_or_print_models_json5(
 }
 
 /// Print the provider entry for the user to paste into models.json5.
-fn print_provider_entry(name: &str, entry: &serde_json::Value) {
+fn print_provider_entry(name: &str, entry: &ProviderConfig) {
     let inner = serde_json::to_string_pretty(entry).unwrap_or_default();
     eprintln!("\n--- Add this inside \"providers\" in ~/.config/tau/models.json5 ---\n");
     eprintln!("\"{name}\": {inner}");
-}
-
-/// Read existing models.json5, insert the provider, and atomically
-/// replace the file via write-new + rename.
-fn write_provider_to_models_json5(
-    path: &Path,
-    name: &str,
-    entry: &serde_json::Value,
-) -> Result<(), Box<dyn std::error::Error>> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let mut root: serde_json::Value = if path.exists() {
-        let text = std::fs::read_to_string(path)?;
-        json5::from_str(&text)?
-    } else {
-        serde_json::json!({ "providers": {} })
-    };
-
-    let providers = root
-        .as_object_mut()
-        .ok_or("models.json5 root is not an object")?
-        .entry("providers")
-        .or_insert_with(|| serde_json::json!({}));
-
-    providers
-        .as_object_mut()
-        .ok_or("providers is not an object")?
-        .insert(name.to_string(), entry.clone());
-
-    let json = serde_json::to_string_pretty(&root)?;
-
-    atomic_write_following_symlink(path, json.as_bytes(), None)?;
-
-    Ok(())
 }
 
 #[cfg(test)]

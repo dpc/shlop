@@ -96,3 +96,59 @@ fn symlink_target_or_path(path: &Path) -> io::Result<PathBuf> {
         Ok(target)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn replaces_symlink_target_and_preserves_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let target = temp_dir.path().join("target.json5");
+        let link = temp_dir.path().join("models.json5");
+        std::fs::write(&target, b"{}").expect("write target");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+        std::fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).expect("set perms");
+
+        atomic_write_following_symlink(&link, b"{\"providers\":{}}", None).expect("atomic write");
+
+        assert!(
+            fs::symlink_metadata(&link)
+                .expect("symlink metadata")
+                .file_type()
+                .is_symlink(),
+            "the symlink itself must not be replaced"
+        );
+        let body = std::fs::read_to_string(&target).expect("read");
+        assert!(body.contains("providers"));
+        assert_eq!(
+            fs::metadata(&target)
+                .expect("target metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o640,
+            "existing permissions on the target file are preserved"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn applies_default_permissions_when_file_is_new() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let path = temp_dir.path().join("auth.json");
+
+        atomic_write_following_symlink(&path, b"{}", Some(fs::Permissions::from_mode(0o600)))
+            .expect("atomic write");
+
+        assert_eq!(
+            fs::metadata(&path).expect("metadata").permissions().mode() & 0o777,
+            0o600,
+        );
+    }
+}

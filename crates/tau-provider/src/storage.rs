@@ -5,8 +5,7 @@ use std::path::PathBuf;
 use std::{fs, io};
 
 use serde::{Deserialize, Serialize};
-
-use crate::atomic::atomic_write_following_symlink;
+use tau_config::atomic::atomic_write_following_symlink;
 
 /// Returns the auth state directory.
 ///

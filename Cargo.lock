@@ -1544,6 +1544,8 @@ version = "0.1.0"
 dependencies = [
  "config",
  "dirs",
+ "json5",
+ "rand",
  "serde",
  "serde_json",
  "tau-proto",
@@ -1692,13 +1694,10 @@ version = "0.1.0"
 dependencies = [
  "comfy-table",
  "dialoguer",
- "json5",
- "rand",
  "serde_json",
  "tau-cli-picker",
  "tau-config",
  "tau-provider",
- "tempfile",
 ]
 
 [[package]]

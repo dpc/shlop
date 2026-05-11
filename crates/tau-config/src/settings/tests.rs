@@ -321,3 +321,96 @@ fn sample_configs_deserialize() {
         "sample models should contain 'local' provider"
     );
 }
+
+#[test]
+fn add_provider_in_writes_typed_entry() {
+    let tmp = TempDir::new().expect("tempdir");
+    let dirs = TauDirs {
+        config_dir: Some(tmp.path().to_path_buf()),
+        state_dir: None,
+    };
+
+    let mut provider = ProviderConfig {
+        api: Some("openai-chat".to_owned()),
+        auth: Some("api-key".to_owned()),
+        ..Default::default()
+    };
+    provider.models.push(ModelConfig {
+        id: "gpt-x".to_owned(),
+        name: None,
+        max_output_tokens: None,
+        context_window: Some(123_456),
+    });
+
+    let path = add_provider_in(&dirs, "openai", &provider).expect("add provider");
+    assert!(path.ends_with("models.json5"));
+
+    let registry = load_models_in(&dirs).expect("reload");
+    let written = registry
+        .providers
+        .get("openai")
+        .expect("openai entry present");
+    assert_eq!(written.auth.as_deref(), Some("api-key"));
+    assert_eq!(written.api.as_deref(), Some("openai-chat"));
+    assert_eq!(written.models.len(), 1);
+    assert_eq!(written.models[0].id, "gpt-x");
+    assert_eq!(written.models[0].context_window, Some(123_456));
+}
+
+#[test]
+fn add_provider_in_preserves_other_entries_and_unknown_fields() {
+    let tmp = TempDir::new().expect("tempdir");
+    let path = tmp.path().join("models.json5");
+    std::fs::write(
+        &path,
+        r#"{
+            // user comment that WILL be lost (documented behavior)
+            "extraTopLevelField": 42,
+            "providers": {
+                "keep": {
+                    "auth": "none",
+                    "api": "openai-completions",
+                    "models": [],
+                    "extraProviderField": "preserved"
+                }
+            }
+        }"#,
+    )
+    .expect("seed file");
+
+    let dirs = TauDirs {
+        config_dir: Some(tmp.path().to_path_buf()),
+        state_dir: None,
+    };
+    let new_provider = ProviderConfig {
+        auth: Some("api-key".to_owned()),
+        api: Some("openai-chat".to_owned()),
+        ..Default::default()
+    };
+    add_provider_in(&dirs, "added", &new_provider).expect("add");
+
+    let text = std::fs::read_to_string(&path).expect("read");
+    let root: serde_json::Value = json5::from_str(&text).expect("parse");
+
+    assert_eq!(root["extraTopLevelField"], 42);
+    assert_eq!(root["providers"]["keep"]["extraProviderField"], "preserved");
+    assert_eq!(root["providers"]["added"]["auth"], "api-key");
+}
+
+#[test]
+fn remove_provider_in_returns_false_when_absent() {
+    let tmp = TempDir::new().expect("tempdir");
+    let dirs = TauDirs {
+        config_dir: Some(tmp.path().to_path_buf()),
+        state_dir: None,
+    };
+    assert!(!remove_provider_in(&dirs, "missing").expect("ok"));
+
+    let provider = ProviderConfig {
+        auth: Some("none".to_owned()),
+        ..Default::default()
+    };
+    add_provider_in(&dirs, "p1", &provider).expect("add");
+    assert!(remove_provider_in(&dirs, "p1").expect("remove"));
+    assert!(!remove_provider_in(&dirs, "p1").expect("removed twice"));
+}
