@@ -1,13 +1,23 @@
 //! CLI entrypoint for `tau provider` subcommands.
 
-use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use dialoguer::{Confirm, Input};
 use tau_cli_picker::{PickerItem, pick};
+use tau_provider::atomic::atomic_write_following_symlink;
 use tau_provider::oauth;
 use tau_provider::storage::{self, Credentials, ProviderKind};
+
+const HELP_TEXT: &str = "\
+Usage: tau provider <subcommand>
+
+Subcommands:
+  add                 Add a new provider (interactive wizard)
+  remove [name]       Remove a provider from models.json5 and auth.json
+  list                List configured providers
+  login [name]        Log in / refresh OAuth token for a provider
+  list-models [name]  List models available from a provider";
 
 /// Run the provider CLI with the given subcommand arguments.
 pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -19,25 +29,14 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         "list" => cmd_list()?,
         "login" => cmd_login(args.get(1).map(String::as_str))?,
         "list-models" => cmd_list_models(args.get(1).map(String::as_str))?,
-        "help" | "--help" | "-h" => print_help(),
+        "help" | "--help" | "-h" => println!("{HELP_TEXT}"),
         other => {
             eprintln!("unknown subcommand: {other}");
-            print_help();
+            eprintln!("{HELP_TEXT}");
             return Err(format!("unknown subcommand: {other}").into());
         }
     }
     Ok(())
-}
-
-fn print_help() {
-    eprintln!("Usage: tau provider <subcommand>");
-    eprintln!();
-    eprintln!("Subcommands:");
-    eprintln!("  add                 Add a new provider (interactive wizard)");
-    eprintln!("  remove [name]       Remove a provider from models.json5 and auth.json");
-    eprintln!("  list                List configured providers");
-    eprintln!("  login [name]        Log in / refresh OAuth token for a provider");
-    eprintln!("  list-models [name]  List models available from a provider");
 }
 
 // ---------------------------------------------------------------------------
@@ -179,7 +178,7 @@ fn cmd_remove(name_arg: Option<&str>) -> Result<(), Box<dyn std::error::Error>> 
 
             if had_it {
                 let json = serde_json::to_string_pretty(&root)?;
-                atomic_write_following_symlink(&path, &json)?;
+                atomic_write_following_symlink(&path, json.as_bytes(), None)?;
                 eprintln!("Removed '{name}' from models.json5.");
                 removed_anything = true;
             }
@@ -236,10 +235,12 @@ fn cmd_list() -> Result<(), Box<dyn std::error::Error>> {
 
         let auth_status = match (auth_type, auth_info) {
             (_, Some(Credentials::Oauth { expires_at_ms, .. })) => {
-                let now_ms = std::time::SystemTime::now()
+                let now_ms: u64 = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
-                    .as_millis() as u64;
+                    .as_millis()
+                    .try_into()
+                    .unwrap_or(u64::MAX);
                 if now_ms < *expires_at_ms {
                     "logged in".to_string()
                 } else {
@@ -427,7 +428,8 @@ fn run_github_copilot_login(
     eprintln!("Enter code: {}\n", device.user_code);
     eprintln!("Waiting for authorization...");
 
-    let github_token = oauth::github_device_code_poll(&device.device_code, device.interval)?;
+    let github_token =
+        oauth::github_device_code_poll(&device.device_code, device.interval, device.expires_in)?;
 
     eprintln!("GitHub authorized. Fetching Copilot token...");
     let tokens = oauth::github_copilot_token(&github_token)?;
@@ -576,90 +578,9 @@ fn write_provider_to_models_json5(
 
     let json = serde_json::to_string_pretty(&root)?;
 
-    atomic_write_following_symlink(path, &json)?;
+    atomic_write_following_symlink(path, json.as_bytes(), None)?;
 
     Ok(())
-}
-
-/// Atomically write `contents` by creating a randomized sibling temporary file
-/// and renaming it over the destination. If `path` is a symlink, replace the
-/// symlink target instead of unlinking the symlink itself.
-fn atomic_write_following_symlink(path: &Path, contents: &str) -> std::io::Result<()> {
-    let destination = symlink_target_or_path(path)?;
-
-    if let Some(parent) = destination.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let existing_permissions = std::fs::metadata(&destination)
-        .ok()
-        .map(|metadata| metadata.permissions());
-
-    let mut temp_path = destination.clone();
-    loop {
-        let suffix: u64 = rand::random();
-        let file_name = destination
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("models.json5");
-        temp_path.set_file_name(format!(".{file_name}.{suffix:016x}.tmp"));
-
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp_path)
-        {
-            Ok(mut file) => {
-                if let Some(permissions) = existing_permissions.clone() {
-                    file.set_permissions(permissions)?;
-                }
-                file.write_all(contents.as_bytes())?;
-                file.sync_all()?;
-                break;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error),
-        }
-    }
-
-    if let Err(error) = std::fs::rename(&temp_path, &destination) {
-        let _ = std::fs::remove_file(&temp_path);
-        return Err(error);
-    }
-
-    sync_parent_dir(&destination)?;
-
-    Ok(())
-}
-
-fn sync_parent_dir(path: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    if let Some(parent) = path.parent() {
-        File::open(parent)?.sync_all()?;
-    }
-
-    Ok(())
-}
-
-fn symlink_target_or_path(path: &Path) -> std::io::Result<PathBuf> {
-    let metadata = match std::fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(path.to_path_buf()),
-        Err(error) => return Err(error),
-    };
-
-    if !metadata.file_type().is_symlink() {
-        return Ok(path.to_path_buf());
-    }
-
-    let target = std::fs::read_link(path)?;
-    if target.is_absolute() {
-        Ok(target)
-    } else if let Some(parent) = path.parent() {
-        Ok(parent.join(target))
-    } else {
-        Ok(target)
-    }
 }
 
 #[cfg(test)]

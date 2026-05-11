@@ -61,7 +61,14 @@ pub fn resolve_with_auth_store(
         "api-key" | "none" => {
             chat_completions_backend(provider_name, provider, auth_store, model_id)
         }
-        _ => chat_completions_backend(provider_name, provider, auth_store, model_id),
+        other => {
+            tracing::warn!(
+                provider = provider_name,
+                auth = other,
+                "unknown `auth` value in models.json5; not resolving"
+            );
+            None
+        }
     }
 }
 

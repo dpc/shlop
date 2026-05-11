@@ -6,6 +6,8 @@ use std::{fs, io};
 
 use serde::{Deserialize, Serialize};
 
+use crate::atomic::atomic_write_following_symlink;
+
 /// Returns the auth state directory.
 ///
 /// Prefers `XDG_STATE_HOME/tau` (`~/.local/state/tau` on Linux).
@@ -155,14 +157,14 @@ pub fn save(store: &AuthStore) -> io::Result<()> {
     }
 
     let json = serde_json::to_string_pretty(store)?;
-    fs::write(&path, &json)?;
 
-    // Set file to 0600.
     #[cfg(unix)]
-    {
+    let default_permissions = {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-    }
+        Some(fs::Permissions::from_mode(0o600))
+    };
+    #[cfg(not(unix))]
+    let default_permissions = None;
 
-    Ok(())
+    atomic_write_following_symlink(&path, json.as_bytes(), default_permissions)
 }

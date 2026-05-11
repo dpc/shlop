@@ -8,35 +8,24 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rand::RngCore;
+use rand::seq::SliceRandom;
 use sha2::{Digest, Sha256};
 use url::Url;
 
-/// A ureq::Agent configured to respect HTTPS_PROXY / HTTP_PROXY / NO_PROXY
-/// environment variables (both upper and lowercase).
+/// A ureq::Agent configured to respect HTTPS_PROXY / HTTP_PROXY environment
+/// variables (both upper and lowercase). NO_PROXY / no_proxy are honored
+/// internally by ureq's agent.
 pub fn proxy_agent() -> &'static ureq::Agent {
     static AGENT: LazyLock<ureq::Agent> = LazyLock::new(|| {
         let mut builder = ureq::AgentBuilder::new();
 
-        // Check all common env-var spellings for proxy settings.
-        for key in [
-            "HTTPS_PROXY",
-            "https_proxy",
-            "HTTP_PROXY",
-            "http_proxy",
-            "NO_PROXY",
-            "no_proxy",
-        ] {
+        for key in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
             if let Ok(val) = std::env::var(key) {
                 if val.is_empty() {
                     continue;
                 }
                 if let Ok(proxy) = ureq::Proxy::new(&val) {
-                    if key.starts_with('N') || key.starts_with('n') {
-                        // NO_PROXY — handled internally by ureq's Agent;
-                        // we skip adding it to avoid confusion.
-                    } else {
-                        builder = builder.proxy(proxy);
-                    }
+                    builder = builder.proxy(proxy);
                 }
             }
         }
@@ -53,10 +42,13 @@ pub fn proxy_agent() -> &'static ureq::Agent {
 /// Generate a random code verifier (64 unreserved characters).
 fn generate_code_verifier() -> String {
     const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
-    let mut buf = [0u8; 64];
-    rand::thread_rng().fill_bytes(&mut buf);
-    buf.iter()
-        .map(|b| CHARSET[(*b as usize) % CHARSET.len()] as char)
+    let mut rng = rand::thread_rng();
+    (0..64)
+        .map(|_| {
+            // CHARSET is non-empty (66 chars); `choose` only returns None
+            // for empty slices.
+            *CHARSET.choose(&mut rng).expect("non-empty CHARSET") as char
+        })
         .collect()
 }
 
@@ -114,13 +106,19 @@ pub fn openai_codex_auth_url() -> (String, String, String) {
 /// Parse the redirect URL pasted by the user. Extracts `code` and
 /// `state` query parameters.
 pub fn parse_redirect_url(input: &str) -> Result<(String, String), String> {
-    // User might paste the full URL or just the query part.
-    let url = if input.starts_with("http") {
-        Url::parse(input.trim()).map_err(|e| format!("invalid URL: {e}"))?
-    } else {
-        // Try prepending a dummy base.
-        Url::parse(&format!("http://localhost{}", input.trim()))
+    // User might paste the full URL, just the path+query, or just the
+    // query string. Require an explicit `?`/`/` prefix on the latter
+    // forms so a stray `code=x&state=y` doesn't silently parse against
+    // a dummy host (yielding a URL like `http://localhostcode=x...`
+    // with neither parameter set).
+    let trimmed = input.trim();
+    let url = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        Url::parse(trimmed).map_err(|e| format!("invalid URL: {e}"))?
+    } else if trimmed.starts_with('/') || trimmed.starts_with('?') {
+        Url::parse(&format!("http://localhost{trimmed}"))
             .map_err(|e| format!("invalid URL fragment: {e}"))?
+    } else {
+        return Err("expected full URL, or path/query string starting with '/' or '?'".to_string());
     };
 
     let params: HashMap<_, _> = url.query_pairs().collect();
@@ -172,11 +170,13 @@ fn parse_openai_token_response(json: &serde_json::Value) -> Result<OAuthTokens, 
         .as_u64()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing expires_in"))?;
 
-    let now_ms = SystemTime::now()
+    let now_ms: u64 = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::ZERO)
-        .as_millis() as u64;
-    let expires_at_ms = now_ms + expires_in * 1000;
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX);
+    let expires_at_ms = now_ms.saturating_add(expires_in.saturating_mul(1000));
 
     // Try to extract account_id from JWT claims.
     let account_id = extract_openai_account_id(&access_token);
@@ -224,6 +224,8 @@ pub struct DeviceCodeResponse {
     pub user_code: String,
     pub verification_uri: String,
     pub interval: u64,
+    /// Seconds from now until the device code expires.
+    pub expires_in: u64,
 }
 
 /// Start the GitHub device code flow.
@@ -232,22 +234,59 @@ pub fn github_device_code_start() -> Result<DeviceCodeResponse, io::Error> {
 
     let json = post_form_with_accept(GITHUB_DEVICE_CODE_URL, &body, "application/json")?;
 
+    if let Some(err) = json["error"].as_str() {
+        let desc = json["error_description"].as_str().unwrap_or("");
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("device code start failed: {err} {desc}")
+                .trim()
+                .to_string(),
+        ));
+    }
+
+    let device_code = json["device_code"]
+        .as_str()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing device_code"))?
+        .to_string();
+    let user_code = json["user_code"]
+        .as_str()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing user_code"))?
+        .to_string();
+    let verification_uri = json["verification_uri"]
+        .as_str()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing verification_uri"))?
+        .to_string();
+    let interval = json["interval"].as_u64().unwrap_or(5);
+    // RFC 8628 requires `expires_in` but the GitHub flow has historically
+    // returned ~15 minutes; fall back to that if the field is absent.
+    let expires_in = json["expires_in"].as_u64().unwrap_or(900);
+
     Ok(DeviceCodeResponse {
-        device_code: json["device_code"].as_str().unwrap_or_default().to_string(),
-        user_code: json["user_code"].as_str().unwrap_or_default().to_string(),
-        verification_uri: json["verification_uri"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string(),
-        interval: json["interval"].as_u64().unwrap_or(5),
+        device_code,
+        user_code,
+        verification_uri,
+        interval,
+        expires_in,
     })
 }
 
-/// Poll for device code flow completion. Blocks until success or timeout.
-pub fn github_device_code_poll(device_code: &str, interval: u64) -> Result<String, io::Error> {
+/// Poll for device code flow completion. Returns the access token on success,
+/// or an error if the user does not authorize within `expires_in` seconds.
+pub fn github_device_code_poll(
+    device_code: &str,
+    interval: u64,
+    expires_in: u64,
+) -> Result<String, io::Error> {
     let mut wait = Duration::from_secs(interval);
+    let deadline = std::time::Instant::now() + Duration::from_secs(expires_in);
 
     loop {
+        if std::time::Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "device code expired before authorization completed",
+            ));
+        }
         std::thread::sleep(wait);
 
         let body = format!(
