@@ -1,7 +1,7 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
-use tau_config::settings::{ModelRegistry, PromptCacheRetention, ProviderConfig};
+use tau_config::settings::{AuthType, ModelRegistry, PromptCacheRetention, ProviderConfig};
 
 use crate::storage::{self, Credentials, ProviderKind};
 
@@ -46,28 +46,23 @@ pub fn resolve_with_auth_store(
 ) -> Option<ResolvedBackend> {
     let (provider_name, model_id) = model.split_once('/')?;
     let provider = models.providers.get(provider_name)?;
-    let auth_type = provider
-        .auth
-        .as_deref()
-        .unwrap_or(if provider.api_key.is_some() {
-            "api-key"
-        } else {
-            "none"
-        });
-
-    match auth_type {
-        "openai-codex" => responses_backend(provider_name, provider, auth_store, model_id),
-        "github-copilot" => copilot_backend(provider_name, provider, auth_store, model_id),
-        "api-key" | "none" => {
-            chat_completions_backend(provider_name, provider, auth_store, model_id)
-        }
-        other => {
+    let auth_type = match provider.auth_type() {
+        Ok(t) => t,
+        Err(other) => {
             tracing::warn!(
                 provider = provider_name,
                 auth = other,
                 "unknown `auth` value in models.json5; not resolving"
             );
-            None
+            return None;
+        }
+    };
+
+    match auth_type {
+        AuthType::OpenaiCodex => responses_backend(provider_name, provider, auth_store, model_id),
+        AuthType::GithubCopilot => copilot_backend(provider_name, provider, auth_store, model_id),
+        AuthType::ApiKey | AuthType::None => {
+            chat_completions_backend(provider_name, provider, auth_store, model_id)
         }
     }
 }

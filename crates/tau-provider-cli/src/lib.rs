@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use dialoguer::{Confirm, Input};
 use tau_cli_picker::{PickerItem, pick};
+use tau_config::settings::AuthType;
 use tau_provider::atomic::atomic_write_following_symlink;
 use tau_provider::oauth;
 use tau_provider::storage::{self, Credentials, ProviderKind};
@@ -225,16 +226,12 @@ fn cmd_list() -> Result<(), Box<dyn std::error::Error>> {
         let model_info = models.providers.get(*name);
         let auth_info = store.providers.get(*name);
 
-        let auth_type = model_info.and_then(|p| p.auth.as_deref()).unwrap_or(
-            if model_info.is_some_and(|p| p.api_key.is_some()) {
-                "api-key"
-            } else {
-                "none"
-            },
-        );
+        // Resolved AuthType (Ok) or the raw unknown string (Err); used both
+        // to drive the OAuth-status branch and as the displayed value.
+        let auth_type = model_info.map(|p| p.auth_type());
 
-        let auth_status = match (auth_type, auth_info) {
-            (_, Some(Credentials::Oauth { expires_at_ms, .. })) => {
+        let auth_status = match auth_info {
+            Some(Credentials::Oauth { expires_at_ms, .. }) => {
                 let now_ms: u64 = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -247,11 +244,15 @@ fn cmd_list() -> Result<(), Box<dyn std::error::Error>> {
                     "expired".to_string()
                 }
             }
-            (a, _) if is_oauth_auth(Some(a)) => match auth_info {
+            _ if matches!(auth_type, Some(Ok(t)) if t.is_oauth()) => match auth_info {
                 Some(_) => "logged in".to_string(),
                 None => "not logged in".to_string(),
             },
-            (a, _) => a.to_string(),
+            _ => match auth_type {
+                Some(Ok(t)) => t.to_string(),
+                Some(Err(raw)) => format!("?{raw}"),
+                None => "-".to_string(),
+            },
         };
 
         let api = model_info.and_then(|p| p.api.as_deref()).unwrap_or("-");
@@ -273,12 +274,10 @@ fn cmd_login(name_arg: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     let models = tau_config::settings::load_models()?;
     let mut store = storage::load()?;
 
-    // Collect providers that use OAuth (determined by `auth` field in
-    // models.json5).
     let mut oauth_names: Vec<String> = models
         .providers
         .iter()
-        .filter(|(_, cfg)| is_oauth_auth(cfg.auth.as_deref()))
+        .filter(|(_, cfg)| cfg.auth_type().is_ok_and(|t| t.is_oauth()))
         .map(|(name, _)| name.clone())
         .collect();
     oauth_names.sort();
@@ -306,14 +305,15 @@ fn cmd_login(name_arg: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
         .get(&name)
         .ok_or_else(|| format!("provider '{name}' not found in models.json5"))?;
 
-    let auth = provider_cfg.auth.as_deref().unwrap_or("api-key");
-    let kind = auth_to_provider_kind(auth)?;
+    let auth_type = provider_cfg
+        .auth_type()
+        .map_err(|s| format!("unknown auth type for '{name}': {s}"))?;
 
-    let new_creds = match &kind {
-        ProviderKind::OpenaiCodex => run_openai_codex_login(&kind)?,
-        ProviderKind::GithubCopilot => run_github_copilot_login(&kind)?,
-        _ => {
-            eprintln!("Provider '{name}' (auth={auth}) does not use OAuth login.");
+    let new_creds = match auth_type {
+        AuthType::OpenaiCodex => run_openai_codex_login(&ProviderKind::OpenaiCodex)?,
+        AuthType::GithubCopilot => run_github_copilot_login(&ProviderKind::GithubCopilot)?,
+        AuthType::ApiKey | AuthType::None => {
+            eprintln!("Provider '{name}' (auth={auth_type}) does not use OAuth login.");
             return Ok(());
         }
     };
@@ -322,22 +322,6 @@ fn cmd_login(name_arg: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     storage::save(&store)?;
     eprintln!("Login refreshed for '{name}'.");
     Ok(())
-}
-
-/// Does this `auth` value represent an OAuth flow?
-fn is_oauth_auth(auth: Option<&str>) -> bool {
-    matches!(auth, Some("openai-codex" | "github-copilot"))
-}
-
-/// Map an `auth` string from models.json5 to a `ProviderKind`.
-fn auth_to_provider_kind(auth: &str) -> Result<ProviderKind, Box<dyn std::error::Error>> {
-    match auth {
-        "none" => Ok(ProviderKind::Ollama),
-        "api-key" => Ok(ProviderKind::Openai),
-        "openai-codex" => Ok(ProviderKind::OpenaiCodex),
-        "github-copilot" => Ok(ProviderKind::GithubCopilot),
-        other => Err(format!("unknown auth type: {other}").into()),
-    }
 }
 
 // ---------------------------------------------------------------------------

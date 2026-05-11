@@ -378,7 +378,10 @@ pub struct ProviderConfig {
     /// API protocol: "anthropic", "openai-completions", etc.
     pub api: Option<String>,
     /// Authentication method: "api-key" (default when `apiKey` is set),
-    /// "openai-codex", "github-copilot", or "none".
+    /// "openai-codex", "github-copilot", or "none". Kept as a raw
+    /// `Option<String>` so that the typed view from
+    /// [`ProviderConfig::auth_type`] can localize unknown values to the
+    /// offending provider entry rather than failing whole-file load.
     pub auth: Option<String>,
     /// API key or environment variable name. Prefix with `!` for
     /// shell command execution (Pi convention).
@@ -391,6 +394,64 @@ pub struct ProviderConfig {
     pub compat: ProviderCompat,
     /// Models available from this provider.
     pub models: Vec<ModelConfig>,
+}
+
+/// Authentication method for a [`ProviderConfig`]. Single source of truth
+/// for the `auth` taxonomy — exhaustive `match`es against this enum should
+/// replace string comparisons against the raw `auth` field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthType {
+    /// No authentication needed (local Ollama / llama.cpp).
+    None,
+    /// Direct API-key authentication.
+    ApiKey,
+    /// OpenAI Codex / ChatGPT subscription (auth-code + PKCE OAuth).
+    OpenaiCodex,
+    /// GitHub Copilot subscription (device-code OAuth).
+    GithubCopilot,
+}
+
+impl AuthType {
+    /// Wire-format string matching the `auth` field in `models.json5`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::ApiKey => "api-key",
+            Self::OpenaiCodex => "openai-codex",
+            Self::GithubCopilot => "github-copilot",
+        }
+    }
+
+    /// Returns true if this auth type requires an OAuth login flow.
+    pub fn is_oauth(&self) -> bool {
+        matches!(self, Self::OpenaiCodex | Self::GithubCopilot)
+    }
+}
+
+impl std::fmt::Display for AuthType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl ProviderConfig {
+    /// Resolve the typed [`AuthType`] for this provider.
+    ///
+    /// `auth` takes precedence; if absent, infers `ApiKey` when an
+    /// `apiKey` is configured and `None` otherwise. Unknown `auth`
+    /// strings are returned as `Err(s)` so the caller can surface
+    /// per-provider config errors without aborting the whole file.
+    pub fn auth_type(&self) -> Result<AuthType, &str> {
+        match self.auth.as_deref() {
+            None if self.api_key.is_some() => Ok(AuthType::ApiKey),
+            None => Ok(AuthType::None),
+            Some("none") => Ok(AuthType::None),
+            Some("api-key") => Ok(AuthType::ApiKey),
+            Some("openai-codex") => Ok(AuthType::OpenaiCodex),
+            Some("github-copilot") => Ok(AuthType::GithubCopilot),
+            Some(other) => Err(other),
+        }
+    }
 }
 
 /// Compatibility flags for providers that don't support all features.
