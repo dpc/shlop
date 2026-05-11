@@ -5,6 +5,7 @@
 
 use std::fmt::Write as _;
 use std::io::BufRead;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -80,20 +81,22 @@ impl OpenAiError {
     /// statuses other than 408/425/429 are treated as our bug or a
     /// deterministic request-level rejection — retrying just burns
     /// quota.
-    pub fn is_retryable(&self) -> bool {
+    pub fn retry_after(&self) -> Option<Duration> {
         match self {
             // Underlying ureq transport: connect failure, DNS, read
             // timeout, mid-stream socket close.
-            Self::Http(_) => true,
+            Self::Http(_) => Some(Duration::ZERO),
             // I/O reading the SSE response body.
-            Self::Io(_) => true,
+            Self::Io(_) => Some(Duration::ZERO),
             // Likely a harness bug (we mis-parsed the wire format),
             // or the provider returned something we can't decode.
             // Either way, retry won't help.
-            Self::Json(_) => false,
-            Self::NoChoices => false,
+            Self::Json(_) => None,
+            Self::NoChoices => None,
             Self::HttpStatus(code, body) => match *code {
-                408 | 425 | 429 | 500..=599 => true,
+                408 | 425 => Some(Duration::ZERO),
+                429 => usage_limit_retry_after(body),
+                500..=599 => Some(Duration::ZERO),
                 // Code 0 is synthesized by the Responses backend for
                 // SSE-level events: the body is prefixed with
                 // "stream error:" (mid-stream provider hiccup —
@@ -101,11 +104,28 @@ impl OpenAiError {
                 // "response failed:" (deterministic model error),
                 // or "response incomplete:" (request-level cap).
                 // Only the first class is worth retrying.
-                0 => body.starts_with("stream error:"),
-                _ => false,
+                0 if body.starts_with("stream error:") => Some(Duration::ZERO),
+                _ => None,
             },
         }
     }
+}
+
+fn usage_limit_retry_after(body: &str) -> Option<Duration> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let error = value.get("error")?;
+    if error.get("type")?.as_str()? != "usage_limit_reached" {
+        return None;
+    }
+    if let Some(seconds) = error
+        .get("resets_in_seconds")
+        .and_then(serde_json::Value::as_u64)
+    {
+        return Some(Duration::from_secs(seconds));
+    }
+    let resets_at = error.get("resets_at")?.as_u64()?;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+    Some(Duration::from_secs(resets_at.saturating_sub(now)))
 }
 
 /// Accumulated streaming state.

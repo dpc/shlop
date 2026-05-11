@@ -459,12 +459,13 @@ where
             Ok(state) => return Ok(state),
             Err(e) => e,
         };
-        if !error.is_retryable() {
-            return Err(error);
-        }
-        let Some(delay) = backoff.next() else {
+        let Some(retry_after) = error.retry_after() else {
             return Err(error);
         };
+        let Some(backoff_delay) = backoff.next() else {
+            return Err(error);
+        };
+        let delay = retry_after.max(backoff_delay);
         attempt += 1;
         tracing::warn!(
             target: LOG_TARGET,

@@ -128,3 +128,46 @@ fn stream_chunk_reads_llama_cpp_cache_stats() {
     assert_eq!(chunk.tokens_cached, Some(42));
     assert_eq!(chunk.tokens_evaluated, Some(100));
 }
+
+#[test]
+fn usage_limit_429_retries_after_reset_seconds() {
+    let error = OpenAiError::HttpStatus(
+        429,
+        serde_json::json!({
+            "error": {
+                "type": "usage_limit_reached",
+                "message": "The usage limit has been reached",
+                "resets_in_seconds": 4371
+            }
+        })
+        .to_string(),
+    );
+
+    assert_eq!(
+        error.retry_after(),
+        Some(std::time::Duration::from_secs(4371))
+    );
+}
+
+#[test]
+fn unknown_429_is_not_retryable() {
+    let error = OpenAiError::HttpStatus(
+        429,
+        serde_json::json!({
+            "error": {
+                "type": "rate_limit_exceeded",
+                "message": "slow down"
+            }
+        })
+        .to_string(),
+    );
+
+    assert_eq!(error.retry_after(), None);
+}
+
+#[test]
+fn server_error_uses_backoff_retry() {
+    let error = OpenAiError::HttpStatus(503, "overloaded".into());
+
+    assert_eq!(error.retry_after(), Some(std::time::Duration::ZERO));
+}
