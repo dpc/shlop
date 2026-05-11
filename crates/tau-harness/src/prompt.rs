@@ -273,11 +273,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn build_system_prompt_mentions_tau_version_and_build() {
+    fn build_system_prompt_includes_cwd() {
         let skills = std::collections::HashMap::new();
         let prompt = build_system_prompt(&skills, "/tmp/work");
-        assert!(prompt.contains("TAU_VERSION contains Tau's release version"));
-        assert!(prompt.contains("TAU_BUILD contains Tau's git revision"));
+        assert!(prompt.contains("expert coding assistant"));
+        assert!(prompt.contains("Current working directory: /tmp/work"));
     }
 
     /// Tool errors must surface their `details` payload to the LLM,
