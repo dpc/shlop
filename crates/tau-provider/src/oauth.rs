@@ -136,8 +136,15 @@ pub fn parse_redirect_url(input: &str) -> Result<(String, String), String> {
 
 /// Exchange authorization code for tokens (OpenAI Codex).
 pub fn openai_codex_exchange(code: &str, verifier: &str) -> Result<OAuthTokens, io::Error> {
+    // `code` and `verifier` must be form-encoded: the code is an opaque
+    // server-issued token that can legally contain `+`, `=`, `&`, etc.,
+    // and a raw `+` in a form body would be decoded as a space on the
+    // server, producing a spurious 400 from /oauth/token. (Our generated
+    // verifier only uses unreserved chars, but encoding is harmless.)
     let body = format!(
         "grant_type=authorization_code&code={code}&code_verifier={verifier}&redirect_uri={redirect}&client_id={client_id}",
+        code = urlencoding(code),
+        verifier = urlencoding(verifier),
         redirect = urlencoding(OPENAI_REDIRECT_URI),
         client_id = OPENAI_CLIENT_ID,
     );
@@ -150,6 +157,7 @@ pub fn openai_codex_exchange(code: &str, verifier: &str) -> Result<OAuthTokens, 
 pub fn openai_codex_refresh(refresh_token: &str) -> Result<OAuthTokens, io::Error> {
     let body = format!(
         "grant_type=refresh_token&refresh_token={refresh_token}&client_id={client_id}",
+        refresh_token = urlencoding(refresh_token),
         client_id = OPENAI_CLIENT_ID,
     );
 
