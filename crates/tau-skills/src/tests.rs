@@ -139,12 +139,105 @@ fn load_skill_name_mismatch_warning() {
 fn load_skill_invalid_name_chars() {
     let content = "---\nname: Bad_Name\ndescription: Invalid chars\n---\n";
     let path = Path::new("/skills/Bad_Name/SKILL.md");
-    let (_skill, diags) = load_skill_from_content(content, path);
+    let (skill, diags) = load_skill_from_content(content, path);
+    assert!(skill.is_none(), "invalid name should skip the skill");
     assert!(
         diags
             .iter()
-            .any(|d| d.message.contains("invalid characters"))
+            .any(|d| d.kind == DiagnosticKind::Skipped && d.message.contains("invalid characters"))
     );
+}
+
+#[test]
+fn load_skill_hyphen_edges_are_skipped() {
+    let content = "---\nname: -bad-\ndescription: bad\n---\n";
+    let path = Path::new("/skills/-bad-/SKILL.md");
+    let (skill, diags) = load_skill_from_content(content, path);
+    assert!(skill.is_none());
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.kind == DiagnosticKind::Skipped && d.message.contains("hyphen"))
+    );
+}
+
+#[test]
+fn load_skill_consecutive_hyphens_are_skipped() {
+    let content = "---\nname: a--b\ndescription: bad\n---\n";
+    let path = Path::new("/skills/a--b/SKILL.md");
+    let (skill, diags) = load_skill_from_content(content, path);
+    assert!(skill.is_none());
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.kind == DiagnosticKind::Skipped && d.message.contains("consecutive"))
+    );
+}
+
+#[test]
+fn load_skill_empty_name_is_skipped() {
+    // No `name:` field and a parent file_name that won't yield one either
+    // (root path has no `file_name()`).
+    let content = "---\ndescription: nameless\n---\n";
+    let path = Path::new("/");
+    let (skill, diags) = load_skill_from_content(content, path);
+    assert!(skill.is_none(), "empty name should skip the skill");
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.kind == DiagnosticKind::Skipped && d.message.contains("name is empty"))
+    );
+}
+
+#[test]
+fn load_skill_advertise_accepts_case_and_one() {
+    for value in ["true", "True", "TRUE", "1"] {
+        let content =
+            format!("---\nname: shown\ndescription: visible\nadvertise: {value}\n---\nBody");
+        let path = Path::new("/skills/shown/SKILL.md");
+        let (skill, _diags) = load_skill_from_content(&content, path);
+        let skill = skill.expect("should load");
+        assert!(skill.add_to_prompt, "advertise: {value} should be truthy");
+    }
+}
+
+#[test]
+fn load_skill_advertise_rejects_other_truthy_words() {
+    // `yes` / `on` are not in the accepted set — they stay false silently
+    // (documented behavior).
+    let content = "---\nname: hidden\ndescription: visible\nadvertise: yes\n---\n";
+    let path = Path::new("/skills/hidden/SKILL.md");
+    let (skill, _diags) = load_skill_from_content(content, path);
+    assert!(!skill.expect("should load").add_to_prompt);
+}
+
+#[test]
+fn parse_frontmatter_crlf() {
+    let content = "---\r\nname: crlf\r\ndescription: Has CRLF\r\n---\r\nBody line";
+    let (fm, body) = parse_frontmatter(content);
+    assert_eq!(fm.get("name").map(String::as_str), Some("crlf"));
+    assert_eq!(fm.get("description").map(String::as_str), Some("Has CRLF"));
+    assert_eq!(body, "Body line");
+}
+
+#[test]
+fn parse_frontmatter_crlf_mixed_with_multibyte() {
+    // Regression for the off-by-one in find_closing_fence with CRLF: any
+    // byte-level offset slip would land inside a UTF-8 multibyte char and
+    // panic on slice. With correct offsets it just returns the body.
+    let content = "---\r\nname: mb\r\ndescription: café ☕\r\n---\r\nBody";
+    let (fm, body) = parse_frontmatter(content);
+    assert_eq!(fm.get("description").map(String::as_str), Some("café ☕"));
+    assert_eq!(body, "Body");
+}
+
+#[test]
+fn skill_base_dir_matches_parent() {
+    let content = "---\nname: my-skill\ndescription: x\n---\n";
+    let path = Path::new("/skills/my-skill/SKILL.md");
+    let (skill, _) = load_skill_from_content(content, path);
+    let skill = skill.expect("should load");
+    assert_eq!(skill.base_dir(), Path::new("/skills/my-skill"));
 }
 
 // -- Directory scanning -------------------------------------------------
@@ -276,6 +369,48 @@ fn load_from_empty_dirs() {
     let result = load_skills_from_dirs(&[]);
     assert!(result.skills.is_empty());
     assert!(result.diagnostics.is_empty());
+}
+
+#[test]
+fn load_from_dirs_is_sorted_by_name() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    for name in ["zebra", "alpha", "mango", "bravo"] {
+        let dir = tmp.path().join(name);
+        fs::create_dir_all(&dir).expect("mkdir");
+        fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: x\n---\n"),
+        )
+        .expect("write");
+    }
+
+    let result = load_skills_from_dirs(&[tmp.path().to_owned()]);
+    let names: Vec<&str> = result.skills.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, vec!["alpha", "bravo", "mango", "zebra"]);
+}
+
+#[test]
+fn discover_does_not_follow_symlinks() {
+    // Symlinks would otherwise let a cycle (or a stray link into the
+    // user's home) recurse forever. Make sure we just skip them.
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let real = tmp.path().join("real");
+    fs::create_dir_all(&real).expect("mkdir");
+    fs::write(
+        real.join("SKILL.md"),
+        "---\nname: real\ndescription: real skill\n---\n",
+    )
+    .expect("write");
+
+    let link = tmp.path().join("link");
+    symlink(&real, &link).expect("symlink");
+
+    let paths = discover_skill_paths(tmp.path());
+    // Only the non-symlinked copy is discovered.
+    assert_eq!(paths.len(), 1);
+    assert!(paths[0].starts_with(&real));
 }
 
 // -- strip_frontmatter --------------------------------------------------

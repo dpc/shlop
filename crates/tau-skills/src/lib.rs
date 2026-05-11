@@ -1,4 +1,20 @@
-use std::collections::{BTreeMap, HashMap};
+//! Skill discovery and frontmatter parsing.
+//!
+//! ## Frontmatter parser limitations
+//!
+//! The parser here handles a deliberately small subset of YAML — just enough
+//! for `key: value` lines with optional surrounding `"`/`'` quotes. It does
+//! **not** support:
+//!
+//! - multi-line values (block scalars, `|`/`>` indicators, line continuations);
+//! - lists, mappings, anchors, aliases, or any nested structure;
+//! - escape sequences inside quoted values (`"a \"quoted\" thing"` keeps the
+//!   backslashes literally).
+//!
+//! Lines starting with `#` and blank lines are treated as comments. If a
+//! second consumer ever wants real frontmatter, swap this module for
+//! `serde_yaml` / `serde_yml` rather than growing the handwritten parser.
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -12,7 +28,6 @@ pub struct Skill {
     pub name: String,
     pub description: String,
     pub file_path: PathBuf,
-    pub base_dir: PathBuf,
     /// When true, the skill is listed in the system prompt at session
     /// start so the agent sees its name + description without having
     /// to search. Opt-in via `advertise: true` in frontmatter; the
@@ -20,6 +35,15 @@ pub struct Skill {
     /// prompt — agents discover the rest through `skill { action:
     /// "search", query: "…" }`.
     pub add_to_prompt: bool,
+}
+
+impl Skill {
+    /// Directory containing this skill's file. Always
+    /// `file_path.parent()` (falling back to `file_path` if there is
+    /// no parent, which is unreachable for any real on-disk skill).
+    pub fn base_dir(&self) -> &Path {
+        self.file_path.parent().unwrap_or(&self.file_path)
+    }
 }
 
 /// Non-fatal diagnostic emitted during skill loading.
@@ -32,8 +56,11 @@ pub struct SkillDiagnostic {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DiagnosticKind {
+    /// Soft issue — the skill still loads.
     Warning,
+    /// Duplicate name across directories; the first one in wins.
     Collision,
+    /// Fatal issue — the skill is not loaded.
     Skipped,
 }
 
@@ -58,28 +85,28 @@ const SKILL_FILENAME: &str = "SKILL.md";
 /// Parse YAML-style frontmatter delimited by `---` lines.
 ///
 /// Returns a map of key→value pairs and the body (content after the closing
-/// `---`).  If no frontmatter is present, returns an empty map and the full
-/// content as body.
+/// `---`). If no frontmatter is present, returns an empty map and the full
+/// content as body. See the module-level docs for the parser's known
+/// limitations.
 pub fn parse_frontmatter(content: &str) -> (BTreeMap<String, String>, &str) {
     let content = content.strip_prefix('\u{feff}').unwrap_or(content);
 
     let Some(rest) = content.strip_prefix("---") else {
         return (BTreeMap::new(), content);
     };
-    let Some(rest) = rest.strip_prefix(['\n', '\r']) else {
+    let Some(rest) = rest
+        .strip_prefix('\n')
+        .or_else(|| rest.strip_prefix("\r\n"))
+    else {
         return (BTreeMap::new(), content);
     };
 
-    // Find closing ---
-    let Some(end_offset) = find_closing_fence(rest) else {
+    let Some((yaml_end, body_start)) = find_closing_fence(rest) else {
         return (BTreeMap::new(), content);
     };
 
-    let yaml_block = &rest[..end_offset];
-    let body_start = end_offset + 3; // skip "---"
-    let body = rest[body_start..]
-        .strip_prefix(['\n', '\r'])
-        .unwrap_or(&rest[body_start..]);
+    let yaml_block = &rest[..yaml_end];
+    let body = &rest[body_start..];
 
     let mut map = BTreeMap::new();
     for line in yaml_block.lines() {
@@ -100,13 +127,18 @@ pub fn strip_frontmatter(content: &str) -> &str {
     parse_frontmatter(content).1
 }
 
-fn find_closing_fence(s: &str) -> Option<usize> {
+/// Locate the closing `---` fence. Returns `(yaml_end, body_start)` as
+/// byte offsets into `s`, where `yaml_end` is the start of the closing
+/// fence line and `body_start` is the first byte after that line's
+/// terminator (handles both `\n` and `\r\n`).
+fn find_closing_fence(s: &str) -> Option<(usize, usize)> {
     let mut pos = 0;
-    for line in s.lines() {
-        if line.trim() == "---" {
-            return Some(pos);
+    for line in s.split_inclusive('\n') {
+        let stripped = line.trim_end_matches('\n').trim_end_matches('\r');
+        if stripped.trim() == "---" {
+            return Some((pos, pos + line.len()));
         }
-        pos += line.len() + 1; // +1 for newline
+        pos += line.len();
     }
     None
 }
@@ -118,11 +150,11 @@ fn parse_frontmatter_line(line: &str) -> Option<(&str, &str)> {
         return None;
     }
     let value = line[colon + 1..].trim();
-    // Strip surrounding quotes
-    let value = strip_quotes(value);
-    Some((key, value))
+    Some((key, strip_quotes(value)))
 }
 
+/// Strip a single layer of matching `"` or `'` quotes. No unescaping is
+/// performed — `"a \"b\" c"` becomes `a \"b\" c` literally.
 fn strip_quotes(s: &str) -> &str {
     if s.len() >= 2
         && ((s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')))
@@ -136,8 +168,30 @@ fn strip_quotes(s: &str) -> &str {
 // Validation
 // ---------------------------------------------------------------------------
 
-fn validate_name(name: &str, parent_dir_name: Option<&str>, path: &Path) -> Vec<SkillDiagnostic> {
+/// Outcome of name validation. `skip` is true when the name is unusable
+/// (empty, wrong charset, badly placed hyphens, too long) — the caller
+/// must not produce a `Skill` in that case.
+struct NameValidation {
+    diagnostics: Vec<SkillDiagnostic>,
+    skip: bool,
+}
+
+fn validate_name(name: &str, parent_dir_name: Option<&str>, path: &Path) -> NameValidation {
     let mut diagnostics = Vec::new();
+    let mut skip = false;
+
+    if name.is_empty() {
+        diagnostics.push(SkillDiagnostic {
+            path: path.to_owned(),
+            kind: DiagnosticKind::Skipped,
+            message: "name is empty (no `name:` field and no usable parent directory name)"
+                .to_owned(),
+        });
+        return NameValidation {
+            diagnostics,
+            skip: true,
+        };
+    }
 
     if let Some(parent) = parent_dir_name {
         if name != parent {
@@ -152,9 +206,10 @@ fn validate_name(name: &str, parent_dir_name: Option<&str>, path: &Path) -> Vec<
     if name.len() > MAX_NAME_LENGTH {
         diagnostics.push(SkillDiagnostic {
             path: path.to_owned(),
-            kind: DiagnosticKind::Warning,
+            kind: DiagnosticKind::Skipped,
             message: format!("name exceeds {MAX_NAME_LENGTH} characters ({})", name.len()),
         });
+        skip = true;
     }
 
     if !name
@@ -163,29 +218,32 @@ fn validate_name(name: &str, parent_dir_name: Option<&str>, path: &Path) -> Vec<
     {
         diagnostics.push(SkillDiagnostic {
             path: path.to_owned(),
-            kind: DiagnosticKind::Warning,
+            kind: DiagnosticKind::Skipped,
             message: "name contains invalid characters (must be lowercase a-z, 0-9, hyphens only)"
                 .to_owned(),
         });
+        skip = true;
     }
 
     if name.starts_with('-') || name.ends_with('-') {
         diagnostics.push(SkillDiagnostic {
             path: path.to_owned(),
-            kind: DiagnosticKind::Warning,
+            kind: DiagnosticKind::Skipped,
             message: "name must not start or end with a hyphen".to_owned(),
         });
+        skip = true;
     }
 
     if name.contains("--") {
         diagnostics.push(SkillDiagnostic {
             path: path.to_owned(),
-            kind: DiagnosticKind::Warning,
+            kind: DiagnosticKind::Skipped,
             message: "name must not contain consecutive hyphens".to_owned(),
         });
+        skip = true;
     }
 
-    diagnostics
+    NameValidation { diagnostics, skip }
 }
 
 fn validate_description(description: &str, path: &Path) -> Vec<SkillDiagnostic> {
@@ -209,8 +267,8 @@ fn validate_description(description: &str, path: &Path) -> Vec<SkillDiagnostic> 
 
 /// Load a single skill from file content and its path on disk.
 ///
-/// Returns `None` for the skill if the description is missing (the one hard
-/// requirement).  Diagnostics are returned in all cases.
+/// Returns `None` for the skill if the description is missing/empty or the
+/// name is invalid. Diagnostics are returned in all cases.
 pub fn load_skill_from_content(
     content: &str,
     file_path: &Path,
@@ -224,50 +282,46 @@ pub fn load_skill_from_content(
         .and_then(|n| n.to_str())
         .map(str::to_owned);
 
-    // Name: frontmatter > parent directory name
     let name = fm
         .get("name")
         .cloned()
-        .or(parent_dir_name.clone())
+        .or_else(|| parent_dir_name.clone())
         .unwrap_or_default();
 
-    // Validate name
-    diagnostics.extend(validate_name(&name, parent_dir_name.as_deref(), file_path));
-
-    // Description (required)
-    let description = fm.get("description").map(|s| s.trim().to_owned());
-    match &description {
-        None => {
-            diagnostics.push(SkillDiagnostic {
-                path: file_path.to_owned(),
-                kind: DiagnosticKind::Skipped,
-                message: "description is required".to_owned(),
-            });
-            return (None, diagnostics);
-        }
-        Some(d) if d.is_empty() => {
-            diagnostics.push(SkillDiagnostic {
-                path: file_path.to_owned(),
-                kind: DiagnosticKind::Skipped,
-                message: "description is required".to_owned(),
-            });
-            return (None, diagnostics);
-        }
-        Some(d) => {
-            diagnostics.extend(validate_description(d, file_path));
-        }
+    let name_check = validate_name(&name, parent_dir_name.as_deref(), file_path);
+    diagnostics.extend(name_check.diagnostics);
+    if name_check.skip {
+        return (None, diagnostics);
     }
 
-    // `advertise: true` opts a skill into the system-prompt listing
-    // at session start. Default is off — skills not opted in are
-    // discoverable via `skill { action: "search" }` instead.
-    let advertise = fm.get("advertise").map(|v| v == "true").unwrap_or(false);
+    let description = fm.get("description").map(|s| s.trim().to_owned());
+    let description = match description {
+        Some(d) if !d.is_empty() => {
+            diagnostics.extend(validate_description(&d, file_path));
+            d
+        }
+        _ => {
+            diagnostics.push(SkillDiagnostic {
+                path: file_path.to_owned(),
+                kind: DiagnosticKind::Skipped,
+                message: "description is required".to_owned(),
+            });
+            return (None, diagnostics);
+        }
+    };
+
+    // `advertise: true` opts a skill into the system-prompt listing at
+    // session start. Accept case-insensitive `true` or `1`; everything
+    // else (including unset) is false.
+    let advertise = fm
+        .get("advertise")
+        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+        .unwrap_or(false);
 
     let skill = Skill {
         name,
-        description: description.unwrap_or_default(),
+        description,
         file_path: file_path.to_owned(),
-        base_dir: skill_dir.to_owned(),
         add_to_prompt: advertise,
     };
 
@@ -286,6 +340,7 @@ pub fn load_skill_from_content(
 ///    skills.
 /// 3. Recurse into subdirectories to find `SKILL.md`.
 /// 4. Skip dot-prefixed entries and `node_modules`.
+/// 5. Symlinks are not followed (avoids unbounded recursion through cycles).
 pub fn discover_skill_paths(root: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     discover_skill_paths_inner(root, true, &mut paths);
@@ -298,17 +353,19 @@ fn discover_skill_paths_inner(dir: &Path, is_root: bool, out: &mut Vec<PathBuf>)
         Err(_) => return,
     };
 
-    let mut children: Vec<fs::DirEntry> = Vec::new();
-    for entry in entries {
-        let Ok(entry) = entry else { continue };
-        children.push(entry);
-    }
+    let children: Vec<fs::DirEntry> = entries.flatten().collect();
 
-    // Check for SKILL.md first
-    let skill_md = dir.join(SKILL_FILENAME);
-    if skill_md.is_file() {
-        out.push(skill_md);
-        return; // don't recurse further
+    // Single-pass search: if SKILL.md exists among the children as a regular
+    // file, that's this directory's skill and we stop recursing here.
+    let skill_md = children.iter().find(|e| {
+        if e.file_name() != SKILL_FILENAME {
+            return false;
+        }
+        e.file_type().map(|ft| ft.is_file()).unwrap_or(false)
+    });
+    if let Some(entry) = skill_md {
+        out.push(entry.path());
+        return;
     }
 
     for entry in &children {
@@ -317,29 +374,25 @@ fn discover_skill_paths_inner(dir: &Path, is_root: bool, out: &mut Vec<PathBuf>)
             continue;
         };
 
-        // Skip hidden entries and node_modules
         if name_str.starts_with('.') || name_str == "node_modules" {
             continue;
         }
 
-        let path = entry.path();
-        let file_type = match entry.file_type() {
-            Ok(ft) => ft,
-            Err(_) => continue,
+        let Ok(file_type) = entry.file_type() else {
+            continue;
         };
 
-        if file_type.is_dir() || file_type.is_symlink() {
-            // For symlinks, check if they point to a directory
-            let is_dir = if file_type.is_symlink() {
-                path.is_dir()
-            } else {
-                true
-            };
-            if is_dir {
-                discover_skill_paths_inner(&path, false, out);
-            }
+        // Refuse to follow symlinks — discovery is local-only and we don't
+        // want a cycle (or a stray link into the user's home) to blow the
+        // stack or pull in unrelated files.
+        if file_type.is_symlink() {
+            continue;
+        }
+
+        let path = entry.path();
+        if file_type.is_dir() {
+            discover_skill_paths_inner(&path, false, out);
         } else if file_type.is_file() && is_root && name_str.ends_with(".md") {
-            // Root-level .md files are individual skills
             out.push(path);
         }
     }
@@ -352,8 +405,9 @@ fn discover_skill_paths_inner(dir: &Path, is_root: bool, out: &mut Vec<PathBuf>)
 /// Load skills from multiple directories, deduplicating by name.
 ///
 /// The first skill with a given name wins; collisions produce a diagnostic.
+/// Output skills are sorted by name so successive runs see the same order.
 pub fn load_skills_from_dirs(dirs: &[PathBuf]) -> LoadSkillsResult {
-    let mut skills_by_name: HashMap<String, Skill> = HashMap::new();
+    let mut skills_by_name: BTreeMap<String, Skill> = BTreeMap::new();
     let mut all_diagnostics = Vec::new();
 
     for dir in dirs {
