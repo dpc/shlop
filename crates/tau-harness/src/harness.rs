@@ -19,7 +19,7 @@ use tau_proto::{
     HarnessModelsAvailable, InterceptAction, InterceptReply, InterceptRequest,
     InterceptionPriority, Message, ModelId, SessionId, SessionPromptCreated, SessionPromptId,
     SessionPromptQueued, ToolCallId, ToolDefinition, ToolError, ToolName, ToolRegister,
-    ToolRequest,
+    ToolRequest, UiCancelPrompt,
 };
 
 use crate::conversation::{Conversation, ConversationId, ConversationTurnState};
@@ -1996,6 +1996,12 @@ impl Harness {
         }
 
         self.emit_info("cancelled current prompt");
+        self.publish_event(
+            None,
+            Event::UiCancelPrompt(UiCancelPrompt {
+                session_id: session_id.clone(),
+            }),
+        );
         self.try_advance_queue();
     }
 

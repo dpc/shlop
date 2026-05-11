@@ -53,7 +53,10 @@ where
         client_kind: ClientKind::Agent,
     })))?;
     writer.write_frame(&Frame::Message(Message::Subscribe(Subscribe {
-        selectors: vec![EventSelector::Exact(EventName::SESSION_PROMPT_CREATED)],
+        selectors: vec![
+            EventSelector::Exact(EventName::SESSION_PROMPT_CREATED),
+            EventSelector::Exact(EventName::UI_CANCEL_PROMPT),
+        ],
     })))?;
     writer.write_frame(&Frame::Message(Message::Ready(Ready {
         message: Some("agent ready".to_owned()),
@@ -225,7 +228,11 @@ impl<'a> RetryContext<'a> {
                 Err(RecvTimeoutError::Timeout) => return SleepOutcome::Elapsed,
                 Err(RecvTimeoutError::Disconnected) => return SleepOutcome::Aborted,
                 Ok(frame) => {
-                    let abort = matches!(frame, Frame::Message(Message::Disconnect(_)));
+                    let abort = matches!(
+                        frame,
+                        Frame::Message(Message::Disconnect(_))
+                            | Frame::Event(Event::UiCancelPrompt(_))
+                    );
                     self.deferred.push_back(frame);
                     if abort {
                         return SleepOutcome::Aborted;
@@ -744,7 +751,10 @@ where
         client_kind: ClientKind::Agent,
     })))?;
     writer.write_frame(&Frame::Message(Message::Subscribe(Subscribe {
-        selectors: vec![EventSelector::Exact(EventName::SESSION_PROMPT_CREATED)],
+        selectors: vec![
+            EventSelector::Exact(EventName::SESSION_PROMPT_CREATED),
+            EventSelector::Exact(EventName::UI_CANCEL_PROMPT),
+        ],
     })))?;
     writer.write_frame(&Frame::Message(Message::Ready(Ready {
         message: Some("echo agent ready".to_owned()),
