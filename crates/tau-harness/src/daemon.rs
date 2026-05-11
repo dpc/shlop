@@ -429,7 +429,7 @@ pub fn run_harness_daemon(
     let listener = bind_listener(&daemon_dir.socket_path())?;
     tracing::debug!(target: "tau_harness::startup", socket_path = %daemon_dir.socket_path().display(), elapsed_ms = startup_started_at.elapsed().as_millis(), "bound daemon socket");
 
-    let state_dir = crate::dirs::default_state_dir();
+    let state_dir = tau_session_inspect::default_state_dir();
     let dirs = options.dirs.clone().unwrap_or_default();
     tracing::debug!(target: "tau_harness::startup", state_dir = %state_dir.display(), elapsed_ms = startup_started_at.elapsed().as_millis(), "constructing harness");
     let mut harness = Harness::from_config(config, &state_dir, dirs, eager_session_id)?;
@@ -490,7 +490,7 @@ pub fn run_component() -> Result<(), Box<dyn std::error::Error>> {
     // `default_session_id()` covers a bare `tau ext harness`
     // launched without a CLI in front of it.
     let eager_session_id = std::env::var("TAU_SESSION_ID")
-        .unwrap_or_else(|_| crate::dirs::default_session_id().to_owned());
+        .unwrap_or_else(|_| tau_session_inspect::default_session_id().to_owned());
     let session_status = match std::env::var("TAU_SESSION_STATUS").as_deref() {
         Ok("resumed") => crate::daemon::SessionLaunchStatus::Resumed,
         _ => crate::daemon::SessionLaunchStatus::New,

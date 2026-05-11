@@ -1,10 +1,10 @@
-//! Pretty-printing helpers for events and session entries — used by the
-//! CLI inspection commands and the daemon's lifecycle-message stream.
+//! Pretty-printing helpers for harness lifecycle and tool-progress
+//! events. Session-entry rendering lives in `tau-session-inspect`; the
+//! harness pulls in [`tau_session_inspect::format_session_entry`] for
+//! its tree-preview helper.
 
-use tau_core::{SessionEntry, SessionTree, ToolActivityOutcome};
+use tau_core::SessionEntry;
 use tau_proto::{Event, ProgressUpdate, ToolProgress};
-
-use crate::prompt::{cbor_map_text, cbor_to_text};
 
 /// Formats a tool progress event for display.
 #[must_use]
@@ -36,56 +36,9 @@ pub fn format_extension_event(event: &Event) -> String {
     }
 }
 
-pub(crate) fn format_session_entry(entry: &SessionEntry) -> String {
-    match entry {
-        SessionEntry::UserMessage { text } => format!("user: {text}"),
-        SessionEntry::AgentMessage { text, .. } => format!("agent: {text}"),
-        SessionEntry::ToolActivity(a) => match &a.outcome {
-            ToolActivityOutcome::Requested { arguments } => {
-                if a.tool_name.as_str() == "skill" {
-                    match cbor_map_text(arguments, "action") {
-                        Some("search") => {
-                            let query = cbor_map_text(arguments, "query").unwrap_or_default();
-                            if query.is_empty() {
-                                "tool.request skill search".to_owned()
-                            } else {
-                                format!("tool.request skill search {query}")
-                            }
-                        }
-                        // Treat anything else (incl. legacy missing
-                        // `action`) as a load.
-                        _ => {
-                            let name = cbor_map_text(arguments, "name").unwrap_or_default();
-                            if name.is_empty() {
-                                "tool.request skill".to_owned()
-                            } else {
-                                format!("tool.request skill {name}")
-                            }
-                        }
-                    }
-                } else {
-                    format!("tool.request {}", a.tool_name)
-                }
-            }
-            ToolActivityOutcome::Result { result } => {
-                let text = cbor_to_text(result);
-                let preview = if text.len() > 80 {
-                    format!("{}...", &text[..80])
-                } else {
-                    text
-                };
-                format!("tool.result {} -> {preview}", a.tool_name)
-            }
-            ToolActivityOutcome::Error { message, .. } => {
-                format!("tool.error {} -> {message}", a.tool_name)
-            }
-        },
-    }
-}
-
 /// One-line preview of a session entry for `/tree` output.
 pub(crate) fn render_entry_preview(entry: &SessionEntry) -> String {
-    let raw = format_session_entry(entry);
+    let raw = tau_session_inspect::format_session_entry(entry);
     let single_line: String = raw
         .chars()
         .map(|c| if c == '\n' { ' ' } else { c })
@@ -96,15 +49,4 @@ pub(crate) fn render_entry_preview(entry: &SessionEntry) -> String {
     } else {
         single_line
     }
-}
-
-pub(crate) fn latest_agent_preview(session: &SessionTree) -> Option<String> {
-    session
-        .current_branch()
-        .into_iter()
-        .rev()
-        .find_map(|e| match e {
-            SessionEntry::AgentMessage { text, .. } => Some(text.clone()),
-            _ => None,
-        })
 }

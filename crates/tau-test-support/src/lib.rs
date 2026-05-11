@@ -7,9 +7,10 @@ use std::time::{Duration, Instant};
 use tau_config::settings::TauDirs;
 use tau_core::{PolicyStore, SessionStore};
 use tau_harness::{
-    EmbeddedOptions, HarnessError, ServeOptions, open_policy_store, open_session_store,
-    run_daemon_with_echo, run_embedded_message_with_options, send_daemon_message,
+    EmbeddedOptions, HarnessError, ServeOptions, run_daemon_with_echo,
+    run_embedded_message_with_options, send_daemon_message,
 };
+use tau_session_inspect::{InspectError, open_policy_store, open_session_store};
 use tempfile::TempDir;
 
 /// Temporary runtime paths for end-to-end tests.
@@ -96,12 +97,12 @@ impl TestRuntime {
     }
 
     /// Opens the session store for assertions.
-    pub fn open_session_store(&self) -> Result<SessionStore, HarnessError> {
+    pub fn open_session_store(&self) -> Result<SessionStore, InspectError> {
         open_session_store(&self.state_dir)
     }
 
     /// Opens the policy store for assertions.
-    pub fn open_policy_store(&self) -> Result<PolicyStore, HarnessError> {
+    pub fn open_policy_store(&self) -> Result<PolicyStore, InspectError> {
         open_policy_store(self.state_dir.join("policy.cbor"))
     }
 }

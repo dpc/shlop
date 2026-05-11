@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
-use tau_harness::{default_session_id, default_state_dir};
+use tau_session_inspect::{default_session_id, default_state_dir};
 
 #[derive(Parser)]
 #[command(

@@ -46,10 +46,6 @@ pub use crate::daemon::{
 };
 #[cfg(any(test, feature = "echo-agent"))]
 pub use crate::daemon::{run_daemon_with_echo, run_embedded_message_with_echo};
-pub use crate::dirs::{
-    default_session_id, default_state_dir, open_policy_store, open_session_store, policy_lines,
-    session_lines, session_list_lines,
-};
 pub use crate::error::HarnessError;
 pub use crate::format::{format_extension_event, format_tool_progress};
 pub use crate::settings::{builtin_extensions, default_config};

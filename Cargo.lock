@@ -1496,6 +1496,7 @@ dependencies = [
  "tau-harness",
  "tau-proto",
  "tau-provider",
+ "tau-session-inspect",
  "tau-themes",
  "tempfile",
  "time",
@@ -1651,6 +1652,7 @@ dependencies = [
  "tau-core",
  "tau-ext-shell",
  "tau-proto",
+ "tau-session-inspect",
  "tau-skills",
  "tau-socket",
  "tau-supervisor",
@@ -1686,6 +1688,15 @@ dependencies = [
  "tracing",
  "ureq",
  "url",
+]
+
+[[package]]
+name = "tau-session-inspect"
+version = "0.1.0"
+dependencies = [
+ "tau-config",
+ "tau-core",
+ "tau-proto",
 ]
 
 [[package]]
@@ -1732,6 +1743,7 @@ dependencies = [
  "tau-ext-shell",
  "tau-harness",
  "tau-proto",
+ "tau-session-inspect",
  "tempfile",
 ]
 

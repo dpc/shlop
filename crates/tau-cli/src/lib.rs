@@ -79,6 +79,7 @@ pub enum CliError {
     Io(io::Error),
     Encode(tau_proto::EncodeError),
     Harness(tau_harness::HarnessError),
+    Inspect(tau_session_inspect::InspectError),
     DaemonExited(String),
     NoRunningDaemon,
     Participant(String),
@@ -91,6 +92,7 @@ impl fmt::Display for CliError {
             Self::Io(source) => write!(f, "I/O error: {source}"),
             Self::Encode(source) => write!(f, "encode error: {source}"),
             Self::Harness(source) => write!(f, "harness error: {source}"),
+            Self::Inspect(source) => write!(f, "inspect error: {source}"),
             Self::DaemonExited(msg) => write!(f, "harness daemon exited: {msg}"),
             Self::NoRunningDaemon => f.write_str(
                 "no harness daemon running for this project — \
@@ -113,6 +115,12 @@ impl From<io::Error> for CliError {
 impl From<tau_harness::HarnessError> for CliError {
     fn from(source: tau_harness::HarnessError) -> Self {
         Self::Harness(source)
+    }
+}
+
+impl From<tau_session_inspect::InspectError> for CliError {
+    fn from(source: tau_session_inspect::InspectError) -> Self {
+        Self::Inspect(source)
     }
 }
 
@@ -298,7 +306,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
             }
 
             cli::Command::SessionList { state_dir } => {
-                for line in tau_harness::session_list_lines(state_dir)? {
+                for line in tau_session_inspect::session_list_lines(state_dir)? {
                     println!("{line}");
                 }
                 Ok(())
@@ -308,14 +316,14 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                 session_id,
                 state_dir,
             } => {
-                for line in tau_harness::session_lines(state_dir, &session_id)? {
+                for line in tau_session_inspect::session_lines(state_dir, &session_id)? {
                     println!("{line}");
                 }
                 Ok(())
             }
 
             cli::Command::PolicyShow { state_dir } => {
-                for line in tau_harness::policy_lines(state_dir.join("policy.cbor"))? {
+                for line in tau_session_inspect::policy_lines(state_dir.join("policy.cbor"))? {
                     println!("{line}");
                 }
                 Ok(())

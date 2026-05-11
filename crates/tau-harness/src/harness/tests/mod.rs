@@ -22,6 +22,10 @@ use tau_proto::{
     SessionPromptQueued, Subscribe, ToolCallId, ToolName, ToolResult, ToolSideEffects, ToolSpec,
     UiPromptDraft, UiPromptSubmitted,
 };
+use tau_session_inspect::{
+    default_session_id, format_session_entry, open_session_store, policy_lines, session_lines,
+    session_list_lines,
+};
 use tempfile::TempDir;
 
 use super::Harness;
@@ -30,13 +34,9 @@ use crate::daemon::{
     ServeOptions, bind_listener, run_daemon_with_echo, run_embedded_message_with_echo,
     send_daemon_message, send_daemon_message_with_trace,
 };
-use crate::dirs::{
-    default_session_id, open_session_store, policy_lines, session_lines, session_list_lines,
-};
 use crate::discovery::{DiscoveredAgentsFile, DiscoveredSkill};
 use crate::error::HarnessError;
 use crate::event::HarnessEvent;
-use crate::format::format_session_entry;
 use crate::model::selected_effort_for_model;
 use crate::prompt::build_system_prompt;
 use crate::turn::{PromptSubmission, TurnState};

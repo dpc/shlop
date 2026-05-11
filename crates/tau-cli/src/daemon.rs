@@ -100,7 +100,7 @@ pub(crate) fn resolve_run_session_id(
 }
 
 fn session_exists(id: &str) -> Result<bool, CliError> {
-    let state_dir = tau_harness::default_state_dir();
+    let state_dir = tau_session_inspect::default_state_dir();
     let metas = tau_harness::list_session_metas(&state_dir)?;
     Ok(metas
         .into_iter()
@@ -116,7 +116,7 @@ pub(crate) fn mint_session_id(cwd: &Path) -> String {
 }
 
 fn pick_resume_session(cwd: &Path) -> Result<Option<String>, CliError> {
-    let state_dir = tau_harness::default_state_dir();
+    let state_dir = tau_session_inspect::default_state_dir();
     let mut metas = tau_harness::list_session_metas(&state_dir)?;
     metas.retain(|(_, meta)| meta.cwd.as_deref() == Some(cwd));
     metas.sort_by_key(|(_, meta)| std::cmp::Reverse(meta.last_touched));

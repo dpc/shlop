@@ -133,7 +133,7 @@ pub(crate) fn run_chat(
 ) -> Result<(), CliError> {
     use tau_cli_term::{HighTerm, SlashCommand};
 
-    let state_dir = tau_harness::default_state_dir();
+    let state_dir = tau_session_inspect::default_state_dir();
     let ui_logging = ui_logging::init(&state_dir)?;
     tracing::info!(
         target: "tau_cli::ui",

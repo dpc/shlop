@@ -33,6 +33,7 @@ tau-config.workspace = true
 tau-core.workspace = true
 tau-ext-shell.workspace = true
 tau-proto.workspace = true
+tau-session-inspect.workspace = true
 tau-skills.workspace = true
 tau-socket.workspace = true
 tau-supervisor.workspace = true

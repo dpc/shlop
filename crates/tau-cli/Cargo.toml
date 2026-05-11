@@ -28,6 +28,7 @@ tau-themes.workspace = true
 tau-config.workspace = true
 tau-harness.workspace = true
 tau-proto.workspace = true
+tau-session-inspect.workspace = true
 tau-provider.workspace = true
 time.workspace = true
 tracing.workspace = true
