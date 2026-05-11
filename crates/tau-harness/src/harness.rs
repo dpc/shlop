@@ -449,20 +449,13 @@ impl Harness {
         dirs: tau_config::settings::TauDirs,
         eager_session_id: &str,
     ) -> Result<Self, HarnessError> {
-        Self::new_with_agent(
-            state_dir,
-            dirs,
-            default_agent_runner,
-            false,
-            eager_session_id,
-        )
+        Self::new_with_agent(state_dir, dirs, default_agent_runner, eager_session_id)
     }
 
     pub(crate) fn new_with_agent(
         state_dir: impl Into<PathBuf>,
         dirs: tau_config::settings::TauDirs,
         agent_runner: AgentRunner,
-        include_echo: bool,
         eager_session_id: &str,
     ) -> Result<Self, HarnessError> {
         let state_dir = state_dir.into();
@@ -504,7 +497,7 @@ impl Harness {
         let (conn_id, thread) = spawn_in_process(
             "shell",
             ClientKind::Tool,
-            move |r, w| tau_ext_shell::run(r, w, include_echo).map_err(|e| e.to_string()),
+            move |r, w| tau_ext_shell::run(r, w).map_err(|e| e.to_string()),
             &mut bus,
             &tx,
         )?;
@@ -4316,7 +4309,6 @@ impl Harness {
             &state_dir,
             tau_config::settings::TauDirs::default(),
             default_agent_runner,
-            false,
             "s1",
         )?;
         harness.selected_model = "test/model".into();

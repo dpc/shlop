@@ -22,5 +22,5 @@ tempfile.workspace = true
 
 [dev-dependencies]
 tau-agent.workspace = true
-tau-ext-shell.workspace = true
+tau-ext-shell = { workspace = true, features = ["echo-agent"] }
 tau-proto.workspace = true

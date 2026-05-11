@@ -1,10 +1,23 @@
+use std::io::{BufReader, BufWriter};
 use std::os::unix::net::UnixStream;
-use std::thread;
+use std::path::PathBuf;
+use std::{fs, thread};
 
-use tau_proto::{EventName, ToolInvoke};
+use tau_proto::{CborValue, EventName, Frame, FrameReader, FrameWriter, Message, ToolInvoke};
 use tempfile::TempDir;
 
 use super::*;
+use crate::agents::{discover_agents_files_from, discover_agents_files_from_roots};
+use crate::argument::{cbor_map_int, cbor_map_text, optional_argument_text};
+use crate::tools::find::run_find;
+use crate::tools::grep::{grep_result_map, run_grep};
+use crate::tools::ls::run_ls;
+use crate::tools::read::{read_file, slice_lines};
+use crate::tools::shell::command_details_value;
+use crate::tools::{
+    EDIT_TOOL_NAME, FIND_TOOL_NAME, LS_TOOL_NAME, READ_TOOL_NAME, SHELL_TOOL_NAME, WRITE_TOOL_NAME,
+};
+use crate::truncate::{MAX_OUTPUT_BYTES, MAX_OUTPUT_LINES, truncate_head, truncate_tail};
 
 /// Test-side wrapper around [`FrameReader`] that exposes an `Event`-flavoured
 /// API so the existing tests (which don't care about the message/event split)
@@ -101,7 +114,7 @@ fn spawn_extension() -> (
         .try_clone()
         .expect("runtime reader clone should succeed");
     thread::spawn(move || {
-        run_impl(reader_stream, runtime_stream, true).expect("extension should run");
+        run_impl(reader_stream, runtime_stream).expect("extension should run");
     });
     (
         EventReader::new(BufReader::new(
@@ -1110,30 +1123,6 @@ fn command_details_value_records_stdout_and_stderr_stats() {
     assert_eq!(cbor_int_field(&details, "stdout_bytes"), Some(9));
     assert_eq!(cbor_int_field(&details, "stderr_lines"), Some(1));
     assert_eq!(cbor_int_field(&details, "stderr_bytes"), Some(5));
-}
-
-#[test]
-fn is_grep_match_line_classifies_match_and_context_lines() {
-    // Basic match / context forms.
-    assert!(is_grep_match_line("foo/bar.rs:10:hello"));
-    assert!(!is_grep_match_line("foo/bar.rs-10-hello"));
-
-    // Paths containing `-` must not trip the classifier — the `-`
-    // in "tool-exercise" has no digits after it, so the scan skips
-    // past it to the real `:2:` separator.
-    assert!(is_grep_match_line(
-        "tmp/tool-exercise/beta/nested/notes.md:2:foo bar"
-    ));
-    assert!(!is_grep_match_line(
-        "tmp/tool-exercise/beta/nested/notes.md-2-foo bar"
-    ));
-    assert!(is_grep_match_line(
-        "tmp/tool-exercise/generated.txt:2:SECOND"
-    ));
-
-    // Group separator and blank lines are not matches.
-    assert!(!is_grep_match_line("--"));
-    assert!(!is_grep_match_line(""));
 }
 
 fn grep_args(pattern: &str, path: &str, extra: Vec<(CborValue, CborValue)>) -> CborValue {

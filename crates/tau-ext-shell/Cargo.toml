@@ -14,6 +14,13 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Registers the test-only `echo` tool. Enabled automatically under
+# `cfg(test)`; the `tau-harness` `echo-agent` feature forwards to this
+# so echo-agent harness tests can exercise the tool dispatcher
+# without a real model.
+echo-agent = []
+
 [dependencies]
 ciborium.workspace = true
 dirs.workspace = true

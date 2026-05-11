@@ -179,7 +179,7 @@ fn run_embedded_message_impl(
 ) -> Result<InteractionOutcome, HarnessError> {
     let state_dir = state_dir.into();
     let dirs = options.dirs.unwrap_or_default();
-    let mut harness = Harness::new_with_agent(state_dir, dirs, agent_runner, true, session_id)?;
+    let mut harness = Harness::new_with_agent(state_dir, dirs, agent_runner, session_id)?;
     let mut outcome = harness.send_user_message(session_id, message, None)?;
     harness.shutdown()?;
     outcome.lifecycle_messages = harness.lifecycle_messages.clone();
@@ -235,8 +235,7 @@ pub fn run_daemon_with_echo(
     let state_dir = state_dir.into();
     let listener = bind_listener(&socket_path)?;
     let dirs = options.dirs.clone().unwrap_or_default();
-    let mut harness =
-        Harness::new_with_agent(state_dir, dirs, echo_runner, true, eager_session_id)?;
+    let mut harness = Harness::new_with_agent(state_dir, dirs, echo_runner, eager_session_id)?;
 
     let tx = harness.tx.clone();
     thread::spawn(move || {

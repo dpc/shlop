@@ -108,7 +108,7 @@ fn deterministic_agent_and_tool_complete_one_vertical_slice() {
         let tool_reader = tool_runtime_stream
             .try_clone()
             .expect("tool reader clone should succeed");
-        tau_ext_shell::run(tool_reader, tool_runtime_stream, true)
+        tau_ext_shell::run(tool_reader, tool_runtime_stream)
             .expect("tool extension should run successfully");
     });
 

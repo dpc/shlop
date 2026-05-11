@@ -18,7 +18,9 @@ workspace = true
 # Exposes echo-agent test harness helpers (`run_daemon_with_echo`,
 # `run_embedded_message_with_echo`). Enabled by tau-test-support and
 # by this crate's own dev-dependencies for the internal test suite.
-echo-agent = ["tau-agent/echo-agent"]
+# Forwards to tau-ext-shell so the `echo` tool is registered for
+# echo-agent–driven tool calls.
+echo-agent = ["tau-agent/echo-agent", "tau-ext-shell/echo-agent"]
 
 [dependencies]
 bon.workspace = true

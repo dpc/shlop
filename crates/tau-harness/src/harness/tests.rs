@@ -68,7 +68,6 @@ fn echo_harness_for(
         state_dir,
         tau_config::settings::TauDirs::default(),
         echo_runner,
-        true,
         session_id,
     )
 }

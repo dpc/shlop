@@ -123,7 +123,14 @@ for testing. The shell command and any wrapper prefix are configurable:
 ```json5
 "core-shell": {
   config: {
-    shell: { command: "bash", prefix: ["nix", "develop", "-c"] },
+    shell: {
+      command: "bash",
+      prefix: ["nix", "develop", "-c"],
+      // User-initiated `!`/`!!` commands are killed after this many
+      // seconds. Tool-invoked `shell` calls use their own per-call
+      // `timeout` argument (default 120s). Default: 3600 (1 hour).
+      user_command_timeout_secs: 3600,
+    },
   },
 },
 ```
