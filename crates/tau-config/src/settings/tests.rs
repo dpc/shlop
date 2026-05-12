@@ -94,14 +94,10 @@ fn harness_settings_user_override_wins_over_built_in() {
     .expect("write");
 
     let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
+    let expected: tau_proto::ModelId = "anthropic/claude-sonnet-4-20250514".parse().expect("id");
+    assert_eq!(s.default_model.as_ref(), Some(&expected));
     assert_eq!(
-        s.default_model.as_deref(),
-        Some("anthropic/claude-sonnet-4-20250514")
-    );
-    assert_eq!(
-        s.default_efforts
-            .get("anthropic/claude-sonnet-4-20250514")
-            .copied(),
+        s.default_efforts.get(&expected).copied(),
         Some(tau_proto::Effort::High)
     );
 }
@@ -219,7 +215,7 @@ fn add_provider_in_writes_typed_entry() {
         ..Default::default()
     };
     provider.models.push(ModelConfig {
-        id: "gpt-x".to_owned(),
+        id: tau_proto::ModelName::new("gpt-x"),
         name: None,
         max_output_tokens: None,
         context_window: Some(123_456),
@@ -227,13 +223,14 @@ fn add_provider_in_writes_typed_entry() {
         reasoning_efforts: None,
     });
 
-    let path = add_provider_in(&dirs, "openai", &provider).expect("add provider");
+    let openai = tau_proto::ProviderName::new("openai");
+    let path = add_provider_in(&dirs, &openai, &provider).expect("add provider");
     assert!(path.ends_with("models.json5"));
 
     let registry = load_models_in(&dirs).expect("reload");
     let written = registry
         .providers
-        .get("openai")
+        .get(&openai)
         .expect("openai entry present");
     assert_eq!(written.auth.as_deref(), Some("api-key"));
     assert_eq!(written.api.as_deref(), Some("openai-chat"));
@@ -272,7 +269,7 @@ fn add_provider_in_preserves_other_entries_and_unknown_fields() {
         api: Some("openai-chat".to_owned()),
         ..Default::default()
     };
-    add_provider_in(&dirs, "added", &new_provider).expect("add");
+    add_provider_in(&dirs, &tau_proto::ProviderName::new("added"), &new_provider).expect("add");
 
     let text = std::fs::read_to_string(&path).expect("read");
     let root: serde_json::Value = json5::from_str(&text).expect("parse");
@@ -316,7 +313,7 @@ fn xhigh_whitelist_covers_known_openai_families() {
 #[test]
 fn model_supports_xhigh_explicit_override_wins() {
     let base = ModelConfig {
-        id: "gpt-5.5".to_owned(),
+        id: tau_proto::ModelName::new("gpt-5.5"),
         name: None,
         max_output_tokens: None,
         context_window: None,
@@ -335,7 +332,7 @@ fn model_supports_xhigh_explicit_override_wins() {
     );
 
     let forced_on = ModelConfig {
-        id: "exotic-local-model".to_owned(),
+        id: tau_proto::ModelName::new("exotic-local-model"),
         supports_xhigh: Some(true),
         ..base
     };
@@ -430,13 +427,15 @@ fn remove_provider_in_returns_false_when_absent() {
         config_dir: Some(tmp.path().to_path_buf()),
         state_dir: None,
     };
-    assert!(!remove_provider_in(&dirs, "missing").expect("ok"));
+    let missing = tau_proto::ProviderName::new("missing");
+    let p1 = tau_proto::ProviderName::new("p1");
+    assert!(!remove_provider_in(&dirs, &missing).expect("ok"));
 
     let provider = ProviderConfig {
         auth: Some("none".to_owned()),
         ..Default::default()
     };
-    add_provider_in(&dirs, "p1", &provider).expect("add");
-    assert!(remove_provider_in(&dirs, "p1").expect("remove"));
-    assert!(!remove_provider_in(&dirs, "p1").expect("removed twice"));
+    add_provider_in(&dirs, &p1, &provider).expect("add");
+    assert!(remove_provider_in(&dirs, &p1).expect("remove"));
+    assert!(!remove_provider_in(&dirs, &p1).expect("removed twice"));
 }

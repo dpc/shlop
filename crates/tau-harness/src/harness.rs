@@ -176,10 +176,11 @@ pub(crate) struct Harness {
     /// list will actually contain it. Without this, the agent
     /// receives a stale message list (the "Ready" loop bug).
     pub(crate) pending_user_prompt_dispatches: VecDeque<ConversationId>,
-    /// All available models as `"provider/model_id"` strings.
+    /// All available models.
     pub(crate) available_models: Vec<ModelId>,
-    /// Currently selected model as `"provider/model_id"`.
-    pub(crate) selected_model: ModelId,
+    /// Currently selected model. `None` means no model is selected
+    /// yet (no providers configured, or the user hasn't picked one).
+    pub(crate) selected_model: Option<ModelId>,
     /// Currently selected reasoning effort level.
     pub(crate) selected_effort: tau_proto::Effort,
     /// Currently selected reasoning summary mode. Sent to providers
@@ -356,12 +357,10 @@ impl Harness {
             state_dir.clone(),
             harness_settings.session_retention(),
         );
-        let selected_effort = selected_effort_for_model(
-            &dirs,
-            &harness_settings,
-            &model_registry,
-            selected_model.as_str(),
-        );
+        let selected_effort = selected_model
+            .as_ref()
+            .map(|m| selected_effort_for_model(&dirs, &harness_settings, &model_registry, m))
+            .unwrap_or_default();
 
         let default_conversation_id = ConversationId::new("default");
         let mut store = store;
@@ -555,17 +554,15 @@ impl Harness {
             harness_settings_error,
             models_error,
         } = load_model_list(&dirs);
-        tracing::debug!(target: "tau_harness::startup", selected_model = %selected_model, elapsed_ms = startup_started_at.elapsed().as_millis(), "model list loaded");
+        tracing::debug!(target: "tau_harness::startup", selected_model = ?selected_model, elapsed_ms = startup_started_at.elapsed().as_millis(), "model list loaded");
         crate::session_cleanup::spawn_session_cleanup(
             state_dir.clone(),
             harness_settings.session_retention(),
         );
-        let selected_effort = selected_effort_for_model(
-            &dirs,
-            &harness_settings,
-            &model_registry,
-            selected_model.as_str(),
-        );
+        let selected_effort = selected_model
+            .as_ref()
+            .map(|m| selected_effort_for_model(&dirs, &harness_settings, &model_registry, m))
+            .unwrap_or_default();
 
         let default_conversation_id = ConversationId::new("default");
         let mut store = store;
@@ -1439,31 +1436,27 @@ impl Harness {
         match event {
             Event::UiModelSelect(select) => {
                 if self.available_models.contains(&select.model) {
-                    let was_empty = self.selected_model.is_empty();
-                    self.selected_model = select.model.clone();
+                    let was_empty = self.selected_model.is_none();
+                    let model = select.model.clone();
+                    self.selected_model = Some(model.clone());
                     let (live_settings, _) = load_harness_settings_or_warn(&self.dirs);
                     self.selected_effort = selected_effort_for_model(
                         &self.dirs,
                         &live_settings,
                         &self.model_registry,
-                        self.selected_model.as_str(),
+                        &model,
                     );
-                    save_harness_state(
-                        &self.dirs,
-                        self.selected_model.as_str(),
-                        self.selected_effort,
-                    );
+                    save_harness_state(&self.dirs, Some(&model), self.selected_effort);
                     self.context_input_tokens = None;
                     self.context_cached_tokens = None;
                     self.context_percent_used = None;
+                    let context_window = model_context_window(&self.model_registry, &model);
+                    let levels = efforts_for_model(&self.model_registry, &model);
                     self.publish_event(
                         None,
                         Event::HarnessModelSelected(HarnessModelSelected {
-                            model: self.selected_model.clone(),
-                            context_window: model_context_window(
-                                &self.model_registry,
-                                self.selected_model.as_str(),
-                            ),
+                            model: Some(model),
+                            context_window,
                         }),
                     );
                     self.publish_event(
@@ -1480,9 +1473,6 @@ impl Harness {
                             level: self.selected_effort,
                         }),
                     );
-                    // Levels depend on the new model's provider.
-                    let levels =
-                        efforts_for_model(&self.model_registry, self.selected_model.as_str());
                     self.publish_event(
                         None,
                         Event::HarnessEffortsAvailable(tau_proto::HarnessEffortsAvailable {
@@ -1507,16 +1497,24 @@ impl Harness {
                 Ok(true)
             }
             Event::UiSetEffort(req) => {
-                let levels = efforts_for_model(&self.model_registry, self.selected_model.as_str());
+                let levels = self
+                    .selected_model
+                    .as_ref()
+                    .map(|m| efforts_for_model(&self.model_registry, m))
+                    .unwrap_or_default();
                 let clamped = clamp_effort(req.level, &levels);
                 if clamped != req.level {
+                    let model_label = self
+                        .selected_model
+                        .as_ref()
+                        .map(ModelId::to_string)
+                        .unwrap_or_else(|| "(no model)".to_owned());
                     self.publish_event(
                         None,
                         Event::HarnessInfo(tau_proto::HarnessInfo {
                             message: format!(
-                                "effort `{}` not supported by `{}`; using `{}` instead",
+                                "effort `{}` not supported by `{model_label}`; using `{}` instead",
                                 req.level.as_str(),
-                                self.selected_model.as_str(),
                                 clamped.as_str(),
                             ),
                             level: tau_proto::HarnessInfoLevel::Normal,
@@ -1526,7 +1524,7 @@ impl Harness {
                 self.selected_effort = clamped;
                 save_harness_state(
                     &self.dirs,
-                    self.selected_model.as_str(),
+                    self.selected_model.as_ref(),
                     self.selected_effort,
                 );
                 self.publish_event(
@@ -1557,7 +1555,7 @@ impl Harness {
                             text: prompt.text.clone(),
                         }),
                     );
-                    if self.selected_model.is_empty() {
+                    if self.selected_model.is_none() {
                         self.emit_info("no model selected — use /model to pick one");
                     }
                 }
@@ -2121,7 +2119,10 @@ impl Harness {
         else {
             return;
         };
-        let ctx_window = model_context_window(&self.model_registry, self.selected_model.as_str());
+        let ctx_window = self
+            .selected_model
+            .as_ref()
+            .and_then(|m| model_context_window(&self.model_registry, m));
         let progress = tau_proto::DelegateProgress {
             call_id,
             task_name,
@@ -2605,11 +2606,7 @@ impl Harness {
         }
 
         // Publish SessionPromptCreated — both the agent and UI see it.
-        let model = if self.selected_model.is_empty() {
-            None
-        } else {
-            Some(self.selected_model.clone())
-        };
+        let model = self.selected_model.clone();
         if let Some(model) = model.as_ref() {
             self.token_usage.start_request(model);
             self.prompt_models
@@ -2689,7 +2686,7 @@ impl Harness {
                 .add_sent(&model, sent_tokens, cached_tokens);
             self.token_usage.add_received(&model, received_tokens);
             response.token_usage = Some(AgentTokenUsage {
-                model,
+                model: Some(model),
                 prompt_sent_tokens: sent_tokens,
                 prompt_cached_tokens: cached_tokens,
                 response_received_tokens: received_tokens,
@@ -2826,8 +2823,10 @@ impl Harness {
         cid: &ConversationId,
         input_tokens: Option<u64>,
     ) {
-        let context_window =
-            model_context_window(&self.model_registry, self.selected_model.as_str());
+        let context_window = self
+            .selected_model
+            .as_ref()
+            .and_then(|m| model_context_window(&self.model_registry, m));
         let percent_used = match (context_window, input_tokens) {
             (Some(w), Some(tokens)) => Some(context_percent_used(tokens, w)),
             _ => None,
@@ -2843,8 +2842,10 @@ impl Harness {
     }
 
     fn update_context_usage(&mut self, input_tokens: Option<u64>, cached_tokens: Option<u64>) {
-        let context_window =
-            model_context_window(&self.model_registry, self.selected_model.as_str());
+        let context_window = self
+            .selected_model
+            .as_ref()
+            .and_then(|m| model_context_window(&self.model_registry, m));
         let percent_used = match (context_window, input_tokens) {
             (Some(w), Some(tokens)) => Some(context_percent_used(tokens, w)),
             _ => None,
@@ -3355,7 +3356,7 @@ impl Harness {
             Vec::new(),
             "s1",
         )?;
-        harness.selected_model = "test/model".into();
+        harness.selected_model = Some("test/model".parse().expect("model id"));
 
         let cid = harness.default_conversation_id.clone();
         harness.publish_event_for_conversation(

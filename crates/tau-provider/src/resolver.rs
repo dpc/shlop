@@ -2,6 +2,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 use tau_config::settings::{AuthType, ModelRegistry, PromptCacheRetention, ProviderConfig};
+use tau_proto::{ModelId, ModelName, ProviderName};
 
 use crate::storage::{self, Credentials, ProviderKind};
 
@@ -15,7 +16,7 @@ pub enum ResolvedBackend {
 pub struct ResolvedChatCompletions {
     pub base_url: String,
     pub api_key: String,
-    pub model_id: String,
+    pub model_id: ModelName,
     pub supports_reasoning_effort: bool,
     pub prompt_cache_key: Option<String>,
     pub prompt_cache_retention: Option<PromptCacheRetention>,
@@ -26,7 +27,7 @@ pub struct ResolvedChatCompletions {
 pub struct ResolvedResponses {
     pub base_url: String,
     pub api_key: String,
-    pub model_id: String,
+    pub model_id: ModelName,
     pub account_id: Option<String>,
     pub supports_reasoning_effort: bool,
     pub supports_reasoning_summary: bool,
@@ -34,25 +35,24 @@ pub struct ResolvedResponses {
     pub prompt_cache_retention: Option<PromptCacheRetention>,
 }
 
-/// Resolve a `provider/model` string against the configured provider
-/// registry and the caller-supplied auth store.
+/// Resolve a [`ModelId`] against the configured provider registry and
+/// the caller-supplied auth store.
 ///
 /// The caller threads `auth_store` so that any OAuth refresh performed
 /// during resolution is observable on subsequent calls without a disk
 /// reload. Refreshes are also persisted to disk via
 /// [`storage::save_provider`].
 pub fn resolve(
-    model: &str,
+    model: &ModelId,
     models: &ModelRegistry,
     auth_store: &mut storage::AuthStore,
 ) -> Option<ResolvedBackend> {
-    let (provider_name, model_id) = model.split_once('/')?;
-    let provider = models.providers.get(provider_name)?;
+    let provider = models.providers.get(&model.provider)?;
     let auth_type = match provider.auth_type() {
         Ok(t) => t,
         Err(other) => {
             tracing::warn!(
-                provider = provider_name,
+                provider = %model.provider,
                 auth = other,
                 "unknown `auth` value in models.json5; not resolving"
             );
@@ -61,19 +61,23 @@ pub fn resolve(
     };
 
     match auth_type {
-        AuthType::OpenaiCodex => responses_backend(provider_name, provider, auth_store, model_id),
-        AuthType::GithubCopilot => copilot_backend(provider_name, provider, auth_store, model_id),
+        AuthType::OpenaiCodex => {
+            responses_backend(&model.provider, provider, auth_store, &model.model)
+        }
+        AuthType::GithubCopilot => {
+            copilot_backend(&model.provider, provider, auth_store, &model.model)
+        }
         AuthType::ApiKey | AuthType::None => {
-            chat_completions_backend(provider_name, provider, auth_store, model_id)
+            chat_completions_backend(&model.provider, provider, auth_store, &model.model)
         }
     }
 }
 
 fn responses_backend(
-    provider_name: &str,
+    provider_name: &ProviderName,
     provider: &ProviderConfig,
     auth_store: &mut storage::AuthStore,
-    model_id: &str,
+    model_id: &ModelName,
 ) -> Option<ResolvedBackend> {
     let (access_token, account_id) = match auth_store.providers.get(provider_name)? {
         Credentials::Oauth {
@@ -98,11 +102,11 @@ fn responses_backend(
                     };
                     if let Err(error) = storage::save_provider(provider_name, &creds) {
                         tracing::warn!(
-                            provider = provider_name,
+                            provider = %provider_name,
                             "failed to save refreshed credentials: {error}"
                         );
                     }
-                    auth_store.providers.insert(provider_name.to_owned(), creds);
+                    auth_store.providers.insert(provider_name.clone(), creds);
                 }
             }
             (access_token, account_id)
@@ -113,7 +117,7 @@ fn responses_backend(
     Some(ResolvedBackend::Responses(ResolvedResponses {
         base_url: base_url.to_owned(),
         api_key: access_token,
-        model_id: model_id.to_owned(),
+        model_id: model_id.clone(),
         account_id,
         supports_reasoning_effort: provider.compat.supports_reasoning_effort,
         supports_reasoning_summary: supports_reasoning_summary(provider, base_url),
@@ -123,10 +127,10 @@ fn responses_backend(
 }
 
 fn copilot_backend(
-    provider_name: &str,
+    provider_name: &ProviderName,
     provider: &ProviderConfig,
     auth_store: &mut storage::AuthStore,
-    model_id: &str,
+    model_id: &ModelName,
 ) -> Option<ResolvedBackend> {
     let access_token = match auth_store.providers.get(provider_name)? {
         Credentials::Oauth { access_token, .. } => access_token.clone(),
@@ -139,17 +143,17 @@ fn copilot_backend(
         prompt_cache_retention: prompt_cache_retention(provider, &base_url),
         base_url,
         api_key: access_token,
-        model_id: model_id.to_owned(),
+        model_id: model_id.clone(),
         supports_reasoning_effort: provider.compat.supports_reasoning_effort,
         supports_llama_cpp_cache: provider.compat.supports_llama_cpp_cache,
     }))
 }
 
 fn chat_completions_backend(
-    provider_name: &str,
+    provider_name: &ProviderName,
     provider: &ProviderConfig,
     auth_store: &mut storage::AuthStore,
-    model_id: &str,
+    model_id: &ModelName,
 ) -> Option<ResolvedBackend> {
     let base_url =
         provider
@@ -164,7 +168,7 @@ fn chat_completions_backend(
         prompt_cache_retention: prompt_cache_retention(provider, &base_url),
         base_url,
         api_key: provider.api_key.clone().unwrap_or_default(),
-        model_id: model_id.to_owned(),
+        model_id: model_id.clone(),
         supports_reasoning_effort: provider.compat.supports_reasoning_effort,
         supports_llama_cpp_cache: provider.compat.supports_llama_cpp_cache,
     }))

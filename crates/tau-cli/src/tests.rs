@@ -234,7 +234,7 @@ fn new_session_preserves_model_status() {
     );
 
     renderer.handle(&Event::HarnessModelSelected(HarnessModelSelected {
-        model: "test/model".into(),
+        model: Some("test/model".into()),
         context_window: Some(100_000),
     }));
     sync(&handle);

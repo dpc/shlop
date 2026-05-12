@@ -145,7 +145,7 @@ where
                 let mut auth_store = tau_provider::storage::load().unwrap_or_default();
                 let backend = prompt
                     .model
-                    .as_deref()
+                    .as_ref()
                     .and_then(|m| tau_provider::resolve(m, &model_registry, &mut auth_store))
                     .map(BackendConfig::from);
 
@@ -272,7 +272,7 @@ impl From<tau_provider::resolver::ResolvedBackend> for BackendConfig {
                 Self::ChatCompletions(openai::OpenAiConfig {
                     base_url: cfg.base_url,
                     api_key: cfg.api_key,
-                    model_id: cfg.model_id,
+                    model_id: cfg.model_id.into_string(),
                     supports_reasoning_effort: cfg.supports_reasoning_effort,
                     prompt_cache_key: cfg.prompt_cache_key,
                     prompt_cache_retention: cfg.prompt_cache_retention,
@@ -283,7 +283,7 @@ impl From<tau_provider::resolver::ResolvedBackend> for BackendConfig {
                 Self::Responses(responses::ResponsesConfig {
                     base_url: cfg.base_url,
                     api_key: cfg.api_key,
-                    model_id: cfg.model_id,
+                    model_id: cfg.model_id.into_string(),
                     account_id: cfg.account_id,
                     supports_reasoning_effort: cfg.supports_reasoning_effort,
                     supports_reasoning_summary: cfg.supports_reasoning_summary,

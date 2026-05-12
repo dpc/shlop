@@ -97,7 +97,7 @@ impl Harness {
     pub(crate) fn try_advance_queue(&mut self) {
         if !self.turn_state.is_idle()
             || !self.extensions_all_ready()
-            || self.selected_model.is_empty()
+            || self.selected_model.is_none()
         {
             return;
         }
@@ -151,7 +151,7 @@ impl Harness {
     /// - per-conversation: that conversation already has a prompt in flight or
     ///   is waiting on tool results.
     pub(crate) fn dispatch_blocked_for(&self, cid: &ConversationId) -> bool {
-        if self.selected_model.is_empty()
+        if self.selected_model.is_none()
             || !self.turn_state.is_idle()
             || !self.extensions_all_ready()
         {

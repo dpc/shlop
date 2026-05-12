@@ -217,7 +217,7 @@ fn empty_tool_name_does_not_panic_and_surfaces_error() {
 
     // Pre-seed as if the agent had just been prompted and is now
     // responding with tool_calls.
-    h.selected_model = "test/model".into();
+    h.selected_model = Some("test/model".into());
     h.registry.register(
         "conn-delegate",
         ToolSpec {
@@ -310,7 +310,7 @@ fn empty_tool_call_id_is_normalized_to_synthetic_id() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
 
-    h.selected_model = "test/model".into();
+    h.selected_model = Some("test/model".into());
     h.registry.register(
         "conn-delegate",
         ToolSpec {

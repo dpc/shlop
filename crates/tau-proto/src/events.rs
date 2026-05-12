@@ -460,8 +460,9 @@ pub struct HarnessModelsAvailable {
 /// The harness announces which model is currently selected.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct HarnessModelSelected {
-    /// `"provider_name/model_id"`, or empty if none.
-    pub model: ModelId,
+    /// Selected model, or `None` when no model is selected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelId>,
     /// Total context window size, in tokens, if known for the model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u64>,

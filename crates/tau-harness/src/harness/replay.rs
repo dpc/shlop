@@ -80,10 +80,10 @@ impl Harness {
         }
         let selected_event = Event::HarnessModelSelected(HarnessModelSelected {
             model: self.selected_model.clone(),
-            context_window: model_context_window(
-                &self.model_registry,
-                self.selected_model.as_str(),
-            ),
+            context_window: self
+                .selected_model
+                .as_ref()
+                .and_then(|m| model_context_window(&self.model_registry, m)),
         });
         if selector_matches_event(selectors, &selected_event) {
             let _ = self
@@ -108,7 +108,11 @@ impl Harness {
                 .bus
                 .send_to(client_id, None, Frame::Event(effort_event));
         }
-        let levels = efforts_for_model(&self.model_registry, self.selected_model.as_str());
+        let levels = self
+            .selected_model
+            .as_ref()
+            .map(|m| efforts_for_model(&self.model_registry, m))
+            .unwrap_or_default();
         let levels_event =
             Event::HarnessEffortsAvailable(tau_proto::HarnessEffortsAvailable { levels });
         if selector_matches_event(selectors, &levels_event) {

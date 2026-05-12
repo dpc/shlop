@@ -20,4 +20,5 @@ dialoguer.workspace = true
 serde_json.workspace = true
 tau-cli-picker.workspace = true
 tau-config.workspace = true
+tau-proto.workspace = true
 tau-provider.workspace = true

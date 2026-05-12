@@ -13,7 +13,9 @@ use crate::settings::{load_harness_settings_or_warn, load_models_or_warn};
 /// malformed config doesn't silently fall back to defaults.
 pub(crate) struct LoadedModelList {
     pub available: Vec<ModelId>,
-    pub selected: ModelId,
+    /// The model the harness will start in, if any. `None` means no
+    /// providers / models are configured at all.
+    pub selected: Option<ModelId>,
     pub model_registry: tau_config::settings::ModelRegistry,
     pub harness_settings: tau_config::settings::HarnessSettings,
     pub harness_settings_error: Option<tau_config::settings::SettingsError>,
@@ -24,29 +26,24 @@ pub(crate) struct LoadedModelList {
 /// and determine the initially selected model.
 ///
 /// Priority: default_model from harness.json5 → last used from state →
-/// first available → empty (no model).
+/// first available → `None` (no model).
 pub(crate) fn load_model_list(dirs: &tau_config::settings::TauDirs) -> LoadedModelList {
     let (model_registry, models_error) = load_models_or_warn(dirs);
     let (harness_settings, harness_settings_error) = load_harness_settings_or_warn(dirs);
     let mut available: Vec<ModelId> = Vec::new();
     for (provider_name, provider_cfg) in &model_registry.providers {
         for model in &provider_cfg.models {
-            available.push(format!("{provider_name}/{}", model.id).into());
+            available.push(ModelId::new(provider_name.clone(), model.id.clone()));
         }
     }
-    available.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    available.sort();
     let selected = harness_settings
         .default_model
         .as_ref()
-        .filter(|m| available.iter().any(|a| a.as_str() == m.as_str()))
-        .map(|m| ModelId::from(m.clone()))
-        .or_else(|| {
-            load_last_selected_model(dirs)
-                .filter(|m| available.iter().any(|a| a.as_str() == m.as_str()))
-                .map(ModelId::from)
-        })
-        .or_else(|| available.first().cloned())
-        .unwrap_or_default();
+        .filter(|m| available.contains(m))
+        .cloned()
+        .or_else(|| load_last_selected_model(dirs).filter(|m| available.contains(m)))
+        .or_else(|| available.first().cloned());
     LoadedModelList {
         available,
         selected,
@@ -57,12 +54,10 @@ pub(crate) fn load_model_list(dirs: &tau_config::settings::TauDirs) -> LoadedMod
     }
 }
 
-/// Returns the efforts valid for `model` (a `provider/model_id`
-/// string).
+/// Returns the efforts valid for `model`.
 ///
 /// Resolution order:
-/// 1. Empty list when the model id is empty or its provider isn't in the
-///    registry.
+/// 1. Empty list when the model's provider isn't in the registry.
 /// 2. Per-model `reasoningEfforts` (escape hatch): an authoritative list that
 ///    replaces both the canonical default set and the provider-level
 ///    `supportsReasoningEffort` flag.
@@ -72,19 +67,13 @@ pub(crate) fn load_model_list(dirs: &tau_config::settings::TauDirs) -> LoadedMod
 ///    [`tau_config::settings::is_known_xhigh_model_id`].
 pub(crate) fn efforts_for_model(
     registry: &tau_config::settings::ModelRegistry,
-    model: &str,
+    model: &ModelId,
 ) -> Vec<tau_proto::Effort> {
     use tau_proto::Effort as L;
-    if model.is_empty() {
-        return Vec::new();
-    }
-    let Some((provider_name, model_id)) = model.split_once('/') else {
+    let Some(provider) = registry.providers.get(&model.provider) else {
         return Vec::new();
     };
-    let Some(provider) = registry.providers.get(provider_name) else {
-        return Vec::new();
-    };
-    let model_cfg = provider.models.iter().find(|m| m.id == model_id);
+    let model_cfg = provider.models.iter().find(|m| m.id == model.model);
     if let Some(custom) = model_cfg.and_then(|m| m.reasoning_efforts.as_ref()) {
         // Authoritative override — preserve user-specified order
         // but drop duplicates so the cycle helper doesn't loop.
@@ -107,14 +96,13 @@ pub(crate) fn efforts_for_model(
 
 pub(crate) fn model_context_window(
     registry: &tau_config::settings::ModelRegistry,
-    model: &str,
+    model: &ModelId,
 ) -> Option<u64> {
-    let (provider_name, model_id) = model.split_once('/')?;
-    let provider = registry.providers.get(provider_name)?;
+    let provider = registry.providers.get(&model.provider)?;
     provider
         .models
         .iter()
-        .find(|candidate| candidate.id == model_id)
+        .find(|candidate| candidate.id == model.model)
         .and_then(|candidate| candidate.context_window)
 }
 
@@ -154,7 +142,7 @@ fn parse_effort(value: &str) -> Option<tau_proto::Effort> {
 
 fn load_last_efforts(
     dirs: &tau_config::settings::TauDirs,
-) -> std::collections::HashMap<String, tau_proto::Effort> {
+) -> std::collections::HashMap<ModelId, tau_proto::Effort> {
     let Some(path) = dirs.state_dir.as_ref().map(|d| d.join("harness.json5")) else {
         return std::collections::HashMap::new();
     };
@@ -168,10 +156,16 @@ fn load_last_efforts(
     let mut levels = std::collections::HashMap::new();
     if let Some(map) = json["last_efforts"].as_object() {
         for (model, level) in map {
+            let Ok(model) = model.parse::<ModelId>() else {
+                // Skip entries persisted with a malformed id rather
+                // than failing the whole load — the on-disk state file
+                // is best-effort UX, not a contract.
+                continue;
+            };
             let Some(level) = level.as_str().and_then(parse_effort) else {
                 continue;
             };
-            levels.insert(model.clone(), level);
+            levels.insert(model, level);
         }
     }
 
@@ -182,7 +176,7 @@ pub(crate) fn selected_effort_for_model(
     dirs: &tau_config::settings::TauDirs,
     harness_settings: &tau_config::settings::HarnessSettings,
     registry: &tau_config::settings::ModelRegistry,
-    model: &str,
+    model: &ModelId,
 ) -> tau_proto::Effort {
     let allowed = efforts_for_model(registry, model);
     let requested = harness_settings
@@ -208,17 +202,20 @@ pub(crate) fn middle_effort(allowed: &[tau_proto::Effort]) -> tau_proto::Effort 
 }
 
 /// Load the last-selected model from `<state_dir>/harness.json5`.
-fn load_last_selected_model(dirs: &tau_config::settings::TauDirs) -> Option<String> {
+/// Returns `None` if the file is missing, malformed, or the saved id
+/// no longer parses as a `provider/model`.
+fn load_last_selected_model(dirs: &tau_config::settings::TauDirs) -> Option<ModelId> {
     let path = dirs.state_dir.as_ref()?.join("harness.json5");
     let text = std::fs::read_to_string(path).ok()?;
     let json: serde_json::Value = serde_json::from_str(&text).ok()?;
-    json["last_selected_model"].as_str().map(String::from)
+    json["last_selected_model"].as_str()?.parse().ok()
 }
 
-/// Persist model + effort to `<state_dir>/harness.json5`.
+/// Persist model + effort to `<state_dir>/harness.json5`. `model: None`
+/// records that no model is currently selected.
 pub(crate) fn save_harness_state(
     dirs: &tau_config::settings::TauDirs,
-    model: &str,
+    model: Option<&ModelId>,
     effort: tau_proto::Effort,
 ) {
     let Some(dir) = dirs.state_dir.as_ref() else {
@@ -227,15 +224,20 @@ pub(crate) fn save_harness_state(
     let path = dir.join("harness.json5");
     let _ = std::fs::create_dir_all(dir);
     let mut last_efforts = load_last_efforts(dirs);
-    if !model.is_empty() {
-        last_efforts.insert(model.to_owned(), effort);
+    if let Some(model) = model {
+        last_efforts.insert(model.clone(), effort);
     }
     let effort_json = last_efforts
         .into_iter()
-        .map(|(model, level)| (model, serde_json::Value::String(level.as_str().to_owned())))
+        .map(|(model, level)| {
+            (
+                model.to_string(),
+                serde_json::Value::String(level.as_str().to_owned()),
+            )
+        })
         .collect::<serde_json::Map<String, serde_json::Value>>();
     let json = serde_json::json!({
-        "last_selected_model": model,
+        "last_selected_model": model.map(ModelId::to_string).unwrap_or_default(),
         "last_efforts": effort_json,
     });
     let _ = serde_json::to_string_pretty(&json)

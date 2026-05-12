@@ -1727,6 +1727,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tau-config",
+ "tau-proto",
  "tracing",
  "ureq",
  "url",
@@ -1741,6 +1742,7 @@ dependencies = [
  "serde_json",
  "tau-cli-picker",
  "tau-config",
+ "tau-proto",
  "tau-provider",
 ]
 

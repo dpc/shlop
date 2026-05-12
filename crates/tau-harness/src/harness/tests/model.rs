@@ -76,11 +76,21 @@ fn selected_effort_is_model_specific_and_clamped() {
     let model_registry = tau_config::settings::load_models_in(&dirs).expect("load models");
 
     assert_eq!(
-        selected_effort_for_model(&dirs, &harness_settings, &model_registry, "openai/gpt-4.1",),
+        selected_effort_for_model(
+            &dirs,
+            &harness_settings,
+            &model_registry,
+            &"openai/gpt-4.1".into()
+        ),
         tau_proto::Effort::High
     );
     assert_eq!(
-        selected_effort_for_model(&dirs, &harness_settings, &model_registry, "local/llama"),
+        selected_effort_for_model(
+            &dirs,
+            &harness_settings,
+            &model_registry,
+            &"local/llama".into()
+        ),
         tau_proto::Effort::Off
     );
 }
@@ -126,11 +136,21 @@ fn fresh_install_picks_middle_effort_when_no_history() {
     let model_registry = tau_config::settings::load_models_in(&dirs).expect("load models");
 
     assert_eq!(
-        selected_effort_for_model(&dirs, &harness_settings, &model_registry, "openai/gpt-4.1"),
+        selected_effort_for_model(
+            &dirs,
+            &harness_settings,
+            &model_registry,
+            &"openai/gpt-4.1".into()
+        ),
         tau_proto::Effort::Low,
     );
     assert_eq!(
-        selected_effort_for_model(&dirs, &harness_settings, &model_registry, "local/llama"),
+        selected_effort_for_model(
+            &dirs,
+            &harness_settings,
+            &model_registry,
+            &"local/llama".into()
+        ),
         tau_proto::Effort::Off,
     );
 }
@@ -248,37 +268,37 @@ fn efforts_for_model_includes_xhigh_for_supported_models_only() {
     let without_xhigh = [L::Off, L::Minimal, L::Low, L::Medium, L::High];
 
     assert_eq!(
-        efforts_for_model(&registry, "openai/gpt-5.5"),
+        efforts_for_model(&registry, &"openai/gpt-5.5".into()),
         with_xhigh,
         "whitelisted OpenAI model gets xhigh",
     );
     assert_eq!(
-        efforts_for_model(&registry, "openai/gpt-5.4-mini"),
+        efforts_for_model(&registry, &"openai/gpt-5.4-mini".into()),
         without_xhigh,
         "mini variant excluded by whitelist",
     );
     assert_eq!(
-        efforts_for_model(&registry, "openai/weird-custom"),
+        efforts_for_model(&registry, &"openai/weird-custom".into()),
         with_xhigh,
         "explicit supportsXhigh=true opts in",
     );
     assert_eq!(
-        efforts_for_model(&registry, "openai/gpt-5.5-pinned-off"),
+        efforts_for_model(&registry, &"openai/gpt-5.5-pinned-off".into()),
         without_xhigh,
         "explicit supportsXhigh=false opts out",
     );
     assert_eq!(
-        efforts_for_model(&registry, "local/llama"),
+        efforts_for_model(&registry, &"local/llama".into()),
         vec![L::Off],
         "non-reasoning provider stays at Off-only",
     );
     assert!(
-        efforts_for_model(&registry, "openai/unknown-id").last() == Some(&L::High),
+        efforts_for_model(&registry, &"openai/unknown-id".into()).last() == Some(&L::High),
         "unknown id falls back to the canonical 5-level set",
     );
     assert!(
-        efforts_for_model(&registry, "").is_empty(),
-        "empty model id yields no choices",
+        efforts_for_model(&registry, &"unknown-provider/whatever".into()).is_empty(),
+        "unknown provider yields no choices",
     );
 }
 
@@ -339,22 +359,22 @@ fn efforts_for_model_honours_reasoning_efforts_override() {
     let registry = tau_config::settings::load_models_in(&dirs).expect("load");
 
     assert_eq!(
-        efforts_for_model(&registry, "openai/gpt-5.4-pro"),
+        efforts_for_model(&registry, &"openai/gpt-5.4-pro".into()),
         vec![L::Medium, L::High, L::XHigh],
         "user-specified list replaces the canonical default set",
     );
     assert_eq!(
-        efforts_for_model(&registry, "openai/weird"),
+        efforts_for_model(&registry, &"openai/weird".into()),
         vec![L::Off, L::High],
         "duplicates collapse but order is preserved",
     );
     assert_eq!(
-        efforts_for_model(&registry, "pinned/exotic"),
+        efforts_for_model(&registry, &"pinned/exotic".into()),
         vec![L::Low, L::High],
         "per-model override beats provider supportsReasoningEffort=false",
     );
     assert_eq!(
-        efforts_for_model(&registry, "pinned/plain"),
+        efforts_for_model(&registry, &"pinned/plain".into()),
         vec![L::Off],
         "without override, provider-level flag still wins",
     );

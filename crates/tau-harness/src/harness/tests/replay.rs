@@ -326,7 +326,7 @@ fn resumed_harness_replays_persisted_session_history() {
 
     {
         let mut h = echo_harness_for("s1", &sp).expect("start");
-        h.selected_model = "test/model".into();
+        h.selected_model = Some("test/model".into());
 
         h.submit_user_prompt("s1".into(), "remember potato".to_owned())
             .expect("submit first prompt");
@@ -352,7 +352,7 @@ fn resumed_harness_replays_persisted_session_history() {
     }
 
     let mut resumed = echo_harness_for("s1", &sp).expect("resume");
-    resumed.selected_model = "test/model".into();
+    resumed.selected_model = Some("test/model".into());
 
     resumed
         .submit_user_prompt("s1".into(), "what was it?".to_owned())
@@ -391,7 +391,7 @@ fn thinking_is_persisted_but_excluded_from_prompt_replay() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
-    h.selected_model = "test/model".into();
+    h.selected_model = Some("test/model".into());
 
     append_user_message_via_event(&mut h, "s1", "first");
 

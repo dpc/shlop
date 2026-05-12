@@ -9,7 +9,7 @@ fn cross_session_prompt_is_rejected() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start"); // bound to "s1"
 
-    h.selected_model = "test/model".into();
+    h.selected_model = Some("test/model".into());
     let submission = h
         .submit_user_prompt("chat-1".into(), "hello".to_owned())
         .expect("submit");
@@ -46,7 +46,7 @@ fn pure_mutating_pure_serializes_through_dispatch_state_machine() {
 
     // Pre-seed turn state as if the agent had just been prompted
     // and is about to respond with tool calls.
-    h.selected_model = "test/model".into();
+    h.selected_model = Some("test/model".into());
     let cid = h.default_conversation_id.clone();
     seed_agent_thinking(&mut h, &cid, "sp-x");
     h.prompt_conversations.insert("sp-x".into(), cid);
@@ -146,7 +146,7 @@ fn multi_tool_turn_keeps_all_results_in_followup_prompt() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
-    h.selected_model = "test/model".into();
+    h.selected_model = Some("test/model".into());
 
     append_user_message_via_event(&mut h, "s1", "go");
     let cid = h.default_conversation_id.clone();
@@ -245,7 +245,7 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
-    h.selected_model = "test/model".into();
+    h.selected_model = Some("test/model".into());
 
     let cid = h.default_conversation_id.clone();
     seed_agent_thinking(&mut h, &cid, "sp-x");
@@ -400,7 +400,7 @@ fn linear_session_prompts_strictly_extend_previous_messages() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
-    h.selected_model = "test/model".into();
+    h.selected_model = Some("test/model".into());
 
     append_user_message_via_event(&mut h, "s1", "hello");
 
@@ -448,7 +448,7 @@ fn queued_prompt_extends_completed_first_prompt() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
-    h.selected_model = "test/model".into();
+    h.selected_model = Some("test/model".into());
 
     let first = h
         .submit_user_prompt("s1".into(), "first".to_owned())
@@ -505,7 +505,7 @@ fn switch_session_rebinds_default_conversation() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start"); // bound to "s1"
-    h.selected_model = "test/model".into();
+    h.selected_model = Some("test/model".into());
 
     let cid = h.default_conversation_id.clone();
     assert_eq!(h.conversations[&cid].session_id.as_str(), "s1");
@@ -565,7 +565,7 @@ fn ext_agent_query_dispatches_while_tool_is_running_and_restores_turn() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
 
-    h.selected_model = "test/model".into();
+    h.selected_model = Some("test/model".into());
     let delegate_events = connect_test_tool(&mut h, "conn-delegate");
     h.registry.register(
         "conn-delegate",
@@ -684,7 +684,7 @@ fn ext_agent_query_during_tool_call_branches_off_unresolved_tool_use() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
 
-    h.selected_model = "test/model".into();
+    h.selected_model = Some("test/model".into());
     let _delegate_events = connect_test_tool(&mut h, "conn-delegate");
     h.registry.register(
         "conn-delegate",
@@ -798,7 +798,7 @@ fn side_conversation_pure_tool_dispatches_through_parent_mutating_delegate() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
 
-    h.selected_model = "test/model".into();
+    h.selected_model = Some("test/model".into());
     let _delegate_events = connect_test_tool(&mut h, "conn-delegate");
     h.registry.register(
         "conn-delegate",
@@ -927,7 +927,7 @@ fn read_only_delegate_calls_dispatch_concurrently() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
 
-    h.selected_model = "test/model".into();
+    h.selected_model = Some("test/model".into());
     let _ = connect_test_tool(&mut h, "conn-delegate");
     h.registry.register(
         "conn-delegate",
@@ -1000,7 +1000,7 @@ fn read_only_delegate_calls_dispatch_concurrently() {
     let td2 = TempDir::new().expect("tempdir");
     let sp2 = td2.path().join("state");
     let mut h2 = echo_harness(&sp2).expect("start");
-    h2.selected_model = "test/model".into();
+    h2.selected_model = Some("test/model".into());
     let _ = connect_test_tool(&mut h2, "conn-delegate");
     h2.registry.register(
         "conn-delegate",
@@ -1068,7 +1068,7 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
 
-    h.selected_model = "test/model".into();
+    h.selected_model = Some("test/model".into());
     let _delegate_events = connect_test_tool(&mut h, "conn-delegate");
     h.registry.register(
         "conn-delegate",
@@ -1213,7 +1213,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
 
-    h.selected_model = "test/model".into();
+    h.selected_model = Some("test/model".into());
     let _ = connect_test_tool(&mut h, "conn-delegate");
     h.registry.register(
         "conn-delegate",
@@ -1406,7 +1406,7 @@ fn nested_ext_agent_query_branches_from_tool_owner_conversation() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
 
-    h.selected_model = "test/model".into();
+    h.selected_model = Some("test/model".into());
     let _ = connect_test_tool(&mut h, "conn-delegate");
     h.registry.register(
         "conn-delegate",
@@ -1531,7 +1531,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
 
-    h.selected_model = "test/model".into();
+    h.selected_model = Some("test/model".into());
     let _ = connect_test_tool(&mut h, "conn-delegate");
     h.registry.register(
         "conn-delegate",
@@ -1643,7 +1643,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
 
-    h.selected_model = "test/model".into();
+    h.selected_model = Some("test/model".into());
     let _ = connect_test_tool(&mut h, "conn-delegate");
     h.registry.register(
         "conn-delegate",
@@ -1803,7 +1803,7 @@ fn parallel_side_convs_do_not_share_branch_cursor() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
 
-    h.selected_model = "test/model".into();
+    h.selected_model = Some("test/model".into());
     let _ = connect_test_tool(&mut h, "conn-delegate");
     h.registry.register(
         "conn-delegate",
@@ -1969,7 +1969,7 @@ fn tool_events_carry_owning_conversation_originator() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
 
-    h.selected_model = "test/model".into();
+    h.selected_model = Some("test/model".into());
     let _ = connect_test_tool(&mut h, "conn-delegate");
     h.registry.register(
         "conn-delegate",

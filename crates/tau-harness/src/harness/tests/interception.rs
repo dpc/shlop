@@ -15,7 +15,7 @@ fn ext_agent_query_defers_dispatch_when_publish_is_intercepted() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
 
-    h.selected_model = "test/model".into();
+    h.selected_model = Some("test/model".into());
     let _ = connect_test_tool(&mut h, "conn-delegate");
     h.registry.register(
         "conn-delegate",

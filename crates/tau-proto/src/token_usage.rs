@@ -65,12 +65,38 @@ impl TokenUsageStats {
 }
 
 /// Usage stats attached to one completed agent response.
+///
+/// `model` is `None` until the harness fills it in from the matching
+/// `prompt_models` entry — agents construct `AgentTokenUsage` without
+/// knowledge of the qualified `provider/model` id.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentTokenUsage {
-    pub model: ModelId,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_model_id"
+    )]
+    pub model: Option<ModelId>,
     pub prompt_sent_tokens: u64,
     pub prompt_cached_tokens: u64,
     pub response_received_tokens: u64,
     pub stats: TokenUsageStats,
+}
+
+/// Deserializer for `Option<ModelId>` that maps a literal `""` to
+/// `None` so persisted session events written before `ModelId` got
+/// strict validation (where the agent's `Default::default()` filled
+/// the field with an empty string before the harness rewrote it) keep
+/// replaying instead of failing the whole session log decode.
+fn deserialize_optional_model_id<'de, D>(deserializer: D) -> Result<Option<ModelId>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt: Option<String> = Option::deserialize(deserializer)?;
+    match opt {
+        None => Ok(None),
+        Some(s) if s.is_empty() => Ok(None),
+        Some(s) => s.parse().map(Some).map_err(serde::de::Error::custom),
+    }
 }

@@ -12,6 +12,7 @@ use std::{fs, io};
 
 use serde::{Deserialize, Serialize};
 use tau_config::atomic::atomic_write_following_symlink;
+use tau_proto::ProviderName;
 
 /// Returns the auth state directory.
 ///
@@ -36,33 +37,15 @@ pub fn auth_dir() -> Option<PathBuf> {
 }
 
 /// Returns the file path that backs the named provider's credentials.
-/// `Err` if the name contains characters that are unsafe to use as a
-/// filename component.
-pub fn provider_auth_path(provider_name: &str) -> io::Result<PathBuf> {
+///
+/// Filename safety is guaranteed by [`ProviderName`]'s constructor —
+/// the type itself rejects names that aren't safe to embed in a path,
+/// so this helper just joins.
+pub fn provider_auth_path(provider_name: &ProviderName) -> io::Result<PathBuf> {
     let dir = auth_dir().ok_or_else(|| {
         io::Error::new(io::ErrorKind::NotFound, "cannot determine data directory")
     })?;
-    validate_provider_name(provider_name)?;
     Ok(dir.join(format!("{provider_name}.json")))
-}
-
-fn validate_provider_name(name: &str) -> io::Result<()> {
-    let ok = !name.is_empty()
-        && !name.starts_with('.')
-        && !name.starts_with('-')
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
-    if ok {
-        Ok(())
-    } else {
-        Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "invalid provider name '{name}': must be non-empty, may not start with '.' or '-', and may only contain ASCII letters, digits, '_', '-', '.'"
-            ),
-        ))
-    }
 }
 
 /// The kind of provider (determines which OAuth flow or auth method).
@@ -154,7 +137,7 @@ impl Credentials {
 /// In-memory snapshot of all configured credentials.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AuthStore {
-    pub providers: HashMap<String, Credentials>,
+    pub providers: HashMap<ProviderName, Credentials>,
 }
 
 /// Load all credentials from disk.
@@ -162,8 +145,10 @@ pub struct AuthStore {
 /// Reads (in order): legacy `auth.json` if present, then each
 /// `auth.d/*.json` file. Per-file entries override the legacy file on
 /// duplicate provider names. Missing files yield an empty store.
+/// Files whose stem fails [`ProviderName`] validation are skipped with
+/// a warning rather than aborting the whole load.
 pub fn load() -> io::Result<AuthStore> {
-    let mut providers: HashMap<String, Credentials> = HashMap::new();
+    let mut providers: HashMap<ProviderName, Credentials> = HashMap::new();
 
     if let Some(legacy_path) = auth_path() {
         if legacy_path.exists() {
@@ -188,10 +173,20 @@ pub fn load() -> io::Result<AuthStore> {
                 let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
                     continue;
                 };
+                let provider = match ProviderName::try_new(stem.to_owned()) {
+                    Ok(p) => p,
+                    Err(error) => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            "skipping auth file with invalid provider name: {error}"
+                        );
+                        continue;
+                    }
+                };
                 let text = fs::read_to_string(&path)?;
                 let creds: Credentials = serde_json::from_str(&text)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                providers.insert(stem.to_owned(), creds);
+                providers.insert(provider, creds);
             }
         }
     }
@@ -205,7 +200,7 @@ pub fn load() -> io::Result<AuthStore> {
 /// whole-store write, it does not read or rewrite other providers, so a
 /// concurrent `tau provider login` against a different provider can run
 /// safely in parallel.
-pub fn save_provider(provider_name: &str, credentials: &Credentials) -> io::Result<()> {
+pub fn save_provider(provider_name: &ProviderName, credentials: &Credentials) -> io::Result<()> {
     let path = provider_auth_path(provider_name)?;
     let dir = path.parent().ok_or_else(|| {
         io::Error::new(io::ErrorKind::NotFound, "no parent for provider auth path")
@@ -235,7 +230,7 @@ pub fn save_provider(provider_name: &str, credentials: &Credentials) -> io::Resu
 /// Removes `auth.d/<name>.json` if present, and also strips the entry
 /// from legacy `auth.json` if that file still exists. Returns true if
 /// any state on disk changed.
-pub fn delete_provider(provider_name: &str) -> io::Result<bool> {
+pub fn delete_provider(provider_name: &ProviderName) -> io::Result<bool> {
     let mut changed = false;
 
     let path = provider_auth_path(provider_name)?;
@@ -275,7 +270,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn validate_provider_name_accepts_typical_names() {
+    fn provider_name_accepts_typical_names() {
         for name in [
             "local",
             "openai",
@@ -285,14 +280,14 @@ mod tests {
             "a",
         ] {
             assert!(
-                validate_provider_name(name).is_ok(),
+                ProviderName::try_new(name.to_owned()).is_ok(),
                 "expected '{name}' to be accepted"
             );
         }
     }
 
     #[test]
-    fn validate_provider_name_rejects_unsafe_inputs() {
+    fn provider_name_rejects_unsafe_inputs() {
         for name in [
             "",
             ".hidden",
@@ -304,7 +299,7 @@ mod tests {
             "../escape",
         ] {
             assert!(
-                validate_provider_name(name).is_err(),
+                ProviderName::try_new(name.to_owned()).is_err(),
                 "expected '{name}' to be rejected"
             );
         }

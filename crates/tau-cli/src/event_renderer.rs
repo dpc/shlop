@@ -74,8 +74,9 @@ pub(crate) struct EventRenderer {
     /// `show_cache_stats` toggles.
     state_dirs: tau_config::settings::TauDirs,
     /// Current model id (cached so we can re-render the status bar
-    /// when the effort changes, and vice versa).
-    current_model: tau_proto::ModelId,
+    /// when the effort changes, and vice versa). `None` until the
+    /// first `HarnessModelSelected`, or when no model is selected.
+    current_model: Option<tau_proto::ModelId>,
     /// Current effort. Mirrored into `effort_state` so the
     /// input thread can read it for Shift+Tab cycling.
     current_effort: tau_proto::Effort,
@@ -261,7 +262,7 @@ impl EventRenderer {
             thinking_history: Vec::new(),
             token_stats_history: Vec::new(),
             state_dirs,
-            current_model: tau_proto::ModelId::from(""),
+            current_model: None,
             current_effort: tau_proto::Effort::Off,
             current_context_percent: None,
             current_context_input_tokens: None,
@@ -435,7 +436,7 @@ impl EventRenderer {
         self.last_turn_latency = None;
         self.handle.clear_output();
         self.render_session_preamble();
-        if !self.current_model.is_empty() {
+        if self.current_model.is_some() {
             self.render_model_status();
         }
     }
@@ -473,32 +474,30 @@ impl EventRenderer {
     fn render_model_status(&mut self) {
         use tau_cli_term::resolve::themed_block;
         use tau_themes::names;
-        let label = if self.current_model.is_empty() {
-            "no model selected".to_string()
-        } else {
-            let level = if matches!(self.current_effort, tau_proto::Effort::Off) {
-                "none".to_owned()
-            } else {
-                self.current_effort.to_string()
-            };
-            let context = format_context_chip(
-                self.current_context_input_tokens,
-                self.current_context_percent,
-                self.current_context_window,
-            );
-            let cache = if self.show_cache_stats {
-                format_cache_hit_chip(
+        let label = match self.current_model.as_ref() {
+            None => "no model selected".to_string(),
+            Some(model) => {
+                let level = if matches!(self.current_effort, tau_proto::Effort::Off) {
+                    "none".to_owned()
+                } else {
+                    self.current_effort.to_string()
+                };
+                let context = format_context_chip(
                     self.current_context_input_tokens,
-                    self.current_context_cached_tokens,
-                )
-            } else {
-                String::new()
-            };
-            let turn_metrics = format_turn_metrics_chip(self.last_turn_latency);
-            format!(
-                "{} ({level}){context}{cache}{turn_metrics}",
-                self.current_model
-            )
+                    self.current_context_percent,
+                    self.current_context_window,
+                );
+                let cache = if self.show_cache_stats {
+                    format_cache_hit_chip(
+                        self.current_context_input_tokens,
+                        self.current_context_cached_tokens,
+                    )
+                } else {
+                    String::new()
+                };
+                let turn_metrics = format_turn_metrics_chip(self.last_turn_latency);
+                format!("{model} ({level}){context}{cache}{turn_metrics}")
+            }
         };
         let block = themed_block(&self.theme, names::MODEL_STATUS, label);
         match self.model_status_block {
@@ -1056,7 +1055,7 @@ impl EventRenderer {
                 let items: Vec<tau_cli_term::CompletionItem> = models
                     .models
                     .iter()
-                    .map(|m| tau_cli_term::CompletionItem::plain(m.as_str()))
+                    .map(|m| tau_cli_term::CompletionItem::plain(m.to_string()))
                     .collect();
                 self.completion_data
                     .set_arg_completions(tau_cli_term::CommandName::new("/model"), items);

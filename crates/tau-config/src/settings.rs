@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tau_proto::{ModelId, ModelName, ProviderName};
 
 // ---------------------------------------------------------------------------
 // Built-in configs
@@ -237,12 +238,12 @@ impl CliState {
 /// populated value in a test or fallback.
 #[derive(Clone, Debug, Deserialize)]
 pub struct HarnessSettings {
-    /// Default model provider/model to use (e.g.
-    /// "anthropic/claude-sonnet-4-20250514").
-    pub default_model: Option<String>,
+    /// Default model to use (e.g.
+    /// `"anthropic/claude-sonnet-4-20250514"`).
+    pub default_model: Option<ModelId>,
 
-    /// Default effort per model (`provider/model` -> level).
-    pub default_efforts: HashMap<String, tau_proto::Effort>,
+    /// Default effort per model.
+    pub default_efforts: HashMap<ModelId, tau_proto::Effort>,
 
     /// Number of days to keep inactive session state directories.
     /// Set to `0` to disable session cleanup.
@@ -342,8 +343,8 @@ pub struct ExtensionEntry {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct ModelRegistry {
-    /// Named providers, keyed by provider name.
-    pub providers: HashMap<String, ProviderConfig>,
+    /// Named providers, keyed by [`ProviderName`].
+    pub providers: HashMap<ProviderName, ProviderConfig>,
 }
 
 /// One LLM provider configuration.
@@ -501,8 +502,8 @@ impl PromptCacheRetention {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelConfig {
-    /// Model identifier (e.g. "claude-sonnet-4-20250514").
-    pub id: String,
+    /// Model identifier (e.g. `"claude-sonnet-4-20250514"`).
+    pub id: ModelName,
     /// Optional display name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -801,14 +802,14 @@ fn load_json5_layered<T: for<'de> Deserialize<'de> + Default>(
 /// the caller is responsible for warning the user.
 ///
 /// Returns the path of the file that was written.
-pub fn add_provider(name: &str, provider: &ProviderConfig) -> std::io::Result<PathBuf> {
+pub fn add_provider(name: &ProviderName, provider: &ProviderConfig) -> std::io::Result<PathBuf> {
     add_provider_in(&TauDirs::default(), name, provider)
 }
 
 /// Like [`add_provider`] but writes against an explicit directory layout.
 pub fn add_provider_in(
     dirs: &TauDirs,
-    name: &str,
+    name: &ProviderName,
     provider: &ProviderConfig,
 ) -> std::io::Result<PathBuf> {
     let dir = dirs.config_dir.as_ref().ok_or_else(|| {
@@ -827,7 +828,7 @@ pub fn add_provider_in(
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
         .ok_or_else(|| invalid_data("providers is not an object"))?
-        .insert(name.to_owned(), entry);
+        .insert(name.as_str().to_owned(), entry);
 
     let json = serde_json::to_string_pretty(&root).map_err(invalid_data)?;
     crate::atomic::atomic_write_following_symlink(&path, json.as_bytes(), None)?;
@@ -838,12 +839,12 @@ pub fn add_provider_in(
 ///
 /// Returns `Ok(true)` if the provider was present and removed, `Ok(false)`
 /// if the file or the named entry does not exist.
-pub fn remove_provider(name: &str) -> std::io::Result<bool> {
+pub fn remove_provider(name: &ProviderName) -> std::io::Result<bool> {
     remove_provider_in(&TauDirs::default(), name)
 }
 
 /// Like [`remove_provider`] but operates against an explicit directory layout.
-pub fn remove_provider_in(dirs: &TauDirs, name: &str) -> std::io::Result<bool> {
+pub fn remove_provider_in(dirs: &TauDirs, name: &ProviderName) -> std::io::Result<bool> {
     let dir = dirs.config_dir.as_ref().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -859,7 +860,7 @@ pub fn remove_provider_in(dirs: &TauDirs, name: &str) -> std::io::Result<bool> {
         .as_object_mut()
         .and_then(|o| o.get_mut("providers"))
         .and_then(|p| p.as_object_mut())
-        .is_some_and(|providers| providers.remove(name).is_some());
+        .is_some_and(|providers| providers.remove(name.as_str()).is_some());
     if removed {
         let json = serde_json::to_string_pretty(&root).map_err(invalid_data)?;
         crate::atomic::atomic_write_following_symlink(&path, json.as_bytes(), None)?;

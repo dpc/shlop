@@ -96,15 +96,322 @@ string_newtype!(/// Unique identifier for one prompt within a session.
     SessionPromptId);
 string_newtype!(/// Extension name.
     ExtensionName);
-string_newtype!(/// Qualified model identifier (e.g. `"openai/gpt-4o"`).
-    ModelId);
-string_newtype!(/// Provider name (e.g. `"openai"`, `"anthropic"`).
-    ProviderName);
+// ProviderName / ModelName / ModelId are defined manually below — they
+// validate at construction (no '/', non-empty, etc.) so the rest of
+// the codebase can stop re-parsing `"provider/model"` strings.
 string_newtype!(/// Skill name (e.g. `"jujutsu"`, `"preview-site"`).
     SkillName);
 string_newtype!(/// Identifier correlating a user-initiated `!`/`!!` shell
     /// command's lifecycle events (progress, finished).
     ShellCommandId);
+
+// ---------------------------------------------------------------------------
+// ProviderName / ModelName / ModelId
+// ---------------------------------------------------------------------------
+
+/// Provider name (e.g. `"openai"`, `"anthropic"`, `"github-copilot"`).
+///
+/// Validated at construction: non-empty, no `/` (which would collide
+/// with the [`ModelId`] separator), and only filename-safe characters
+/// (ASCII letters/digits, `_`, `-`, `.`) so a `ProviderName` is also
+/// safe to embed in `auth.d/<name>.json` paths.
+#[derive(Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
+pub struct ProviderName(String);
+
+/// Model name as understood by the provider (e.g.
+/// `"claude-sonnet-4-20250514"`, `"gpt-5.5"`, `"llama3.2:latest"`).
+///
+/// Validated at construction: non-empty and no `/` (which would collide
+/// with the [`ModelId`] separator). Otherwise permissive — provider
+/// model IDs include `:`, `.`, `-`, `_`, etc.
+#[derive(Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
+pub struct ModelName(String);
+
+/// Qualified model identifier — a [`ProviderName`] and [`ModelName`]
+/// joined by `/` on the wire (e.g. `"openai/gpt-4o"`).
+///
+/// Round-trips through serde as a flat `"provider/model"` string so
+/// existing CBOR events, JSON5 config files and persisted session
+/// logs keep working unchanged.
+#[derive(Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
+pub struct ModelId {
+    pub provider: ProviderName,
+    pub model: ModelName,
+}
+
+/// Error returned when parsing a string fails one of the
+/// [`ProviderName`] / [`ModelName`] / [`ModelId`] validators.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseNameError(String);
+
+impl std::fmt::Display for ParseNameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ParseNameError {}
+
+impl ProviderName {
+    /// Try to construct a `ProviderName`, returning `Err` on validation
+    /// failure. Use [`ProviderName::new`] when the input is statically
+    /// known to be valid.
+    pub fn try_new(s: impl Into<String>) -> Result<Self, ParseNameError> {
+        let s = s.into();
+        Self::validate(&s)?;
+        Ok(Self(s))
+    }
+
+    /// Construct a `ProviderName`, panicking on validation failure.
+    /// Intended for tests and statically-known constants.
+    pub fn new(s: impl Into<String>) -> Self {
+        Self::try_new(s).expect("invalid provider name")
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+
+    fn validate(name: &str) -> Result<(), ParseNameError> {
+        if name.is_empty() {
+            return Err(ParseNameError("provider name must be non-empty".to_owned()));
+        }
+        if name.starts_with('.') || name.starts_with('-') {
+            return Err(ParseNameError(format!(
+                "provider name '{name}' may not start with '.' or '-'"
+            )));
+        }
+        if !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        {
+            return Err(ParseNameError(format!(
+                "provider name '{name}' may only contain ASCII letters, digits, '_', '-', '.'"
+            )));
+        }
+        Ok(())
+    }
+}
+
+impl std::str::FromStr for ProviderName {
+    type Err = ParseNameError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::try_new(s.to_owned())
+    }
+}
+
+impl std::fmt::Display for ProviderName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::ops::Deref for ProviderName {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for ProviderName {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::borrow::Borrow<str> for ProviderName {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+impl PartialEq<str> for ProviderName {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<&str> for ProviderName {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+impl serde::Serialize for ProviderName {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ProviderName {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Self::try_new(s).map_err(serde::de::Error::custom)
+    }
+}
+
+impl ModelName {
+    /// Try to construct a `ModelName`, returning `Err` on validation
+    /// failure. Use [`ModelName::new`] when the input is statically
+    /// known to be valid.
+    pub fn try_new(s: impl Into<String>) -> Result<Self, ParseNameError> {
+        let s = s.into();
+        Self::validate(&s)?;
+        Ok(Self(s))
+    }
+
+    /// Construct a `ModelName`, panicking on validation failure.
+    pub fn new(s: impl Into<String>) -> Self {
+        Self::try_new(s).expect("invalid model name")
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+
+    fn validate(name: &str) -> Result<(), ParseNameError> {
+        if name.is_empty() {
+            return Err(ParseNameError("model name must be non-empty".to_owned()));
+        }
+        if name.contains('/') {
+            return Err(ParseNameError(format!(
+                "model name '{name}' may not contain '/'"
+            )));
+        }
+        Ok(())
+    }
+}
+
+impl std::str::FromStr for ModelName {
+    type Err = ParseNameError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::try_new(s.to_owned())
+    }
+}
+
+impl std::fmt::Display for ModelName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::ops::Deref for ModelName {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for ModelName {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::borrow::Borrow<str> for ModelName {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+impl PartialEq<str> for ModelName {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<&str> for ModelName {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+impl serde::Serialize for ModelName {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ModelName {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Self::try_new(s).map_err(serde::de::Error::custom)
+    }
+}
+
+impl ModelId {
+    pub fn new(provider: ProviderName, model: ModelName) -> Self {
+        Self { provider, model }
+    }
+}
+
+impl std::str::FromStr for ModelId {
+    type Err = ParseNameError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (provider, model) = s.split_once('/').ok_or_else(|| {
+            ParseNameError(format!(
+                "model id '{s}' must be of the form 'provider/model'"
+            ))
+        })?;
+        Ok(Self {
+            provider: ProviderName::try_new(provider.to_owned())?,
+            model: ModelName::try_new(model.to_owned())?,
+        })
+    }
+}
+
+impl std::fmt::Display for ModelId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.provider, self.model)
+    }
+}
+
+/// Convenience `&str` → `ModelId` that panics on invalid input.
+/// Intended for tests, fixtures, and statically-known constants
+/// (`"openai/gpt-5.5".into()` and friends). Use [`ModelId::from_str`]
+/// when handling user input.
+impl From<&str> for ModelId {
+    fn from(s: &str) -> Self {
+        s.parse().expect("invalid model id")
+    }
+}
+
+/// See [`From<&str> for ModelId`]. Panics on invalid input.
+impl From<String> for ModelId {
+    fn from(s: String) -> Self {
+        s.parse().expect("invalid model id")
+    }
+}
+
+impl From<ModelId> for String {
+    fn from(id: ModelId) -> String {
+        id.to_string()
+    }
+}
+
+impl serde::Serialize for ModelId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // Wire form is the flat `"provider/model"` string — same
+        // bytes as the previous flat-string newtype, so existing
+        // CBOR / JSON5 / persisted session logs keep working.
+        self.to_string().serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ModelId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // ToolName (validated newtype)

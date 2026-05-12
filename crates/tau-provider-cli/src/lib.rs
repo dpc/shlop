@@ -6,8 +6,14 @@ use std::path::PathBuf;
 use dialoguer::{Confirm, Input};
 use tau_cli_picker::{PickerItem, pick};
 use tau_config::settings::{AuthType, ModelConfig, ProviderConfig};
+use tau_proto::{ModelName, ProviderName};
 use tau_provider::oauth;
 use tau_provider::storage::{self, Credentials, ProviderKind};
+
+fn parse_provider_name(name: &str) -> Result<ProviderName, Box<dyn std::error::Error>> {
+    ProviderName::try_new(name.to_owned())
+        .map_err(|e| format!("invalid provider name '{name}': {e}").into())
+}
 
 const HELP_TEXT: &str = "\
 Usage: tau provider <subcommand>
@@ -63,10 +69,11 @@ fn cmd_add() -> Result<(), Box<dyn std::error::Error>> {
         ProviderKind::GithubCopilot => "github-copilot",
     };
 
-    let name: String = Input::new()
+    let name_input: String = Input::new()
         .with_prompt("Name for this provider")
         .default(default_name.to_string())
         .interact_text()?;
+    let name = parse_provider_name(&name_input)?;
 
     // 3. Kind-specific setup.
     let mut ollama_model: Option<String> = None;
@@ -137,10 +144,10 @@ fn cmd_remove(name_arg: Option<&str>) -> Result<(), Box<dyn std::error::Error>> 
     let store = storage::load()?;
 
     let name = match name_arg {
-        Some(n) => n.to_string(),
+        Some(n) => parse_provider_name(n)?,
         None => {
-            let mut names: Vec<&str> = models.providers.keys().map(String::as_str).collect();
-            names.extend(store.providers.keys().map(String::as_str));
+            let mut names: Vec<&ProviderName> = models.providers.keys().collect();
+            names.extend(store.providers.keys());
             names.sort();
             names.dedup();
 
@@ -151,10 +158,10 @@ fn cmd_remove(name_arg: Option<&str>) -> Result<(), Box<dyn std::error::Error>> 
 
             let items = names
                 .iter()
-                .map(|name| PickerItem::enabled(*name))
+                .map(|name| PickerItem::enabled(name.as_str()))
                 .collect::<Vec<_>>();
             let sel = pick("Which provider to remove?", &items)?;
-            names[sel].to_string()
+            names[sel].clone()
         }
     };
 
@@ -193,12 +200,12 @@ fn cmd_list() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Collect all provider names from both sources.
-    let mut names: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    let mut names: std::collections::BTreeSet<&ProviderName> = std::collections::BTreeSet::new();
     for k in models.providers.keys() {
-        names.insert(k.as_str());
+        names.insert(k);
     }
     for k in store.providers.keys() {
-        names.insert(k.as_str());
+        names.insert(k);
     }
 
     let mut table = Table::new();
@@ -243,7 +250,7 @@ fn cmd_list() -> Result<(), Box<dyn std::error::Error>> {
 
         let model_count = model_info.map_or(0, |p| p.models.len());
 
-        table.add_row([*name, api, &auth_status, &model_count.to_string()]);
+        table.add_row([name.as_str(), api, &auth_status, &model_count.to_string()]);
     }
 
     println!("{table}");
@@ -257,7 +264,7 @@ fn cmd_list() -> Result<(), Box<dyn std::error::Error>> {
 fn cmd_login(name_arg: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     let models = tau_config::settings::load_models()?;
 
-    let mut oauth_names: Vec<String> = models
+    let mut oauth_names: Vec<ProviderName> = models
         .providers
         .iter()
         .filter(|(_, cfg)| cfg.auth_type().is_ok_and(|t| t.is_oauth()))
@@ -266,7 +273,7 @@ fn cmd_login(name_arg: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     oauth_names.sort();
 
     let name = match name_arg {
-        Some(n) => n.to_string(),
+        Some(n) => parse_provider_name(n)?,
         None => {
             if oauth_names.is_empty() {
                 eprintln!("No OAuth providers in models.json5.");
@@ -279,7 +286,7 @@ fn cmd_login(name_arg: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
                 .map(|name| PickerItem::enabled(name.as_str()))
                 .collect::<Vec<_>>();
             let sel = pick("Which provider to log in to?", &items)?;
-            oauth_names[sel].to_string()
+            oauth_names[sel].clone()
         }
     };
 
@@ -314,9 +321,9 @@ fn cmd_list_models(name_arg: Option<&str>) -> Result<(), Box<dyn std::error::Err
     let models = tau_config::settings::load_models()?;
 
     let name = match name_arg {
-        Some(n) => n.to_string(),
+        Some(n) => parse_provider_name(n)?,
         None => {
-            let mut names: Vec<&str> = models.providers.keys().map(String::as_str).collect();
+            let mut names: Vec<&ProviderName> = models.providers.keys().collect();
             names.sort();
             if names.is_empty() {
                 eprintln!("No providers configured. Use `tau provider add` first.");
@@ -324,10 +331,10 @@ fn cmd_list_models(name_arg: Option<&str>) -> Result<(), Box<dyn std::error::Err
             }
             let items = names
                 .iter()
-                .map(|name| PickerItem::enabled(*name))
+                .map(|name| PickerItem::enabled(name.as_str()))
                 .collect::<Vec<_>>();
             let sel = pick("Which provider?", &items)?;
-            names[sel].to_string()
+            names[sel].clone()
         }
     };
 
@@ -425,7 +432,7 @@ fn run_github_copilot_login(
 fn build_provider_entry(kind: &ProviderKind, ollama_model: Option<&str>) -> ProviderConfig {
     fn model(id: &str, context_window: u64) -> ModelConfig {
         ModelConfig {
-            id: id.to_owned(),
+            id: ModelName::new(id),
             name: None,
             max_output_tokens: None,
             context_window: Some(context_window),
@@ -495,7 +502,7 @@ fn models_json5_path() -> Option<PathBuf> {
 /// Offer to overwrite models.json5 with the new provider added, or
 /// print just the new section for the user to paste manually.
 fn update_or_print_models_json5(
-    name: &str,
+    name: &ProviderName,
     entry: &ProviderConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path = models_json5_path();
@@ -532,7 +539,7 @@ fn update_or_print_models_json5(
 }
 
 /// Print the provider entry for the user to paste into models.json5.
-fn print_provider_entry(name: &str, entry: &ProviderConfig) {
+fn print_provider_entry(name: &ProviderName, entry: &ProviderConfig) {
     let inner = serde_json::to_string_pretty(entry).unwrap_or_default();
     eprintln!("\n--- Add this inside \"providers\" in ~/.config/tau/models.json5 ---\n");
     eprintln!("\"{name}\": {inner}");
