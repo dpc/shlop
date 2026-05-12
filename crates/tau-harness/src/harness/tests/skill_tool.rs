@@ -81,6 +81,7 @@ fn skill_tool_reads_file_content() {
                 CborValue::Text("my-skill".to_owned()),
             ),
         ]),
+        display: None,
     };
     let cid = h.default_conversation_id.clone();
     h.handle_skill_tool_call(&cid, &call).expect("skill call");
@@ -129,6 +130,7 @@ fn skill_tool_returns_error_for_unknown_skill() {
                 CborValue::Text("nonexistent".to_owned()),
             ),
         ]),
+        display: None,
     };
     let cid = h.default_conversation_id.clone();
     h.handle_skill_tool_call(&cid, &call).expect("skill call");
@@ -224,6 +226,7 @@ fn skill_load_unknown_attaches_split_name_search_suggestions() {
                 CborValue::Text(requested.clone()),
             ),
         ]),
+        display: None,
     };
     h.handle_skill_tool_call(&cid, &call).expect("skill call");
 
@@ -390,6 +393,7 @@ fn skill_tool_search_matches_name_description_and_optional_content() {
                 CborValue::Bool(search_content),
             ),
         ]),
+        display: None,
     };
 
     let read_matches = |h: &Harness, call_id: &str| -> Vec<String> {
@@ -544,6 +548,7 @@ fn skill_tool_search_accepts_multiple_terms_and_ranks_by_hit_count() {
                 ),
             ),
         ]),
+        display: None,
     };
 
     let read_match_records = |h: &Harness, call_id: &str| -> Vec<(String, u64)> {
@@ -630,6 +635,7 @@ fn skill_tool_search_accepts_multiple_terms_and_ranks_by_hit_count() {
                     CborValue::Array(Vec::new()),
                 ),
             ]),
+            display: None,
         },
     )
     .expect("call");
@@ -658,6 +664,7 @@ fn skill_tool_unknown_action_returns_error() {
             CborValue::Text("action".to_owned()),
             CborValue::Text("invoke".to_owned()),
         )]),
+        display: None,
     };
     h.handle_skill_tool_call(&cid, &call).expect("dispatch");
     let events = h.store.session_events("s1").expect("events");

@@ -1511,6 +1511,14 @@ pub struct AgentToolCall {
     /// `ToolError` while letting sibling calls run.
     pub name: ToolNameMaybe,
     pub arguments: CborValue,
+    /// Pre-rendered live-header descriptor stamped by the harness
+    /// before publishing so UIs can render the running block (e.g.
+    /// `grep "foo" in src …`) without per-tool string knowledge.
+    /// `None` on the wire from the agent driver; the harness fills
+    /// it in by inspecting `name` + `arguments` once the call has
+    /// been accepted. Subscribers that don't render UI ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<ToolDisplay>,
 }
 
 /// The agent finished processing a prompt.

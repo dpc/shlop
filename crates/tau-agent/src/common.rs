@@ -145,6 +145,7 @@ impl StreamState {
                     id: tc.id.into(),
                     name: tc.name.into(),
                     arguments: json_to_cbor(&args),
+                    display: None,
                 }
             })
             .collect()

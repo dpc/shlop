@@ -158,6 +158,7 @@ fn new_session_clears_session_ui_state() {
                 CborValue::Text("path".into()),
                 CborValue::Text("src/lib.rs".into()),
             )]),
+            display: None,
         }],
         input_tokens: Some(100),
         cached_tokens: Some(50),
@@ -904,6 +905,12 @@ fn running_tool_call_shows_ellipsis_until_result() {
                 CborValue::Text("path".into()),
                 CborValue::Text("src/main.rs".into()),
             )]),
+            display: Some(tau_proto::ToolDisplay {
+                args: "src/main.rs".into(),
+                status: tau_proto::ToolDisplayStatus::InProgress,
+                status_text: "…".into(),
+                ..Default::default()
+            }),
         }],
         input_tokens: None,
         cached_tokens: None,

@@ -5,10 +5,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use tau_proto::{
-    CborValue, ToolDisplay, ToolDisplayPayload, ToolDisplayStatus, cbor_bool_field, cbor_field,
-    cbor_text_field,
-};
+use tau_proto::{CborValue, ToolDisplay, ToolDisplayPayload, ToolDisplayStatus, cbor_field};
 
 /// Format the context-usage chip for the status bar. Three cases:
 /// - context window known → `" ctx:{percent}%/{window}"` (e.g. `"
@@ -197,46 +194,12 @@ pub(crate) struct ToolCallDisplay {
     pub(crate) suffixes: Vec<ToolSuffixSegment>,
 }
 
-/// Builds the display record for a tool call that is still running.
-pub(crate) fn format_tool_call(tool_name: &str, arguments: &CborValue) -> ToolCallDisplay {
-    let args = match tool_name {
-        "shell" => cbor_text_field(arguments, "command").unwrap_or_default(),
-        "read" | "write" | "edit" => cbor_text_field(arguments, "path").unwrap_or_default(),
-        "find" => {
-            let pattern = cbor_text_field(arguments, "pattern").unwrap_or_default();
-            let path = cbor_text_field(arguments, "path").unwrap_or_else(|| ".".to_owned());
-            format!("{pattern} in {path}")
-        }
-        "grep" => {
-            let pattern = cbor_text_field(arguments, "pattern").unwrap_or_default();
-            let path = cbor_text_field(arguments, "path").unwrap_or_else(|| ".".to_owned());
-            let mut args = format!("{pattern:?} in {path}");
-            if let Some(glob) = cbor_text_field(arguments, "glob") {
-                args.push_str(&format!(" [{glob}]"));
-            }
-            args
-        }
-        "ls" => cbor_text_field(arguments, "path").unwrap_or_else(|| ".".to_owned()),
-        "delegate" => match cbor_text_field(arguments, "task_name") {
-            Some(name) if !name.is_empty() => format!("[{name}]"),
-            _ => String::new(),
-        },
-        "skill" => match cbor_text_field(arguments, "action").as_deref() {
-            Some("search") => {
-                let query = cbor_text_field(arguments, "query").unwrap_or_default();
-                let scope = if cbor_bool_field(arguments, "search_content").unwrap_or(false) {
-                    " [content]"
-                } else {
-                    ""
-                };
-                format!("search: {query}{scope}")
-            }
-            // Default to load semantics for `action: "load"` and for
-            // legacy / malformed calls without an action.
-            _ => cbor_text_field(arguments, "name").unwrap_or_default(),
-        },
-        _ => String::new(),
-    };
+/// Build the live-header [`ToolCallDisplay`] for a still-running
+/// tool call from the harness-stamped descriptor. Falls back to a
+/// name-only block when the descriptor is absent (older logs, or
+/// extensions whose tools the harness doesn't know how to label).
+pub(crate) fn format_tool_call(tool_name: &str, display: Option<&ToolDisplay>) -> ToolCallDisplay {
+    let args = display.map(|d| d.args.clone()).unwrap_or_default();
     let suffix = running_suffix_after(&args);
     ToolCallDisplay {
         tool_name: tool_name.to_owned(),

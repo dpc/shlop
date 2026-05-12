@@ -2716,6 +2716,19 @@ impl Harness {
                 stats: self.token_usage.clone(),
             });
         }
+        // Stamp the live-header `display` descriptor on each tool
+        // call so renderers don't need per-tool string knowledge.
+        // Calls whose name failed to validate (`ToolNameMaybe::Invalid`)
+        // get no descriptor — they fail synchronously at dispatch time
+        // and never produce a running block.
+        for call in &mut response.tool_calls {
+            if call.display.is_some() {
+                continue;
+            }
+            if let tau_proto::ToolNameMaybe::Valid(ref name) = call.name {
+                call.display = build_tool_args_display(name.as_str(), &call.arguments);
+            }
+        }
         // Publish via the owning conversation's branch — when text is
         // present the SessionTree fold appends an `AgentMessage` as a
         // child of `tree.head`, so an unsnapped publish would land on
@@ -3495,6 +3508,67 @@ impl Harness {
             .find(|e| e.name == name)
             .map(|e| e.connection_id.as_str())
     }
+}
+
+/// Pre-render the live-header descriptor for a tool call so the
+/// CLI (and any future renderer) can paint the running block without
+/// per-tool string knowledge. The descriptor carries the tool's
+/// args label (e.g. `"foo" in src` for grep, `[task]` for delegate)
+/// and is stamped with [`tau_proto::ToolDisplayStatus::InProgress`] /
+/// `"…"` so subscribers render the running ellipsis uniformly.
+///
+/// Tools without a known label shape return `None`; the renderer
+/// falls back to a name-only block.
+fn build_tool_args_display(
+    tool_name: &str,
+    arguments: &tau_proto::CborValue,
+) -> Option<tau_proto::ToolDisplay> {
+    use tau_proto::{ToolDisplayStatus, cbor_bool_field, cbor_text_field};
+
+    let args = match tool_name {
+        "shell" => cbor_text_field(arguments, "command").unwrap_or_default(),
+        "read" | "write" | "edit" => cbor_text_field(arguments, "path").unwrap_or_default(),
+        "find" => {
+            let pattern = cbor_text_field(arguments, "pattern").unwrap_or_default();
+            let path = cbor_text_field(arguments, "path").unwrap_or_else(|| ".".to_owned());
+            format!("{pattern} in {path}")
+        }
+        "grep" => {
+            let pattern = cbor_text_field(arguments, "pattern").unwrap_or_default();
+            let path = cbor_text_field(arguments, "path").unwrap_or_else(|| ".".to_owned());
+            let mut args = format!("{pattern:?} in {path}");
+            if let Some(glob) = cbor_text_field(arguments, "glob") {
+                args.push_str(&format!(" [{glob}]"));
+            }
+            args
+        }
+        "ls" => cbor_text_field(arguments, "path").unwrap_or_else(|| ".".to_owned()),
+        "delegate" => match cbor_text_field(arguments, "task_name") {
+            Some(name) if !name.is_empty() => format!("[{name}]"),
+            _ => String::new(),
+        },
+        "skill" => match cbor_text_field(arguments, "action").as_deref() {
+            Some("search") => {
+                let query = cbor_text_field(arguments, "query").unwrap_or_default();
+                let scope = if cbor_bool_field(arguments, "search_content").unwrap_or(false) {
+                    " [content]"
+                } else {
+                    ""
+                };
+                format!("search: {query}{scope}")
+            }
+            // Default to load semantics for `action: "load"` and for
+            // legacy / malformed calls without an action.
+            _ => cbor_text_field(arguments, "name").unwrap_or_default(),
+        },
+        _ => return None,
+    };
+    Some(tau_proto::ToolDisplay {
+        args,
+        status: ToolDisplayStatus::InProgress,
+        status_text: "…".to_owned(),
+        ..Default::default()
+    })
 }
 
 /// Build the [`ToolDisplay`] descriptor the renderer paints for a

@@ -833,7 +833,7 @@ impl EventRenderer {
                 // a flood of nested invocations.
                 if finished.originator.is_user() {
                     for call in &finished.tool_calls {
-                        let display = format_tool_call(call.name.as_str(), &call.arguments);
+                        let display = format_tool_call(call.name.as_str(), call.display.as_ref());
                         let block = render_tool_block(&self.theme, &display);
                         let id = self.handle.new_block(block);
                         self.handle.push_above_active(id);

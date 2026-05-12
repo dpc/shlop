@@ -670,6 +670,7 @@ where
                                 CborValue::Text("path".to_owned()),
                                 CborValue::Text(path.trim().to_owned()),
                             )]),
+                            display: None,
                         }
                     } else if let Some(cmd) = user_text.strip_prefix("shell ") {
                         AgentToolCall {
@@ -679,12 +680,14 @@ where
                                 CborValue::Text("command".to_owned()),
                                 CborValue::Text(cmd.trim().to_owned()),
                             )]),
+                            display: None,
                         }
                     } else {
                         AgentToolCall {
                             id: call_id.into(),
                             name: "echo".into(),
                             arguments: CborValue::Text(user_text),
+                            display: None,
                         }
                     };
 

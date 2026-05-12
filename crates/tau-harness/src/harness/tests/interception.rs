@@ -70,6 +70,7 @@ fn ext_agent_query_defers_dispatch_when_publish_is_intercepted() {
             id: "main-call".into(),
             name: ToolNameMaybe::from_raw("delegate"),
             arguments: CborValue::Map(Vec::new()),
+            display: None,
         }],
         input_tokens: None,
         cached_tokens: None,

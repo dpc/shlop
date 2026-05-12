@@ -249,6 +249,7 @@ fn empty_tool_name_does_not_panic_and_surfaces_error() {
             // `Invalid` arm of `ToolNameMaybe`.
             name: "".into(),
             arguments: CborValue::Map(Vec::new()),
+            display: None,
         }],
         input_tokens: None,
         cached_tokens: None,
@@ -343,11 +344,13 @@ fn empty_tool_call_id_is_normalized_to_synthetic_id() {
                 id: "".into(),
                 name: "".into(),
                 arguments: CborValue::Map(Vec::new()),
+                display: None,
             },
             AgentToolCall {
                 id: "".into(),
                 name: "".into(),
                 arguments: CborValue::Map(Vec::new()),
+                display: None,
             },
         ],
         input_tokens: None,
