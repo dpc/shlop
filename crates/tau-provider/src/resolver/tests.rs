@@ -17,14 +17,16 @@ fn public_openai_api_enables_prompt_cache_support() {
 }
 
 #[test]
-fn codex_backend_enables_prompt_cache_support() {
+fn codex_backend_enables_prompt_cache_key_but_not_retention() {
     let provider = ProviderConfig::default();
 
     assert!(supports_prompt_cache_key(
         &provider,
         "https://chatgpt.com/backend-api"
     ));
-    assert!(supports_prompt_cache_retention(
+    // chatgpt.com/backend-api 400s on `prompt_cache_retention` —
+    // only the public REST API accepts it.
+    assert!(!supports_prompt_cache_retention(
         &provider,
         "https://chatgpt.com/backend-api/"
     ));
@@ -52,7 +54,7 @@ fn provider_flags_enable_prompt_cache_support_for_non_openai_backends() {
 }
 
 #[test]
-fn builtin_openai_defaults_retention_to_24h_on_supported_models() {
+fn public_openai_api_defaults_retention_to_24h_on_supported_models() {
     let provider = ProviderConfig::default();
 
     assert_eq!(
@@ -60,8 +62,25 @@ fn builtin_openai_defaults_retention_to_24h_on_supported_models() {
         Some(PromptCacheRetention::Extended24h)
     );
     assert_eq!(
-        prompt_cache_retention(&provider, "https://chatgpt.com/backend-api", "gpt-5.5-pro"),
+        prompt_cache_retention(&provider, "https://api.openai.com/v1/", "gpt-5.5-pro"),
         Some(PromptCacheRetention::Extended24h)
+    );
+}
+
+#[test]
+fn codex_backend_skips_retention_default_even_on_supported_models() {
+    let provider = ProviderConfig::default();
+
+    // Regression: defaulting `prompt_cache_retention` to 24h on the
+    // Codex Responses backend caused HTTP 400 — the routing there
+    // doesn't accept the param, even on gpt-5.5+.
+    assert_eq!(
+        prompt_cache_retention(&provider, "https://chatgpt.com/backend-api", "gpt-5.5"),
+        None
+    );
+    assert_eq!(
+        prompt_cache_retention(&provider, "https://chatgpt.com/backend-api/", "gpt-5.5-pro"),
+        None
     );
 }
 

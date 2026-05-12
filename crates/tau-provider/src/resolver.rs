@@ -249,11 +249,13 @@ fn prompt_cache_retention(
     if let Some(explicit) = provider.prompt_cache_retention {
         return Some(explicit);
     }
-    // Default to 24 h retention on built-in OpenAI endpoints when the
+    // Default to 24 h retention on the OpenAI public API when the
     // model is known to support the param. Same-price extension of
     // the in-memory TTL (5–10 min idle, max 1 h) to 24 h, so coffee
     // breaks don't evict the working prefix.
-    if is_builtin_openai_endpoint(base_url) && is_known_24h_prompt_cache_model_id(model_id) {
+    if is_builtin_openai_public_api_endpoint(base_url)
+        && is_known_24h_prompt_cache_model_id(model_id)
+    {
         return Some(PromptCacheRetention::Extended24h);
     }
     None
@@ -268,19 +270,32 @@ fn supports_reasoning_summary(provider: &ProviderConfig, base_url: &str) -> bool
 }
 
 fn supports_prompt_cache_retention(provider: &ProviderConfig, base_url: &str) -> bool {
-    provider.compat.supports_prompt_cache_retention || is_builtin_openai_endpoint(base_url)
+    provider.compat.supports_prompt_cache_retention
+        || is_builtin_openai_public_api_endpoint(base_url)
 }
 
-/// True for the two OpenAI-operated endpoints that ship with the full set
-/// of OpenAI-side compat features (prompt cache key, prompt cache
-/// retention, reasoning summary). User-configured proxies and re-hosters
-/// in front of these URLs do NOT count — they must opt in explicitly via
-/// `ProviderCompat`.
+/// True for the two OpenAI-operated endpoints that ship with the
+/// prompt-cache-key and reasoning-summary features. User-configured
+/// proxies and re-hosters in front of these URLs do NOT count — they
+/// must opt in explicitly via `ProviderCompat`.
+///
+/// Note: `prompt_cache_retention` is NOT in this set — the ChatGPT
+/// Codex Responses backend at `chatgpt.com/backend-api` rejects it as
+/// an unknown parameter. Use [`is_builtin_openai_public_api_endpoint`]
+/// for retention gating.
 fn is_builtin_openai_endpoint(base_url: &str) -> bool {
     matches!(
         base_url.trim_end_matches('/'),
         "https://api.openai.com/v1" | "https://chatgpt.com/backend-api"
     )
+}
+
+/// True for the OpenAI public REST API only. The ChatGPT
+/// Codex Responses backend (`chatgpt.com/backend-api`) is excluded
+/// because, despite sharing most compat features with the public
+/// API, it rejects `prompt_cache_retention` as an unknown parameter.
+fn is_builtin_openai_public_api_endpoint(base_url: &str) -> bool {
+    base_url.trim_end_matches('/') == "https://api.openai.com/v1"
 }
 
 fn extract_copilot_base_url(token: &str) -> Option<String> {
