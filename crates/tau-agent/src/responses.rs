@@ -101,6 +101,7 @@ pub fn responses_stream(
         messages: request.messages,
         tools: request.tools,
         params: request.params,
+        tool_choice: request.tool_choice,
         originator: request.originator,
         session_id: request.session_id,
     };
@@ -450,10 +451,17 @@ fn build_request(config: &ResponsesConfig, request: &PromptPayload<'_>) -> Respo
         })
         .collect();
 
-    let tool_choice = if tools.is_empty() {
-        None
-    } else {
-        Some("auto".to_owned())
+    let tool_choice = match (request.tool_choice, tools.is_empty()) {
+        // Harness-forced no-tools-this-turn: explicit `none` works
+        // whether or not tools are declared (and is the whole point
+        // of this branch — tools stay declared so the cache prefix
+        // matches, the model is just told not to call them).
+        (tau_proto::ToolChoice::None, _) => Some("none".to_owned()),
+        // Default: only mention `tool_choice` when there are actual
+        // tools — emitting `"auto"` on an empty list bumps the
+        // request body for no reason and some endpoints reject it.
+        (tau_proto::ToolChoice::Auto, false) => Some("auto".to_owned()),
+        (tau_proto::ToolChoice::Auto, true) => None,
     };
 
     let effort = if config.supports_reasoning_effort {

@@ -2879,6 +2879,22 @@ impl Harness {
             .expect("send_prompt_to_agent_for: unknown conversation id");
         let session_id = conv.session_id.clone();
         let originator = conv.originator.clone();
+        // Non-tool extension side conversations (`std-notifications`'
+        // idle summary, etc.) must not call tools — their whole job
+        // is to produce a one-line summary, and unfettered tool
+        // access has historically caused destructive `write`/`edit`
+        // calls. We keep the tools list and system prompt unchanged
+        // so the prompt-cache prefix continues to match the parent
+        // conv; only the per-turn `tool_choice` flips to `None`.
+        let tool_choice = if matches!(
+            conv.originator,
+            tau_proto::PromptOriginator::Extension { .. }
+        ) && conv.parent_tool_call_id.is_none()
+        {
+            tau_proto::ToolChoice::None
+        } else {
+            tau_proto::ToolChoice::Auto
+        };
         // Walk the conversation's *own* branch, not whatever tree.head
         // currently points at. With multiple side conversations
         // running concurrently their tree mutations interleave, so
@@ -2962,6 +2978,7 @@ impl Harness {
             tools,
             model,
             model_params: self.selected_params,
+            tool_choice,
             originator,
             ctx_id,
             previous_response,

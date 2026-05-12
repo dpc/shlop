@@ -1021,6 +1021,35 @@ pub enum ToolSideEffects {
     Mutating,
 }
 
+/// Per-prompt knob telling the provider whether the model is allowed
+/// to call tools on this turn. Stamped onto every
+/// [`SessionPromptCreated`]; the harness sets [`Self::None`] for
+/// non-tool extension-side queries (e.g. `std-notifications`' idle
+/// summary) so the cache prefix (tools + system_prompt) stays
+/// byte-identical to the parent conv's while still preventing the
+/// summarizer from accidentally calling `write` / `edit` / `delegate`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolChoice {
+    /// The model decides whether to call tools (provider default).
+    #[default]
+    Auto,
+    /// The model must produce a text answer this turn; tools are
+    /// still declared in the request (so cache prefix matches), but
+    /// the provider rejects tool-call output.
+    None,
+}
+
+impl ToolChoice {
+    /// True for the default value. Used by `#[serde(skip_serializing_if)]`
+    /// on [`SessionPromptCreated`] so untouched values stay out of the
+    /// wire form.
+    #[must_use]
+    pub const fn is_default(&self) -> bool {
+        matches!(self, Self::Auto)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolRegister {
     pub tool: ToolSpec,
@@ -1734,6 +1763,13 @@ pub struct SessionPromptCreated {
     /// only when the provider advertises support for it.
     #[serde(default)]
     pub model_params: ModelParams,
+    /// Whether tool calls are allowed on this turn. Defaults to
+    /// `Auto`; the harness flips to `None` for non-tool extension
+    /// side queries (e.g. idle-summary) so they cannot trigger
+    /// destructive tools. Backends emit this as `tool_choice: "none"`
+    /// on the upstream request body.
+    #[serde(default, skip_serializing_if = "ToolChoice::is_default")]
+    pub tool_choice: ToolChoice,
     /// Who asked for this prompt. Defaults to [`PromptOriginator::User`]
     /// for backward compatibility with old persisted events.
     #[serde(default)]

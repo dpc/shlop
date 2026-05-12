@@ -74,6 +74,7 @@ fn representative_events() -> Vec<Event> {
             }],
             model: None,
             model_params: ModelParams::default(),
+            tool_choice: ToolChoice::default(),
             originator: PromptOriginator::User,
             ctx_id: None,
             previous_response: None,

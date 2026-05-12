@@ -20,6 +20,7 @@ fn build_request_includes_prompt_cache_fields_when_configured() {
         messages: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
         previous_response: None,
         originator: &tau_proto::PromptOriginator::User,
         session_id: &tau_proto::SessionId::new("test-session"),
@@ -50,6 +51,7 @@ fn build_request_omits_prompt_cache_fields_without_seed_or_retention() {
         messages: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
         previous_response: None,
         originator: &tau_proto::PromptOriginator::User,
         session_id: &tau_proto::SessionId::new("test-session"),
@@ -81,6 +83,7 @@ fn build_request_includes_llama_cpp_cache_prompt_when_configured() {
         messages: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
         previous_response: None,
         originator: &tau_proto::PromptOriginator::User,
         session_id: &tau_proto::SessionId::new("test-session"),
@@ -113,6 +116,7 @@ fn build_request_sets_parallel_tool_calls_when_tools_offered() {
         messages: &[],
         tools: std::slice::from_ref(&tool),
         params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
         previous_response: None,
         originator: &tau_proto::PromptOriginator::User,
         session_id: &tau_proto::SessionId::new("test-session"),
@@ -141,6 +145,7 @@ fn build_request_omits_parallel_tool_calls_without_tools() {
         messages: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
         previous_response: None,
         originator: &tau_proto::PromptOriginator::User,
         session_id: &tau_proto::SessionId::new("test-session"),
@@ -150,6 +155,51 @@ fn build_request_omits_parallel_tool_calls_without_tools() {
     let object = body.as_object().expect("request object");
 
     assert!(!object.contains_key("parallel_tool_calls"));
+}
+
+/// `ToolChoice::None` must serialize as `tool_choice: "none"` while
+/// the `tools` array stays declared. This is the lever the harness
+/// uses for non-tool extension side queries (idle summary): the
+/// model is told not to call anything, but the prompt-cache prefix
+/// (system prompt + tool definitions) stays byte-identical to the
+/// parent conversation's, so cache reuse is preserved.
+#[test]
+fn build_request_emits_tool_choice_none_while_keeping_tools_declared() {
+    let config = OpenAiConfig {
+        base_url: "https://api.openai.com/v1".into(),
+        api_key: "test".into(),
+        model_id: "gpt-5".into(),
+        supports_reasoning_effort: false,
+        supports_verbosity: false,
+        prompt_cache_key: None,
+        prompt_cache_retention: None,
+        supports_llama_cpp_cache: false,
+    };
+    let tool = tau_proto::ToolDefinition {
+        name: tau_proto::ToolName::new("shell"),
+        description: None,
+        parameters: None,
+    };
+    let request = PromptPayload {
+        system_prompt: "system",
+        messages: &[],
+        tools: std::slice::from_ref(&tool),
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::None,
+        previous_response: None,
+        originator: &tau_proto::PromptOriginator::User,
+        session_id: &tau_proto::SessionId::new("test-session"),
+    };
+
+    let body = serde_json::to_value(build_request(&config, &request, true)).expect("serialize");
+
+    assert_eq!(body["tool_choice"], "none");
+    let tools = body["tools"].as_array().expect("tools array");
+    assert_eq!(
+        tools.len(),
+        1,
+        "tools must stay declared so the cache prefix matches"
+    );
 }
 
 /// Extension-originated turns must NOT share the wire
@@ -179,6 +229,7 @@ fn build_request_prompt_cache_key_differs_for_extension_originator() {
         messages: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
         previous_response: None,
         originator: &tau_proto::PromptOriginator::User,
         session_id: &tau_proto::SessionId::new("test-session"),
@@ -188,6 +239,7 @@ fn build_request_prompt_cache_key_differs_for_extension_originator() {
         messages: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
         previous_response: None,
         originator: &ext,
         session_id: &tau_proto::SessionId::new("test-session"),

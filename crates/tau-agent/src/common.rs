@@ -17,6 +17,11 @@ pub struct PromptPayload<'a> {
     /// Each field is honored only when the backend's config reports
     /// support for the corresponding provider feature.
     pub params: tau_proto::ModelParams,
+    /// Whether the model may emit tool-call output on this turn.
+    /// `Auto` (default) lets the model decide; `None` forces a text
+    /// answer. Tools and `system_prompt` are still passed verbatim
+    /// in either case so the prompt-cache prefix stays stable.
+    pub tool_choice: tau_proto::ToolChoice,
     /// Hint from the harness for stateful chaining: the previous
     /// turn's `response_id` and the index in `messages` where new
     /// content for this turn begins. Backends that don't support

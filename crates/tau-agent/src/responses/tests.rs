@@ -24,6 +24,7 @@ fn build_request_includes_prompt_cache_fields_when_configured() {
         messages: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
         previous_response: None,
         originator: &tau_proto::PromptOriginator::User,
         session_id: &tau_proto::SessionId::new("test-session"),
@@ -56,6 +57,7 @@ fn build_request_omits_prompt_cache_fields_without_seed_or_retention() {
         messages: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
         previous_response: None,
         originator: &tau_proto::PromptOriginator::User,
         session_id: &tau_proto::SessionId::new("test-session"),
@@ -82,6 +84,7 @@ fn build_request_first_turn_replays_full_history_without_chain() {
         messages: &messages,
         tools: &[],
         params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
         previous_response: None,
         originator: &tau_proto::PromptOriginator::User,
         session_id: &tau_proto::SessionId::new("test-session"),
@@ -130,6 +133,7 @@ fn build_request_chain_turn_sends_delta_and_previous_response_id() {
         messages: &messages,
         tools: &[],
         params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
         previous_response: Some(PreviousResponse {
             id: "resp_abc",
             message_index: 2,
@@ -167,6 +171,7 @@ fn build_request_chain_with_oob_index_falls_back_to_full_replay() {
         messages: &messages,
         tools: &[],
         params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
         previous_response: Some(PreviousResponse {
             id: "resp_abc",
             message_index: 99,
@@ -230,6 +235,7 @@ fn build_request_chain_turn_still_emits_prompt_cache_key() {
         messages: &messages,
         tools: &[],
         params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
         previous_response: Some(PreviousResponse {
             id: "resp_abc",
             message_index: 2,
@@ -263,6 +269,7 @@ fn build_request_prompt_cache_key_differs_for_extension_originator() {
         messages: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
         previous_response: None,
         originator: &tau_proto::PromptOriginator::User,
         session_id: &tau_proto::SessionId::new("test-session"),
@@ -272,6 +279,7 @@ fn build_request_prompt_cache_key_differs_for_extension_originator() {
         messages: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
         previous_response: None,
         originator: &ext,
         session_id: &tau_proto::SessionId::new("test-session"),
@@ -283,6 +291,43 @@ fn build_request_prompt_cache_key_differs_for_extension_originator() {
     assert_eq!(user_body["prompt_cache_key"], "tau-base");
     assert!(ext_body["prompt_cache_key"].is_string());
     assert_ne!(ext_body["prompt_cache_key"], user_body["prompt_cache_key"]);
+}
+
+/// `ToolChoice::None` emits `tool_choice: "none"` on the Responses
+/// body while leaving the `tools` array fully declared. The harness
+/// uses this for non-tool extension side queries (e.g. idle summary)
+/// so the model is forced to produce a text reply while the cache
+/// prefix (system_prompt + tools) keeps matching the parent
+/// conversation's. Verified here on a request that carries real
+/// tool definitions.
+#[test]
+fn build_request_emits_tool_choice_none_while_keeping_tools_declared() {
+    let config = chain_test_config();
+    let tool = tau_proto::ToolDefinition {
+        name: tau_proto::ToolName::new("shell"),
+        description: None,
+        parameters: None,
+    };
+    let request = PromptPayload {
+        system_prompt: "sys",
+        messages: &[],
+        tools: std::slice::from_ref(&tool),
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::None,
+        previous_response: None,
+        originator: &tau_proto::PromptOriginator::User,
+        session_id: &tau_proto::SessionId::new("test-session"),
+    };
+
+    let body = serde_json::to_value(build_request(&config, &request)).expect("serialize");
+
+    assert_eq!(body["tool_choice"], "none");
+    let tools = body["tools"].as_array().expect("tools array");
+    assert_eq!(
+        tools.len(),
+        1,
+        "tools must stay declared so the cache prefix matches"
+    );
 }
 
 fn chain_test_config() -> ResponsesConfig {
@@ -350,6 +395,7 @@ fn build_request_stamps_phase_on_assistant_messages_when_supported() {
         messages: &messages,
         tools: &[],
         params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
         previous_response: None,
         originator: &tau_proto::PromptOriginator::User,
         session_id: &tau_proto::SessionId::new("test-session"),
@@ -386,6 +432,7 @@ fn build_request_omits_phase_when_unsupported() {
         messages: &messages,
         tools: &[],
         params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
         previous_response: None,
         originator: &tau_proto::PromptOriginator::User,
         session_id: &tau_proto::SessionId::new("test-session"),
@@ -431,6 +478,7 @@ fn build_request_stamps_phase_on_pre_tool_call_text_flush() {
         messages: &messages,
         tools: &[],
         params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
         previous_response: None,
         originator: &tau_proto::PromptOriginator::User,
         session_id: &tau_proto::SessionId::new("test-session"),
@@ -521,6 +569,7 @@ fn ws_envelope_adds_type_and_drops_stream() {
         messages: &[],
         tools: &[],
         params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
         previous_response: None,
         originator: &tau_proto::PromptOriginator::User,
         session_id: &tau_proto::SessionId::new("test-session"),

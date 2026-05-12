@@ -539,6 +539,7 @@ fn handle_prompt<W: Write>(
         messages: &prompt.messages,
         tools: &prompt.tools,
         params: prompt.model_params,
+        tool_choice: prompt.tool_choice,
         previous_response: prompt
             .previous_response
             .as_ref()

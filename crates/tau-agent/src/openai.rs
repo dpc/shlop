@@ -295,10 +295,13 @@ fn build_request(
     }
 
     let tools: Vec<ApiTool> = request.tools.iter().map(convert_tool_definition).collect();
-    let tool_choice = if tools.is_empty() {
-        None
-    } else {
-        Some("auto".to_owned())
+    let tool_choice = match (request.tool_choice, tools.is_empty()) {
+        // Harness-forced no-tools-this-turn: send explicit `none` even
+        // with tools declared so the cache prefix matches the parent
+        // turn while the model is told not to call anything.
+        (tau_proto::ToolChoice::None, _) => Some("none".to_owned()),
+        (tau_proto::ToolChoice::Auto, false) => Some("auto".to_owned()),
+        (tau_proto::ToolChoice::Auto, true) => None,
     };
     let parallel_tool_calls = (!tools.is_empty()).then_some(true);
 

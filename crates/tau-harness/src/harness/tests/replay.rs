@@ -111,6 +111,7 @@ fn late_joining_ui_client_replays_only_final_session_events() {
             tools: Vec::new(),
             model: None,
             model_params: Default::default(),
+            tool_choice: Default::default(),
             originator: Default::default(),
             ctx_id: None,
             previous_response: None,

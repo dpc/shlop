@@ -1126,6 +1126,16 @@ fn non_tool_ext_agent_query_inherits_parent_branch() {
         side_prompt.messages,
     );
 
+    // Tool calls are disabled on this turn so the summarizer can't
+    // accidentally fire `write` / `edit` / `delegate` — and the
+    // tools list still goes out unchanged so the cache prefix
+    // matches the parent conv's.
+    assert_eq!(
+        side_prompt.tool_choice,
+        tau_proto::ToolChoice::None,
+        "non-tool ext-agent query must disable tool calls for the side conv's turn",
+    );
+
     // The parent conv's head must not have moved sideways because of
     // the side conv's publish — both convs are now downstream of the
     // parent's previous tip, but the side conv folded onto its own
@@ -1134,6 +1144,94 @@ fn non_tool_ext_agent_query_inherits_parent_branch() {
     assert_eq!(
         parent_head_before, parent_head_after,
         "side conv's UserMessage must not advance the parent conv's head",
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Counterpart to `non_tool_ext_agent_query_inherits_parent_branch`.
+/// The harness picks `tool_choice` per conversation in
+/// `send_prompt_to_agent_for`; if that discriminator ever
+/// over-matches (e.g. flips on `originator.is_extension()` alone),
+/// delegate sub-agents would receive `tool_choice: "none"` and be
+/// unable to call any tool — silently turning every delegated task
+/// into a one-shot text response. Asserts the inverse leg: when
+/// `tool_call_id: Some(...)`, `ToolChoice::Auto` is preserved.
+#[test]
+fn delegate_ext_agent_query_keeps_tool_choice_auto() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+
+    h.selected_model = Some("test/model".into());
+    let _delegate_events = connect_test_tool(&mut h, "conn-delegate");
+    h.registry.register(
+        "conn-delegate",
+        ToolSpec {
+            name: tau_proto::ToolName::new("delegate"),
+            description: None,
+            parameters: None,
+            side_effects: ToolSideEffects::Mutating,
+        },
+    );
+
+    let cid = h.default_conversation_id.clone();
+    let main_spid: SessionPromptId = "sp-main".into();
+    seed_agent_thinking(&mut h, &cid, "sp-main");
+    h.prompt_conversations
+        .insert(main_spid.clone(), cid.clone());
+    h.publish_for_conversation(
+        &cid,
+        Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "go".to_owned(),
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        }),
+    );
+    h.handle_agent_response_finished(AgentResponseFinished {
+        session_prompt_id: main_spid,
+        text: None,
+        tool_calls: vec![AgentToolCall {
+            id: "delegate-call".into(),
+            name: "delegate".into(),
+            arguments: CborValue::Map(Vec::new()),
+            display: None,
+        }],
+        input_tokens: None,
+        cached_tokens: None,
+        output_tokens: None,
+        thinking: None,
+        token_usage: None,
+        originator: tau_proto::PromptOriginator::User,
+
+        backend: None,
+        response_id: None,
+        phase: None,
+    })
+    .expect("main response");
+
+    h.handle_ext_agent_query(
+        "conn-delegate",
+        ExtAgentQuery {
+            query_id: "q1".to_owned(),
+            instruction: "side task".to_owned(),
+            tool_call_id: Some("delegate-call".into()),
+            task_name: None,
+        },
+    )
+    .expect("query");
+
+    let side_spid = h
+        .prompt_conversations
+        .iter()
+        .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
+        .expect("side prompt id");
+    let prompt = read_prompt_created(&h, &side_spid);
+    assert_eq!(
+        prompt.tool_choice,
+        tau_proto::ToolChoice::Auto,
+        "delegated sub-agent must keep tool access (ToolChoice::Auto)",
     );
 
     h.shutdown().expect("shutdown");

@@ -216,6 +216,7 @@ fn deterministic_agent_and_tool_complete_one_vertical_slice() {
         }],
         model: None,
         model_params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
         previous_response: None,
