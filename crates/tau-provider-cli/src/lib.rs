@@ -432,6 +432,8 @@ fn build_provider_entry(kind: &ProviderKind, ollama_model: Option<&str>) -> Prov
             // `None` defers to the built-in xhigh whitelist
             // (`tau_config::settings::is_known_xhigh_model_id`).
             supports_xhigh: None,
+            // `None` keeps the canonical default level set.
+            reasoning_efforts: None,
         }
     }
 

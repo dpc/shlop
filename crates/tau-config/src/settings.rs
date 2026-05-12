@@ -543,15 +543,27 @@ pub struct ModelConfig {
     /// (the default) means "fall back to the built-in whitelist for
     /// well-known OpenAI model IDs" — see [`is_known_xhigh_model_id`].
     /// Set explicitly in `models.json5` (`supportsXhigh: true|false`)
-    /// to override.
+    /// to override. Ignored when `reasoning_efforts` is set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_xhigh: Option<bool>,
+    /// Full per-model override of the reasoning-effort levels this
+    /// model accepts. When set, this list replaces both the
+    /// canonical default set (`[off, minimal, low, medium, high]`)
+    /// and the `supports_xhigh` flag — use it for escape-hatch cases
+    /// where Tau's built-in detection is wrong or out of date, or
+    /// for asymmetric models like `gpt-5.4-pro` which accept only
+    /// `[medium, high, xhigh]`. The list also takes precedence over
+    /// the provider-level `supportsReasoningEffort` flag.
+    /// `None` keeps the default behaviour.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_efforts: Option<Vec<tau_proto::Effort>>,
 }
 
 impl ModelConfig {
     /// Effective xhigh support: explicit `supports_xhigh` wins,
     /// otherwise consult the built-in whitelist of known OpenAI
-    /// model IDs.
+    /// model IDs. Not consulted when `reasoning_efforts` is set —
+    /// that field is an authoritative override.
     #[must_use]
     pub fn supports_xhigh(&self) -> bool {
         self.supports_xhigh

@@ -342,6 +342,7 @@ fn add_provider_in_writes_typed_entry() {
         max_output_tokens: None,
         context_window: Some(123_456),
         supports_xhigh: None,
+        reasoning_efforts: None,
     });
 
     let path = add_provider_in(&dirs, "openai", &provider).expect("add provider");
@@ -438,6 +439,7 @@ fn model_supports_xhigh_explicit_override_wins() {
         max_output_tokens: None,
         context_window: None,
         supports_xhigh: None,
+        reasoning_efforts: None,
     };
     assert!(base.supports_xhigh(), "whitelist default for gpt-5.5");
 
@@ -459,6 +461,49 @@ fn model_supports_xhigh_explicit_override_wins() {
         forced_on.supports_xhigh(),
         "explicit `true` overrides the (absent) whitelist entry"
     );
+}
+
+/// `reasoningEfforts` parses as a list of effort levels using the
+/// canonical snake_case wire form shared with `default_efforts`.
+#[test]
+fn models_json5_reasoning_efforts_override_parses() {
+    use tau_proto::Effort;
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("models.json5"),
+        r#"{
+            providers: {
+                openai: {
+                    api: "openai-chat",
+                    auth: "api-key",
+                    apiKey: "test",
+                    models: [
+                        // gpt-5.4-pro accepts medium/high/xhigh only
+                        // (no `off` or `low`/`minimal`) — the user
+                        // pins exactly what the API will accept.
+                        {
+                            id: "gpt-5.4-pro",
+                            reasoningEfforts: ["medium", "high", "xhigh"],
+                        },
+                        // No override: keep the defaults.
+                        { id: "gpt-5.5" },
+                    ],
+                },
+            },
+        }"#,
+    )
+    .expect("write");
+
+    let m: ModelRegistry = load_json5_layered(dir, "models").expect("load");
+    let models = &m.providers["openai"].models;
+    let pro = models.iter().find(|m| m.id == "gpt-5.4-pro").expect("pro");
+    assert_eq!(
+        pro.reasoning_efforts.as_deref(),
+        Some(&[Effort::Medium, Effort::High, Effort::XHigh][..])
+    );
+    let v5 = models.iter().find(|m| m.id == "gpt-5.5").expect("v5");
+    assert_eq!(v5.reasoning_efforts, None);
 }
 
 /// `supportsXhigh: true` should round-trip through json5.

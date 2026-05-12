@@ -75,8 +75,25 @@ controls. The `xhigh` rung is gated per model: a curated whitelist
 covers known OpenAI models (`gpt-5.5`, `gpt-5.4`/`gpt-5.4-pro`,
 `gpt-5.3-codex`, `gpt-5.2`, `gpt-5.1-codex-max`, excluding `mini`/`nano`
 variants) and individual model entries can opt in or out explicitly
-with `supportsXhigh: true|false` in `models.json5`. Defaults can be set
-per-model:
+with `supportsXhigh: true|false` in `models.json5`. For asymmetric
+models like `gpt-5.4-pro` (medium/high/xhigh only — no `off`/`low`)
+or when Tau's detection is wrong/out of date, a `reasoningEfforts`
+list on the model entry pins the exact accepted levels and overrides
+both the whitelist and the provider-level `supportsReasoningEffort`
+flag:
+
+```json5
+// models.json5
+providers: {
+  openai: {
+    models: [
+      { id: "gpt-5.4-pro", reasoningEfforts: ["medium", "high", "xhigh"] },
+    ],
+  },
+},
+```
+
+Defaults can be set per-model:
 
 ```json5
 // harness.json5

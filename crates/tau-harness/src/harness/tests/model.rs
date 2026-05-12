@@ -282,6 +282,84 @@ fn efforts_for_model_includes_xhigh_for_supported_models_only() {
     );
 }
 
+/// Per-model `reasoningEfforts` is the explicit escape hatch: it
+/// replaces both the canonical default set and the provider-level
+/// `supportsReasoningEffort` flag, in the order the user wrote it
+/// (de-duplicated). Verifies asymmetric models like `gpt-5.4-pro`
+/// (medium/high/xhigh only) and a "force reasoning on a provider
+/// otherwise marked off" case both work.
+#[test]
+fn efforts_for_model_honours_reasoning_efforts_override() {
+    use tau_proto::Effort as L;
+
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("models.json5"),
+        r#"{
+            providers: {
+                openai: {
+                    api: "openai-chat",
+                    auth: "api-key",
+                    apiKey: "test",
+                    compat: { supportsReasoningEffort: true },
+                    models: [
+                        {
+                            id: "gpt-5.4-pro",
+                            reasoningEfforts: ["medium", "high", "xhigh"],
+                        },
+                        {
+                            // Dedup test — same level listed twice
+                            // collapses to one entry.
+                            id: "weird",
+                            reasoningEfforts: ["off", "high", "high"],
+                        },
+                    ],
+                },
+                pinned: {
+                    // Provider claims no reasoning effort, but the
+                    // per-model override is authoritative.
+                    compat: { supportsReasoningEffort: false },
+                    models: [
+                        {
+                            id: "exotic",
+                            reasoningEfforts: ["low", "high"],
+                        },
+                        { id: "plain" },
+                    ],
+                },
+            },
+        }"#,
+    )
+    .expect("write models");
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(dir.to_path_buf()),
+        state_dir: None,
+    };
+    let registry = tau_config::settings::load_models_in(&dirs).expect("load");
+
+    assert_eq!(
+        efforts_for_model(&registry, "openai/gpt-5.4-pro"),
+        vec![L::Medium, L::High, L::XHigh],
+        "user-specified list replaces the canonical default set",
+    );
+    assert_eq!(
+        efforts_for_model(&registry, "openai/weird"),
+        vec![L::Off, L::High],
+        "duplicates collapse but order is preserved",
+    );
+    assert_eq!(
+        efforts_for_model(&registry, "pinned/exotic"),
+        vec![L::Low, L::High],
+        "per-model override beats provider supportsReasoningEffort=false",
+    );
+    assert_eq!(
+        efforts_for_model(&registry, "pinned/plain"),
+        vec![L::Off],
+        "without override, provider-level flag still wins",
+    );
+}
+
 /// `clamp_effort` must degrade `XHigh` to `High` (Pi-style) when the
 /// model doesn't expose it, rather than silently dropping all the
 /// way to `Off`. `Off` remains the fallback for other unsupported

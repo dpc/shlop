@@ -58,13 +58,18 @@ pub(crate) fn load_model_list(dirs: &tau_config::settings::TauDirs) -> LoadedMod
 }
 
 /// Returns the efforts valid for `model` (a `provider/model_id`
-/// string). Empty list means no effort applies — no model selected, or
-/// the provider doesn't support reasoning. Otherwise returns the
-/// canonical [Off, Minimal, Low, Medium, High] set, optionally with
-/// `XHigh` appended when the model opts in (per-model
-/// `supportsXhigh` in `models.json5`, or the built-in whitelist of
-/// known OpenAI model IDs in
-/// [`tau_config::settings::is_known_xhigh_model_id`]).
+/// string).
+///
+/// Resolution order:
+/// 1. Empty list when the model id is empty or its provider isn't in the
+///    registry.
+/// 2. Per-model `reasoningEfforts` (escape hatch): an authoritative list that
+///    replaces both the canonical default set and the provider-level
+///    `supportsReasoningEffort` flag.
+/// 3. `[Off]` when the provider has `supportsReasoningEffort: false`.
+/// 4. Otherwise the canonical `[Off, Minimal, Low, Medium, High]` set, plus
+///    `XHigh` when the model opts in via per-model `supportsXhigh` or
+///    [`tau_config::settings::is_known_xhigh_model_id`].
 pub(crate) fn efforts_for_model(
     registry: &tau_config::settings::ModelRegistry,
     model: &str,
@@ -79,16 +84,22 @@ pub(crate) fn efforts_for_model(
     let Some(provider) = registry.providers.get(provider_name) else {
         return Vec::new();
     };
+    let model_cfg = provider.models.iter().find(|m| m.id == model_id);
+    if let Some(custom) = model_cfg.and_then(|m| m.reasoning_efforts.as_ref()) {
+        // Authoritative override — preserve user-specified order
+        // but drop duplicates so the cycle helper doesn't loop.
+        let mut seen = std::collections::BTreeSet::new();
+        return custom
+            .iter()
+            .copied()
+            .filter(|level| seen.insert(*level))
+            .collect();
+    }
     if !provider.compat.supports_reasoning_effort {
         return vec![L::Off];
     }
     let mut levels = vec![L::Off, L::Minimal, L::Low, L::Medium, L::High];
-    if provider
-        .models
-        .iter()
-        .find(|m| m.id == model_id)
-        .is_some_and(tau_config::settings::ModelConfig::supports_xhigh)
-    {
+    if model_cfg.is_some_and(tau_config::settings::ModelConfig::supports_xhigh) {
         levels.push(L::XHigh);
     }
     levels
