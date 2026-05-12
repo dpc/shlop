@@ -12,10 +12,10 @@
 //! This module replaces the *content* of any tool result whose CBOR
 //! encoding hashes to the same value as a result already on the
 //! conversation's branch with a short pointer
-//! (`[tau-dedup] identical to call_id <X>`). The first occurrence is
-//! kept verbatim — only the duplicates are collapsed. The model can
-//! cross-reference the pointer to the original `call_id` which is
-//! still present earlier in its own context.
+//! (`[tau-dedup] same as <tool_name> <call_id>`). The first
+//! occurrence is kept verbatim — only the duplicates are collapsed.
+//! The model can cross-reference the pointer to the original
+//! `call_id` which is still present earlier in its own context.
 //!
 //! Three invariants protect correctness:
 //!
@@ -31,7 +31,7 @@
 //!
 //! 3. **Threshold gated.** Results whose serialized form is below
 //!    [`DEFAULT_THRESHOLD_BYTES`] are not deduped at all — the pointer text
-//!    itself is ~80 B, so single-digit savings aren't worth the extra hop the
+//!    itself runs ~50 B, so single-digit savings aren't worth the extra hop the
 //!    model has to make to recover the original.
 
 use std::collections::HashMap;
@@ -51,9 +51,9 @@ pub(crate) const DEDUP_MARKER: &str = "[tau-dedup]";
 /// Minimum CBOR-serialized size of a tool result to consider
 /// deduping. Below this, the pointer text is comparable to the
 /// original content and the model cost of the redirect outweighs the
-/// savings. 256 B is comfortably above the ~80-B pointer text and
-/// covers most "empty-success" tool outputs without burning cycles
-/// hashing them.
+/// savings. 256 B leaves a healthy margin over the ~50-B pointer
+/// text and covers most "empty-success" tool outputs without
+/// burning cycles hashing them.
 pub(crate) const DEFAULT_THRESHOLD_BYTES: usize = 256;
 
 /// 16-byte truncated SHA-256 digest of the CBOR-serialized result
@@ -231,12 +231,18 @@ pub(crate) fn sha256_truncated(bytes: &[u8]) -> ResultHash {
 /// Encodes as `CborValue::Text` so both the wire format and the
 /// downstream [`crate::prompt::cbor_to_text`] path see identical
 /// human-readable content with a stable, recognizable prefix.
+///
+/// Format kept terse on purpose: the model already knows from the
+/// wrapping `function_call_output` that this is a tool-result
+/// payload, so re-stating "result of …" is redundant. Tool-name and
+/// call_id are enough for the model to locate the original output
+/// earlier in its own context.
 pub(crate) fn build_pointer_value(
     original_call_id: &ToolCallId,
     tool_name: &tau_proto::ToolName,
 ) -> CborValue {
     CborValue::Text(format!(
-        "{DEDUP_MARKER} identical to result of `{}` call_id `{}` — see that earlier output",
+        "{DEDUP_MARKER} same as {} {}",
         tool_name.as_str(),
         original_call_id
     ))
@@ -246,13 +252,15 @@ pub(crate) fn build_pointer_value(
 /// error. The full pointer goes into the `message` field with the
 /// same marker prefix; `details` is dropped because it is what made
 /// the original distinct and the pointer's job is to refer back, not
-/// to reproduce it.
+/// to reproduce it. The wrapping `function_call_output` is rendered
+/// with an "ERROR:" prefix downstream, so the pointer doesn't need
+/// to restate the kind here.
 pub(crate) fn build_pointer_error_message(
     original_call_id: &ToolCallId,
     tool_name: &tau_proto::ToolName,
 ) -> String {
     format!(
-        "{DEDUP_MARKER} identical to error of `{}` call_id `{}` — see that earlier output",
+        "{DEDUP_MARKER} same as {} {}",
         tool_name.as_str(),
         original_call_id
     )

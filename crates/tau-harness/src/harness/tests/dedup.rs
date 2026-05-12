@@ -141,9 +141,15 @@ fn cross_turn_identical_result_collapses_to_pointer() {
         text.contains("call_first"),
         "pointer must reference the first call_id; got: {text:?}",
     );
+    // Lock in the terse pointer budget. The format is
+    // `[tau-dedup] same as <tool> <call_id>` — currently ~50 B for
+    // a typical tool name + OpenAI-style call_id. Cap at 100 B so a
+    // future format change that grows the pointer significantly
+    // (and erodes the dedup win) trips this test instead of slipping
+    // through silently.
     assert!(
-        text.len() < 256,
-        "pointer text should be small (~80B); got {} bytes: {text:?}",
+        text.len() < 100,
+        "pointer text should stay terse (<100 B); got {} bytes: {text:?}",
         text.len(),
     );
 
