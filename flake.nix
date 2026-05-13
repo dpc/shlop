@@ -187,6 +187,10 @@
         legacyPackages = multiBuild;
 
         devShells = flakeboxLib.mkShells {
+          channel = "latest";
+          components = flakeboxLib.config.toolchain.components ++ [
+            "rustc-codegen-cranelift-preview"
+          ];
           packages = [ pkgs.taplo ];
         };
       }

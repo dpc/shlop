@@ -1,0 +1,11 @@
+# Speed up local debug builds when using the nightly toolchain from `nix develop`.
+# Third-party dependencies stay on LLVM because Cranelift can still hit backend
+# gaps there; workspace crates use Cranelift for faster edit/check cycles.
+[unstable]
+codegen-backend = true
+
+[profile.dev]
+codegen-backend = "cranelift"
+
+[profile.dev.package."*"]
+codegen-backend = "llvm"
