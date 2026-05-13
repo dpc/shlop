@@ -21,8 +21,8 @@ pub(crate) struct ToolOutput {
 #[derive(Debug)]
 pub(crate) struct ToolFailure {
     pub message: String,
-    pub details: Option<CborValue>,
-    pub display: ToolDisplay,
+    pub details: Option<Box<CborValue>>,
+    pub display: Box<ToolDisplay>,
 }
 
 impl ToolFailure {
@@ -32,11 +32,11 @@ impl ToolFailure {
         Self {
             message,
             details: None,
-            display: ToolDisplay {
+            display: Box::new(ToolDisplay {
                 status: ToolDisplayStatus::Error,
                 status_text,
                 ..Default::default()
-            },
+            }),
         }
     }
 
@@ -46,7 +46,7 @@ impl ToolFailure {
     }
 
     pub fn with_details(mut self, details: CborValue) -> Self {
-        self.details = Some(details);
+        self.details = Some(Box::new(details));
         self
     }
 }

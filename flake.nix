@@ -158,6 +158,7 @@
 
             clippy = craneLib.cargoClippy {
               cargoArtifacts = workspaceDeps;
+              cargoClippyExtraArgs = "-- -D warnings";
             };
 
             tau = replaceTauBuildInfo (

@@ -221,8 +221,7 @@ impl CliState {
     fn save_inner(&self, dir: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(dir)?;
         let path = dir.join("cli.json");
-        let text = serde_json::to_string_pretty(self)
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
+        let text = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
         std::fs::write(path, text)
     }
 }

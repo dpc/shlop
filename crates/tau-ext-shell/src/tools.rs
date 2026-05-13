@@ -83,8 +83,8 @@ pub(crate) fn execute_tool(
                 call_id: invoke.call_id,
                 tool_name: invoke.tool_name,
                 message,
-                details,
-                display: Some(display),
+                details: details.map(|details| *details),
+                display: Some(*display),
                 originator: tau_proto::PromptOriginator::User,
             })),
         }
@@ -127,8 +127,8 @@ fn wrap_pure(
             call_id: invoke.call_id,
             tool_name: invoke.tool_name,
             message,
-            details: details.or(fallback_details),
-            display: Some(display),
+            details: details.map(|details| *details).or(fallback_details),
+            display: Some(*display),
             originator: tau_proto::PromptOriginator::User,
         })],
     }

@@ -191,7 +191,7 @@ impl Harness {
             Ok(content) => {
                 let body = tau_skills::strip_frontmatter(&content);
                 let mut display = skill_ok_display(name);
-                display.stats = text_stats_for_skill(&body);
+                display.stats = text_stats_for_skill(body);
                 Event::ToolResult(tau_proto::ToolResult {
                     call_id: call_id.clone(),
                     tool_name: tool_name.clone(),

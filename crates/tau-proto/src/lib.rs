@@ -840,7 +840,7 @@ where
         // Peek one byte to distinguish clean EOF from a real read; if
         // none is available, the stream is at a message boundary.
         match std::io::BufRead::fill_buf(&mut self.inner) {
-            Ok(b) if b.is_empty() => return Ok(None),
+            Ok([]) => return Ok(None),
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
             Err(e) => return Err(DecodeError::Io(e)),

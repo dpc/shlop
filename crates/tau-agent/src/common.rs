@@ -165,6 +165,12 @@ pub struct ToolCallAccumulator {
     pub arguments_json: String,
 }
 
+impl Default for StreamState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StreamState {
     pub fn new() -> Self {
         Self {

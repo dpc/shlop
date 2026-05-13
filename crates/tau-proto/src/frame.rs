@@ -18,6 +18,9 @@ use crate::messages::{LogEventId, Message};
 /// Top-level wire envelope.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
+// Keep `Frame` allocation-free: it is the central wire envelope and callers
+// routinely construct, match, and move `Frame::Event` values directly.
+#[allow(clippy::large_enum_variant)]
 pub enum Frame {
     Message(Message),
     Event(Event),

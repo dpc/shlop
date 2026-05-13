@@ -230,7 +230,7 @@ pub(crate) fn run_chat(
                     // best-effort consumer and does not ack.
                     let (_log_id, inner) = frame.peel_log();
                     let cmd = match inner {
-                        Frame::Event(event) => RendererCmd::Remote(event),
+                        Frame::Event(event) => RendererCmd::Remote(Box::new(event)),
                         Frame::Message(Message::Disconnect(d)) => {
                             RendererCmd::RemoteDisconnect(d.reason)
                         }
@@ -453,7 +453,7 @@ enum RendererCmd {
         name: String,
         value: String,
     },
-    Remote(Event),
+    Remote(Box<Event>),
     /// The harness sent a `Disconnect` message over the wire.
     RemoteDisconnect(Option<String>),
 }

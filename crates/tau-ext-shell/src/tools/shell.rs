@@ -108,8 +108,8 @@ pub(crate) fn run_command(
         display.stats = text_stats(&combined);
         Err(ToolFailure {
             message: format!("command exited with status {exit_label}"),
-            details: Some(result),
-            display,
+            details: Some(Box::new(result)),
+            display: Box::new(display),
         })
     }
 }

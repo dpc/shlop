@@ -48,6 +48,7 @@ pub struct ResponsesConfig {
     ///    backwards compatibility).
     /// 2. The SSE parser captures `phase` off the assistant `message` item so
     ///    the harness can persist it.
+    ///
     /// When off, no `phase` field is sent or parsed.
     pub supports_phase: bool,
     /// Whether the provider returns `reasoning` output items with a
