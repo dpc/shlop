@@ -69,7 +69,6 @@ fn cli_state_round_trip_through_save_and_load() {
     let original = CliState {
         show_diff: true,
         show_thinking: false,
-        show_cache_stats: false,
         show_token_stats: true,
     };
     original.save(&dirs);

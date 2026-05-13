@@ -10,11 +10,11 @@ use tau_proto::{CborValue, Event};
 use crate::build_banner;
 use crate::tool_render::{
     ToolCallDisplay, build_delegate_completion_display, build_osc1337_set_user_var,
-    extension_status_block, extract_diff, format_cache_hit_chip, format_context_chip,
-    format_token_stats_line, format_tool_call, format_turn_metrics_chip, render_diff_tool_block,
-    render_harness_info, render_shell_block, render_tool_block, render_tool_display,
-    session_status_block, streaming_block, synthesize_fallback_display, system_loaded_block,
-    system_status_block, ui_dir_block,
+    extension_status_block, extract_diff, format_context_chip, format_token_stats_line,
+    format_tool_call, format_turn_metrics_chip, render_diff_tool_block, render_harness_info,
+    render_shell_block, render_tool_block, render_tool_display, session_status_block,
+    streaming_block, synthesize_fallback_display, system_loaded_block, system_status_block,
+    ui_dir_block,
 };
 
 pub(crate) struct EventRenderer {
@@ -71,7 +71,7 @@ pub(crate) struct EventRenderer {
     thinking_history: Vec<ThinkingBlockEntry>,
     token_stats_history: Vec<TokenStatsBlockEntry>,
     /// Where to persist `show_diff` / `show_thinking` /
-    /// `show_cache_stats` toggles.
+    /// `show_token_stats` toggles.
     state_dirs: tau_config::settings::TauDirs,
     /// Current model id (cached so we can re-render the status bar
     /// when the effort changes, and vice versa). `None` until the
@@ -87,14 +87,8 @@ pub(crate) struct EventRenderer {
     /// Input tokens consumed by the most recent agent response. `None`
     /// until the first usage report for the current model.
     current_context_input_tokens: Option<u64>,
-    /// Cached input tokens consumed by the most recent agent
-    /// response. `None` until the first cache-usage report.
-    current_context_cached_tokens: Option<u64>,
     /// Current model context window, in tokens, if known.
     current_context_window: Option<u64>,
-    /// Whether to render provider prompt-cache hit stats in the
-    /// model status bar.
-    show_cache_stats: bool,
     /// Whether to render per-turn token usage stats below completed
     /// agent responses.
     show_token_stats: bool,
@@ -275,7 +269,6 @@ impl EventRenderer {
             diff_blocks: Vec::new(),
             diffs_expanded: state.show_diff,
             show_thinking: state.show_thinking,
-            show_cache_stats: state.show_cache_stats,
             show_token_stats: state.show_token_stats,
             cli_state_mirror,
             thinking_history: Vec::new(),
@@ -285,7 +278,6 @@ impl EventRenderer {
             current_params: tau_proto::ModelParams::default(),
             current_context_percent: None,
             current_context_input_tokens: None,
-            current_context_cached_tokens: None,
             current_context_window: None,
             last_turn_latency: None,
             effort_state: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
@@ -321,7 +313,6 @@ impl EventRenderer {
         let state = tau_config::settings::CliState {
             show_diff: self.diffs_expanded,
             show_thinking: self.show_thinking,
-            show_cache_stats: self.show_cache_stats,
             show_token_stats: self.show_token_stats,
         };
         if let Ok(mut mirror) = self.cli_state_mirror.lock() {
@@ -370,7 +361,6 @@ impl EventRenderer {
         match name {
             "show-diff" => self.set_diffs_expanded(on),
             "show-thinking" => self.set_show_thinking(on),
-            "show-cache-stats" => self.set_show_cache_stats(on),
             "show-token-stats" => self.set_show_token_stats(on),
             _ => {}
         }
@@ -450,16 +440,6 @@ impl EventRenderer {
         self.handle.invalidate_screen();
     }
 
-    /// Set provider prompt-cache hit stats visibility in the status bar.
-    fn set_show_cache_stats(&mut self, on: bool) {
-        if self.show_cache_stats == on {
-            return;
-        }
-        self.show_cache_stats = on;
-        self.render_model_status();
-        self.save_cli_state();
-    }
-
     fn set_show_token_stats(&mut self, on: bool) {
         use tau_cli_term::resolve::themed_block;
         use tau_themes::names;
@@ -503,7 +483,6 @@ impl EventRenderer {
         // can be recreated after clearing the terminal output.
         self.current_context_percent = None;
         self.current_context_input_tokens = None;
-        self.current_context_cached_tokens = None;
         self.last_turn_latency = None;
         self.handle.clear_output();
         self.render_session_preamble();
@@ -547,16 +526,8 @@ impl EventRenderer {
                     self.current_context_percent,
                     self.current_context_window,
                 );
-                let cache = if self.show_cache_stats {
-                    format_cache_hit_chip(
-                        self.current_context_input_tokens,
-                        self.current_context_cached_tokens,
-                    )
-                } else {
-                    String::new()
-                };
                 let turn_metrics = format_turn_metrics_chip(self.last_turn_latency);
-                format!("{model} ({params}){context}{cache}{turn_metrics}")
+                format!("{model} ({params}){context}{turn_metrics}")
             }
         };
         let block = themed_block(&self.theme, names::MODEL_STATUS, label);
@@ -1131,7 +1102,6 @@ impl EventRenderer {
             }
             Event::HarnessContextUsageChanged(changed) => {
                 self.current_context_input_tokens = changed.input_tokens;
-                self.current_context_cached_tokens = changed.cached_tokens;
                 self.current_context_percent = changed.percent_used;
                 self.render_model_status();
             }

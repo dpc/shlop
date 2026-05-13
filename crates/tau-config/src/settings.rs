@@ -169,9 +169,6 @@ pub struct CliState {
     /// `agent.thinking` block). Controlled by
     /// `/set show-thinking <true|false>`.
     pub show_thinking: bool,
-    /// Whether to render provider prompt-cache hit stats in the model
-    /// status bar. Controlled by `/set show-cache-stats <true|false>`.
-    pub show_cache_stats: bool,
     /// Whether to render per-turn token usage stats below agent
     /// responses. Controlled by `/set show-token-stats <true|false>`.
     pub show_token_stats: bool,
@@ -182,7 +179,6 @@ impl Default for CliState {
         Self {
             show_diff: false,
             show_thinking: true,
-            show_cache_stats: true,
             show_token_stats: false,
         }
     }

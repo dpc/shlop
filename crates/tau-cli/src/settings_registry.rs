@@ -63,12 +63,6 @@ pub const SETTINGS: &[SettingDef] = &[
         get: |s| bool_str(s.show_thinking),
     },
     SettingDef {
-        name: "show-cache-stats",
-        description: "Provider prompt-cache hit stats in the status bar",
-        values: BOOL_VALUES,
-        get: |s| bool_str(s.show_cache_stats),
-    },
-    SettingDef {
         name: "show-token-stats",
         description: "Token usage stats below agent responses",
         values: BOOL_VALUES,

@@ -26,18 +26,6 @@ pub(crate) fn format_context_chip(
     }
 }
 
-pub(crate) fn format_cache_hit_chip(
-    input_tokens: Option<u64>,
-    cached_tokens: Option<u64>,
-) -> String {
-    match (cache_hit_percent(input_tokens, cached_tokens), input_tokens) {
-        (Some(percent), Some(tokens)) => {
-            format!(" hit:{percent}%/{}", format_token_count(tokens))
-        }
-        _ => String::new(),
-    }
-}
-
 pub(crate) fn format_turn_metrics_chip(latency: Option<Duration>) -> String {
     let mut chip = String::new();
     if let Some(latency) = latency {
@@ -56,25 +44,40 @@ pub(crate) fn format_token_stats_line(usage: &tau_proto::AgentTokenUsage) -> Str
         .sent_tokens
         .saturating_sub(usage.stats.total.cached_tokens);
     let mut line = format!(
-        "↑Δ{}/{} ↑Σ{}/{} ↓Δ{} ↓Σ{}",
+        "↑Δ{}/{}",
         format_token_count(prompt_uncached_tokens),
         format_token_count(usage.prompt_sent_tokens),
-        format_token_count(total_uncached_tokens),
-        format_token_count(usage.stats.total.sent_tokens),
-        format_token_count(usage.response_received_tokens),
-        format_token_count(usage.stats.total.received_tokens),
     );
-    // Per-turn cache-hit %, only meaningful when this turn actually sent
-    // a prompt. Lets the user spot a regression (e.g. tool reordering
-    // breaking the prefix) directly on the offending turn instead of
-    // inferring it from the cumulative status-bar chip.
+    // Per-turn cache-hit %, paired with its ↑Δ chip. Lets the user spot
+    // a regression (e.g. tool reordering breaking the prefix) directly
+    // on the offending turn.
     if let Some(percent) = cache_hit_percent(
         Some(usage.prompt_sent_tokens),
         Some(usage.prompt_cached_tokens),
     ) && usage.prompt_sent_tokens > 0
     {
-        line.push_str(&format!(" hit:{percent}%"));
+        line.push_str(&format!(" ↑ΔH{percent}%"));
     }
+    line.push_str(&format!(
+        " ↑Σ{}/{}",
+        format_token_count(total_uncached_tokens),
+        format_token_count(usage.stats.total.sent_tokens),
+    ));
+    // Session-cumulative cache-hit %, paired with its ↑Σ chip. Smooths
+    // out per-turn noise and surfaces sessions that are thrashing cache
+    // overall even when no single turn looks bad.
+    if let Some(percent) = cache_hit_percent(
+        Some(usage.stats.total.sent_tokens),
+        Some(usage.stats.total.cached_tokens),
+    ) && usage.stats.total.sent_tokens > 0
+    {
+        line.push_str(&format!(" ↑ΣH{percent}%"));
+    }
+    line.push_str(&format!(
+        " ↓Δ{} ↓Σ{}",
+        format_token_count(usage.response_received_tokens),
+        format_token_count(usage.stats.total.received_tokens),
+    ));
     line
 }
 

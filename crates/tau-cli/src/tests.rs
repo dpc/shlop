@@ -12,9 +12,9 @@ use tau_proto::{
 use super::chat::{DraftSlot, should_send_draft_snapshot};
 use super::event_renderer::EventRenderer;
 use super::tool_render::{
-    ToolStatus, build_osc1337_set_user_var, cache_hit_percent, format_cache_hit_chip,
-    format_context_chip, format_token_stats_line, format_turn_metrics_chip, render_tool_display,
-    streaming_block, synthesize_fallback_display,
+    ToolStatus, build_osc1337_set_user_var, cache_hit_percent, format_context_chip,
+    format_token_stats_line, format_turn_metrics_chip, render_tool_display, streaming_block,
+    synthesize_fallback_display,
 };
 
 /// Writer that feeds bytes into a vt100::Parser. Bytes are
@@ -1247,15 +1247,6 @@ fn format_context_chip_picks_format_by_known_fields() {
 }
 
 #[test]
-fn format_cache_hit_chip_matches_context_chip_shape() {
-    assert_eq!(
-        format_cache_hit_chip(Some(12_000), Some(9_000)),
-        " hit:75%/12k",
-    );
-    assert_eq!(format_cache_hit_chip(Some(12_000), None), "");
-}
-
-#[test]
 fn format_turn_metrics_chip_includes_latency() {
     assert_eq!(
         format_turn_metrics_chip(Some(Duration::from_millis(1_240))),
@@ -1270,11 +1261,20 @@ fn format_token_stats_line_appends_hit_percent_when_cache_hits() {
         prompt_sent_tokens: 17_341,
         prompt_cached_tokens: 16_896,
         response_received_tokens: 29,
+        stats: tau_proto::TokenUsageStats {
+            total: tau_proto::TokenUsageCounts {
+                sent_tokens: 100_000,
+                cached_tokens: 50_000,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
         ..Default::default()
     };
     let line = format_token_stats_line(&usage);
 
-    assert!(line.contains(" hit:97%"), "{line}");
+    assert!(line.contains(" ↑ΔH97%"), "{line}");
+    assert!(line.contains(" ↑ΣH50%"), "{line}");
     assert!(line.contains("↑Δ445/17.3k"), "{line}");
 }
 
@@ -1283,7 +1283,7 @@ fn format_token_stats_line_omits_hit_chip_when_no_prompt_sent() {
     let usage = tau_proto::AgentTokenUsage::default();
     let line = format_token_stats_line(&usage);
 
-    assert!(!line.contains("hit:"), "{line}");
+    assert!(!line.contains('H'), "{line}");
 }
 
 #[test]
