@@ -11,8 +11,8 @@ use crate::build_banner;
 use crate::tool_render::{
     ToolCallDisplay, ToolSummaryDisplay, build_delegate_completion_display,
     build_osc1337_set_user_var, build_tool_summary_display, extension_status_block, extract_diff,
-    format_context_chip, format_token_stats_line, format_tool_call, render_diff_tool_block,
-    render_harness_info, render_shell_block, render_tool_block, render_tool_display,
+    format_context_chip, format_tool_call, render_diff_tool_block, render_harness_info,
+    render_shell_block, render_token_stats_block, render_tool_block, render_tool_display,
     session_status_block, streaming_block, synthesize_fallback_display, system_loaded_block,
     system_status_block, ui_dir_block,
 };
@@ -477,22 +477,22 @@ impl EventRenderer {
     }
 
     fn set_show_token_stats(&mut self, on: bool) {
-        use tau_cli_term::resolve::themed_block;
-        use tau_themes::names;
         if self.show_token_stats == on {
             return;
         }
         self.show_token_stats = on;
         for entry in &self.token_stats_history {
-            let text = if self.show_token_stats {
-                format_token_stats_line(&entry.usage, entry.turn_latency, entry.total_latency)
+            let block = if self.show_token_stats {
+                render_token_stats_block(
+                    &self.theme,
+                    &entry.usage,
+                    entry.turn_latency,
+                    entry.total_latency,
+                )
             } else {
-                String::new()
+                Self::empty_block()
             };
-            self.handle.set_block(
-                entry.block_id,
-                themed_block(&self.theme, names::SYSTEM_INFO, text),
-            );
+            self.handle.set_block(entry.block_id, block);
         }
         self.invalidate_for_retroactive_toggle();
         self.save_cli_state();
@@ -974,20 +974,17 @@ impl EventRenderer {
                     ));
                 }
                 if let Some(usage) = finished.token_usage.clone() {
-                    let display = if self.show_token_stats {
-                        format_token_stats_line(
+                    let block = if self.show_token_stats {
+                        render_token_stats_block(
+                            &self.theme,
                             &usage,
                             turn_latency,
                             Some(self.cumulative_agent_latency),
                         )
                     } else {
-                        String::new()
+                        Self::empty_block()
                     };
-                    let bid = self.handle.print_output(themed_block(
-                        &self.theme,
-                        names::SYSTEM_INFO,
-                        display,
-                    ));
+                    let bid = self.handle.print_output(block);
                     self.token_stats_history.push(TokenStatsBlockEntry {
                         block_id: bid,
                         usage,

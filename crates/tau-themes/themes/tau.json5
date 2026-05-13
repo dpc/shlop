@@ -44,6 +44,17 @@
     // -- Model status --
     "model.status":         { fg: "dark_grey" },
 
+    // -- Token stats --
+    "token.stats":                  { fg: "dark_grey" },
+    "token.stats.symbol.delta":     { bold: true },
+    "token.stats.symbol.sigma":     { bold: true },
+    "token.stats.symbol.up":        { },
+    "token.stats.symbol.down":      { },
+    "token.stats.metric.cache_hit": { },
+    "token.stats.metric.input":     { },
+    "token.stats.metric.output":    { },
+    "token.stats.metric.latency":   { },
+
     // -- Prompt --
     "prompt.marker":        { bold: true },
 

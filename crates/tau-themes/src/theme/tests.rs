@@ -180,6 +180,15 @@ fn builtin_theme_parses() {
     assert!(selected.bold);
     assert_eq!(selected.fg, Some(Color::White));
     assert_eq!(selected.bg, Some(Color::DarkBlue));
+
+    let token_stats = theme.resolve_style(&StyleName::new("token.stats"));
+    assert_eq!(token_stats.fg, Some(Color::DarkGrey));
+
+    let delta = theme.resolve_style(&StyleName::new("token.stats.symbol.delta"));
+    assert!(delta.bold);
+
+    let sigma = theme.resolve_style(&StyleName::new("token.stats.symbol.sigma"));
+    assert!(sigma.bold);
 }
 
 #[test]

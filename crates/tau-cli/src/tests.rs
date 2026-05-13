@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tau_cli_term::TermHandle;
-use tau_cli_term_raw::Term;
+use tau_cli_term_raw::{Color, Term};
 use tau_proto::{
     AgentResponseFinished, AgentResponseUpdated, CborValue, Event, ExtAgentsMdAvailable,
     ExtensionReady, HarnessModelSelected, SessionPromptCreated, SessionPromptQueued,
@@ -13,7 +13,8 @@ use super::chat::{DraftSlot, should_send_draft_snapshot};
 use super::event_renderer::EventRenderer;
 use super::tool_render::{
     ToolStatus, build_osc1337_set_user_var, cache_hit_percent, format_context_chip,
-    format_token_stats_line, render_tool_display, streaming_block, synthesize_fallback_display,
+    format_token_stats_line, render_token_stats_block, render_tool_display, streaming_block,
+    synthesize_fallback_display,
 };
 
 /// Writer that feeds bytes into a vt100::Parser. Bytes are
@@ -1412,10 +1413,7 @@ fn format_token_stats_line_appends_hit_percent_when_cache_hits() {
         Some(Duration::from_millis(4_560)),
     );
 
-    assert!(line.contains(" ↑ΔH97%"), "{line}");
-    assert!(line.contains(" ↑ΣH50%"), "{line}");
-    assert!(line.contains("↑Δ445/17.3k"), "{line}");
-    assert!(line.contains(" Δ1240ms Σ4560ms"), "{line}");
+    assert_eq!(line, "Δ97% ↑445/17.3k ↓29 1240ms Σ50% ↑50k/100k ↓0 4560ms",);
 }
 
 #[test]
@@ -1423,7 +1421,42 @@ fn format_token_stats_line_omits_hit_chip_when_no_prompt_sent() {
     let usage = tau_proto::AgentTokenUsage::default();
     let line = format_token_stats_line(&usage, None, None);
 
-    assert!(!line.contains('H'), "{line}");
+    assert_eq!(line, "Δ ↑0/0 ↓0 Σ ↑0/0 ↓0");
+    assert!(!line.contains('%'), "{line}");
+}
+
+#[test]
+fn render_token_stats_block_uses_dedicated_styles() {
+    let usage = tau_proto::AgentTokenUsage {
+        prompt_sent_tokens: 1_000,
+        prompt_cached_tokens: 900,
+        response_received_tokens: 42,
+        stats: tau_proto::TokenUsageStats {
+            total: tau_proto::TokenUsageCounts {
+                sent_tokens: 2_000,
+                cached_tokens: 1_000,
+                received_tokens: 100,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let block = render_token_stats_block(&tau_themes::Theme::builtin(), &usage, None, None);
+    let spans = block.content.spans();
+
+    assert_eq!(spans[0].text, "Δ");
+    assert!(spans[0].style.bold);
+    assert_eq!(spans[0].style.fg, Some(Color::DarkGrey));
+    assert_eq!(spans[1].text, "90%");
+    assert!(!spans[1].style.bold);
+    assert_eq!(spans[1].style.fg, Some(Color::DarkGrey));
+    let sigma = spans
+        .iter()
+        .find(|span| span.text == " Σ")
+        .expect("sigma span is rendered");
+    assert!(sigma.style.bold);
+    assert_eq!(sigma.style.fg, Some(Color::DarkGrey));
 }
 
 #[test]

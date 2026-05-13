@@ -26,11 +26,59 @@ pub(crate) fn format_context_chip(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn format_token_stats_line(
     usage: &tau_proto::AgentTokenUsage,
     turn_latency: Option<Duration>,
     total_latency: Option<Duration>,
 ) -> String {
+    token_stats_parts(usage, turn_latency, total_latency)
+        .into_iter()
+        .map(|part| part.text)
+        .collect()
+}
+
+pub(crate) fn render_token_stats_block(
+    theme: &tau_themes::Theme,
+    usage: &tau_proto::AgentTokenUsage,
+    turn_latency: Option<Duration>,
+    total_latency: Option<Duration>,
+) -> tau_cli_term::StyledBlock {
+    use tau_cli_term::resolve::themed_text;
+    use tau_themes::{SpanTree, ThemedText, names};
+
+    let mut themed = ThemedText::new();
+    let root = themed.add_style(names::TOKEN_STATS);
+    let mut children = Vec::new();
+    for part in token_stats_parts(usage, turn_latency, total_latency) {
+        let style = themed.add_style(part.style_name);
+        children.push(SpanTree::span(style, vec![SpanTree::text(part.text)]));
+    }
+    themed.push_tree(SpanTree::span(root, children));
+    tau_cli_term::StyledBlock::new(themed_text(theme, &themed))
+}
+
+struct TokenStatsPart {
+    text: String,
+    style_name: &'static str,
+}
+
+impl TokenStatsPart {
+    fn new(text: impl Into<String>, style_name: &'static str) -> Self {
+        Self {
+            text: text.into(),
+            style_name,
+        }
+    }
+}
+
+fn token_stats_parts(
+    usage: &tau_proto::AgentTokenUsage,
+    turn_latency: Option<Duration>,
+    total_latency: Option<Duration>,
+) -> Vec<TokenStatsPart> {
+    use tau_themes::names;
+
     let prompt_uncached_tokens = usage
         .prompt_sent_tokens
         .saturating_sub(usage.prompt_cached_tokens);
@@ -39,48 +87,78 @@ pub(crate) fn format_token_stats_line(
         .total
         .sent_tokens
         .saturating_sub(usage.stats.total.cached_tokens);
-    let mut line = format!(
-        "↑Δ{}/{}",
-        format_token_count(prompt_uncached_tokens),
-        format_token_count(usage.prompt_sent_tokens),
-    );
-    // Per-turn cache-hit %, paired with its ↑Δ chip. Lets the user spot
-    // a regression (e.g. tool reordering breaking the prefix) directly
-    // on the offending turn.
+    let mut parts = Vec::new();
+
+    parts.push(TokenStatsPart::new("Δ", names::TOKEN_STATS_DELTA));
+    // Per-turn cache-hit %. Lets the user spot a regression (e.g. tool
+    // reordering breaking the prefix) directly on the offending turn.
     if let Some(percent) = cache_hit_percent(
         Some(usage.prompt_sent_tokens),
         Some(usage.prompt_cached_tokens),
     ) && 0 < usage.prompt_sent_tokens
     {
-        line.push_str(&format!(" ↑ΔH{percent}%"));
+        parts.push(TokenStatsPart::new(
+            format!("{percent}%"),
+            names::TOKEN_STATS_CACHE_HIT,
+        ));
     }
-    line.push_str(&format!(
-        " ↑Σ{}/{}",
-        format_token_count(total_uncached_tokens),
-        format_token_count(usage.stats.total.sent_tokens),
+    parts.push(TokenStatsPart::new(" ↑", names::TOKEN_STATS_UP));
+    parts.push(TokenStatsPart::new(
+        format!(
+            "{}/{}",
+            format_token_count(prompt_uncached_tokens),
+            format_token_count(usage.prompt_sent_tokens),
+        ),
+        names::TOKEN_STATS_INPUT,
     ));
-    // Session-cumulative cache-hit %, paired with its ↑Σ chip. Smooths
-    // out per-turn noise and surfaces sessions that are thrashing cache
-    // overall even when no single turn looks bad.
+    parts.push(TokenStatsPart::new(" ↓", names::TOKEN_STATS_DOWN));
+    parts.push(TokenStatsPart::new(
+        format_token_count(usage.response_received_tokens),
+        names::TOKEN_STATS_OUTPUT,
+    ));
+    if let Some(latency) = turn_latency {
+        parts.push(TokenStatsPart::new(
+            format!(" {}ms", latency.as_millis()),
+            names::TOKEN_STATS_LATENCY,
+        ));
+    }
+
+    parts.push(TokenStatsPart::new(" Σ", names::TOKEN_STATS_SIGMA));
+    // Session-cumulative cache-hit %. Smooths out per-turn noise and
+    // surfaces sessions that are thrashing cache overall even when no
+    // single turn looks bad.
     if let Some(percent) = cache_hit_percent(
         Some(usage.stats.total.sent_tokens),
         Some(usage.stats.total.cached_tokens),
     ) && 0 < usage.stats.total.sent_tokens
     {
-        line.push_str(&format!(" ↑ΣH{percent}%"));
+        parts.push(TokenStatsPart::new(
+            format!("{percent}%"),
+            names::TOKEN_STATS_CACHE_HIT,
+        ));
     }
-    line.push_str(&format!(
-        " ↓Δ{} ↓Σ{}",
-        format_token_count(usage.response_received_tokens),
-        format_token_count(usage.stats.total.received_tokens),
+    parts.push(TokenStatsPart::new(" ↑", names::TOKEN_STATS_UP));
+    parts.push(TokenStatsPart::new(
+        format!(
+            "{}/{}",
+            format_token_count(total_uncached_tokens),
+            format_token_count(usage.stats.total.sent_tokens),
+        ),
+        names::TOKEN_STATS_INPUT,
     ));
-    if let Some(latency) = turn_latency {
-        line.push_str(&format!(" Δ{}ms", latency.as_millis()));
-    }
+    parts.push(TokenStatsPart::new(" ↓", names::TOKEN_STATS_DOWN));
+    parts.push(TokenStatsPart::new(
+        format_token_count(usage.stats.total.received_tokens),
+        names::TOKEN_STATS_OUTPUT,
+    ));
     if let Some(latency) = total_latency {
-        line.push_str(&format!(" Σ{}ms", latency.as_millis()));
+        parts.push(TokenStatsPart::new(
+            format!(" {}ms", latency.as_millis()),
+            names::TOKEN_STATS_LATENCY,
+        ));
     }
-    line
+
+    parts
 }
 
 pub(crate) fn cache_hit_percent(

@@ -48,6 +48,17 @@ pub const SYSTEM_STATUS: &str = "system.status";
 // -- Model status --
 pub const MODEL_STATUS: &str = "model.status";
 
+// -- Token stats --
+pub const TOKEN_STATS: &str = "token.stats";
+pub const TOKEN_STATS_DELTA: &str = "token.stats.symbol.delta";
+pub const TOKEN_STATS_SIGMA: &str = "token.stats.symbol.sigma";
+pub const TOKEN_STATS_UP: &str = "token.stats.symbol.up";
+pub const TOKEN_STATS_DOWN: &str = "token.stats.symbol.down";
+pub const TOKEN_STATS_CACHE_HIT: &str = "token.stats.metric.cache_hit";
+pub const TOKEN_STATS_INPUT: &str = "token.stats.metric.input";
+pub const TOKEN_STATS_OUTPUT: &str = "token.stats.metric.output";
+pub const TOKEN_STATS_LATENCY: &str = "token.stats.metric.latency";
+
 // -- Completion menu --
 pub const COMPLETION_LABEL: &str = "completion.label";
 pub const COMPLETION_DESC: &str = "completion.desc";
