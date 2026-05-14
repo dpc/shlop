@@ -109,7 +109,7 @@ pub(crate) fn selected_params_for_role(
     let verbosity = current
         .and_then(|r| r.verbosity)
         .or_else(|| default.and_then(|r| r.verbosity))
-        .unwrap_or_else(|| middle_verbosity(&allowed_verbosity));
+        .unwrap_or_else(|| default_verbosity(&allowed_verbosity));
     let thinking_summary = current
         .and_then(|r| r.thinking_summary)
         .or_else(|| default.and_then(|r| r.thinking_summary))
@@ -401,7 +401,7 @@ pub(crate) fn selected_params_for_model(
     let verbosity = default_entry
         .map(|p| p.verbosity)
         .or(last.map(|p| p.verbosity))
-        .unwrap_or_else(|| middle_verbosity(&allowed_verbosity));
+        .unwrap_or_else(|| default_verbosity(&allowed_verbosity));
     let thinking_summary = default_entry
         .map(|p| p.thinking_summary)
         .or(last.map(|p| p.thinking_summary))
@@ -433,15 +433,15 @@ pub(crate) fn middle_effort(allowed: &[tau_proto::Effort]) -> tau_proto::Effort 
 }
 
 /// Default verbosity when no persisted preference exists. Picks
-/// `Medium` whenever it's allowed (the OpenAI default and the only
-/// member of pinned single-level lists), otherwise falls back to the
-/// first allowed entry.
-pub(crate) fn middle_verbosity(allowed: &[tau_proto::Verbosity]) -> tau_proto::Verbosity {
+/// `Low` whenever it's allowed (matching the quiet defaults used by
+/// other coding agents), otherwise falls back to the first allowed
+/// entry.
+pub(crate) fn default_verbosity(allowed: &[tau_proto::Verbosity]) -> tau_proto::Verbosity {
     use tau_proto::Verbosity as V;
-    if allowed.contains(&V::Medium) {
-        return V::Medium;
+    if allowed.contains(&V::Low) {
+        return V::Low;
     }
-    allowed.first().copied().unwrap_or(V::Medium)
+    allowed.first().copied().unwrap_or(V::Low)
 }
 
 /// Default thinking-summary mode when no persisted preference exists.

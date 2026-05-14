@@ -743,8 +743,8 @@ impl EventRenderer {
                 // knobs — anything at its implied default is omitted, so
                 // `default (medium)` collapses to just `default`. `Off`
                 // is the type default for `Effort` but means "no
-                // reasoning", which is worth surfacing; `Medium` is the
-                // baseline that adds no information.
+                // reasoning", which is worth surfacing; default
+                // verbosity adds no information.
                 let mut parts: Vec<String> = Vec::new();
                 match self.current_params.effort {
                     tau_proto::Effort::Off => parts.push("none".into()),
@@ -757,7 +757,7 @@ impl EventRenderer {
                 ) {
                     parts.push("fast".into());
                 }
-                if self.current_params.verbosity != tau_proto::Verbosity::Medium {
+                if !self.current_params.verbosity.is_default() {
                     parts.push(format!("v={}", self.current_params.verbosity));
                 }
                 if self.current_params.thinking_summary != tau_proto::ThinkingSummary::Auto

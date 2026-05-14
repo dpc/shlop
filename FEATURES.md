@@ -86,8 +86,9 @@ backends thread through to the provider request:
 - **`verbosity`** — output verbosity (`low`, `medium`, `high`).
   Sent to providers that advertise `supportsVerbosity` as
   top-level `verbosity` (Chat Completions) or `text.verbosity`
-  (Responses). Default `medium`. Per-model `supportsVerbosity` and
-  `verbosities` overrides mirror the effort escape hatches.
+  (Responses). Default `low` to keep model replies concise. Per-model
+  `supportsVerbosity` and `verbosities` overrides mirror the effort
+  escape hatches.
 - **`thinking_summary`** — reasoning-summary mode (`off`, `auto`,
   `concise`, `detailed`). Sent as `reasoning.summary` on providers
   that set `supportsReasoningSummary`; ignored otherwise.
@@ -134,8 +135,8 @@ provider that doesn't support it) degrades and surfaces a
 
 The status bar renders effort always; Fast mode, non-default verbosity,
 and thinking-summary are appended as `, fast` / `, v=<level>` /
-`, ts=<level>` so a fresh session reads `gpt-5 (medium)` and only grows
-when the user changes a knob.
+`, ts=<level>` so a fresh session stays compact and only grows when the
+user changes a knob.
 
 ### Prompt input caching
 

@@ -159,6 +159,65 @@ fn fresh_install_picks_middle_effort_when_no_history() {
     );
 }
 
+/// First-time users default to low verbosity when the provider supports
+/// the knob, keeping model replies concise unless the user opts into
+/// more detail. Providers without verbosity support stay pinned to the
+/// synthetic medium-only level.
+#[test]
+fn fresh_install_picks_low_verbosity_when_supported() {
+    let td = TempDir::new().expect("tempdir");
+    let config_dir = td.path().join("config");
+    let state_dir = td.path().join("state");
+    std::fs::create_dir_all(&config_dir).expect("mkdir config");
+    std::fs::create_dir_all(&state_dir).expect("mkdir state");
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(config_dir.clone()),
+        state_dir: Some(state_dir.clone()),
+    };
+
+    std::fs::write(
+        config_dir.join("models.json5"),
+        r#"{
+            providers: {
+                openai: {
+                    compat: { supportsVerbosity: true },
+                    models: [{ id: "gpt-5" }],
+                },
+                local: {
+                    compat: { supportsVerbosity: false },
+                    models: [{ id: "llama" }],
+                },
+            },
+        }"#,
+    )
+    .expect("write models");
+
+    let harness_settings =
+        tau_config::settings::load_harness_settings_in(&dirs).expect("load harness settings");
+    let model_registry = tau_config::settings::load_models_in(&dirs).expect("load models");
+
+    assert_eq!(
+        selected_params_for_model(
+            &dirs,
+            &harness_settings,
+            &model_registry,
+            &"openai/gpt-5".into(),
+        )
+        .verbosity,
+        tau_proto::Verbosity::Low,
+    );
+    assert_eq!(
+        selected_params_for_model(
+            &dirs,
+            &harness_settings,
+            &model_registry,
+            &"local/llama".into(),
+        )
+        .verbosity,
+        tau_proto::Verbosity::Medium,
+    );
+}
+
 /// A malformed `models.json5` must surface in the UI as an `Important`
 /// `HarnessInfo`, including the raw parser error. Without this, the
 /// only symptom of a borked file is an empty model list with no

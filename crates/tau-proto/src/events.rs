@@ -736,8 +736,8 @@ pub struct HarnessServiceTierChanged {
 #[serde(rename_all = "snake_case")]
 #[repr(u8)]
 pub enum Verbosity {
-    Low = 0,
     #[default]
+    Low = 0,
     Medium = 1,
     High = 2,
 }
@@ -808,7 +808,7 @@ impl Verbosity {
     /// on `ModelParams` so untouched values stay out of the wire form.
     #[must_use]
     pub const fn is_default(&self) -> bool {
-        matches!(self, Self::Medium)
+        matches!(self, Self::Low)
     }
 }
 
