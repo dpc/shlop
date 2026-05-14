@@ -13,11 +13,12 @@ use tau_core::{
     PolicyStore, RouteError, SessionStore, ToolRegistry, ToolRouteError,
 };
 use tau_proto::{
-    AgentResponseFinished, AgentTokenUsage, AgentToolCall, CborValue, ClientKind, Disconnect,
-    Event, EventSelector, ExtensionName, Frame, HarnessContextUsageChanged, HarnessModelSelected,
-    Message, ModelId, PromptMessagePrefix, PromptSystemPromptRef, PromptToolsRef, SessionId,
-    SessionPromptCreated, SessionPromptId, SessionPromptPrewarmRequested, SessionPromptQueued,
-    TokenUsageStats, ToolCallId, ToolDefinition, ToolError, ToolName, ToolRegister, ToolRequest,
+    AgentCacheMissDiagnostic, AgentResponseFinished, AgentTokenUsage, AgentToolCall, CborValue,
+    ClientKind, Disconnect, Event, EventSelector, ExtensionName, Frame, HarnessContextUsageChanged,
+    HarnessModelSelected, Message, ModelId, PreviousResponseRef, PromptMessagePrefix,
+    PromptOriginator, PromptSystemPromptRef, PromptToolsRef, SessionId, SessionPromptCreated,
+    SessionPromptId, SessionPromptPrewarmRequested, SessionPromptQueued, TokenUsageStats,
+    ToolCallId, ToolChoice, ToolDefinition, ToolError, ToolName, ToolRegister, ToolRequest,
     UiCancelPrompt,
 };
 
@@ -57,6 +58,16 @@ use crate::turn::{PromptSubmission, TurnState};
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(2);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 
+fn hex_bytes(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests;
 
@@ -67,6 +78,16 @@ mod skill_tool;
 
 /// Connection ID used for harness-owned tools (e.g. the `skill` tool).
 pub(crate) const HARNESS_CONNECTION_ID: &str = "__harness__";
+
+#[derive(Clone, Debug)]
+pub(crate) struct PromptCacheDiagnosticContext {
+    pub(crate) model: Option<ModelId>,
+    pub(crate) previous_response: Option<PreviousResponseRef>,
+    pub(crate) message_prefix_count: Option<usize>,
+    pub(crate) originator: PromptOriginator,
+    pub(crate) tool_choice: ToolChoice,
+    pub(crate) request_fingerprint: [u8; 32],
+}
 
 #[derive(Debug, Default)]
 pub(crate) struct CurrentSessionState {
@@ -168,6 +189,12 @@ pub(crate) struct Harness {
     /// prefix; request/response helpers expose the same materialized
     /// form to extensions that joined late or missed the base event.
     pub(crate) prompt_snapshots: std::collections::HashMap<SessionPromptId, SessionPromptCreated>,
+    /// Per-prompt fields needed to explain a low provider cache hit
+    /// after the final usage report arrives. Kept outside
+    /// `prompt_snapshots` because snapshots are materialized and drop
+    /// compression metadata like `message_prefix`.
+    pub(crate) prompt_cache_diagnostics:
+        std::collections::HashMap<SessionPromptId, PromptCacheDiagnosticContext>,
     /// All in-flight conversations keyed by `ConversationId`. The
     /// user's interactive UI thread is one fixed entry (see
     /// `default_conversation_id`); side queries from extensions spawn
@@ -454,6 +481,7 @@ impl Harness {
             next_synthetic_call_id: 0,
             prompt_conversations: std::collections::HashMap::new(),
             prompt_snapshots: std::collections::HashMap::new(),
+            prompt_cache_diagnostics: std::collections::HashMap::new(),
             conversations,
             default_conversation_id,
             turn_state: TurnState::Idle,
@@ -683,6 +711,7 @@ impl Harness {
             next_synthetic_call_id: 0,
             prompt_conversations: std::collections::HashMap::new(),
             prompt_snapshots: std::collections::HashMap::new(),
+            prompt_cache_diagnostics: std::collections::HashMap::new(),
             conversations,
             default_conversation_id,
             turn_state: TurnState::Idle,
@@ -3710,6 +3739,17 @@ impl Harness {
                 })
             })
             .unwrap_or((tools, None));
+        self.prompt_cache_diagnostics.insert(
+            session_prompt_id.clone(),
+            PromptCacheDiagnosticContext {
+                model: model.clone(),
+                previous_response: previous_response.clone(),
+                message_prefix_count: message_prefix.as_ref().map(|p| p.message_count),
+                originator: originator.clone(),
+                tool_choice,
+                request_fingerprint: request_fingerprint.digest,
+            },
+        );
         let event = Event::SessionPromptCreated(SessionPromptCreated {
             session_prompt_id: session_prompt_id.clone(),
             session_id,
@@ -3744,6 +3784,60 @@ impl Harness {
             .collect()
     }
 
+    fn maybe_emit_cache_miss_diagnostic(
+        &mut self,
+        response: &AgentResponseFinished,
+        previous_input_tokens: Option<u64>,
+    ) {
+        let Some(context) = self
+            .prompt_cache_diagnostics
+            .remove(&response.session_prompt_id)
+        else {
+            return;
+        };
+        let Some(previous_response) = context.previous_response else {
+            return;
+        };
+        let (Some(input_tokens), Some(cached_tokens), Some(previous_input_tokens)) = (
+            response.input_tokens,
+            response.cached_tokens,
+            previous_input_tokens,
+        ) else {
+            return;
+        };
+        let cacheable_input_tokens = previous_input_tokens.min(input_tokens);
+        if cacheable_input_tokens == 0 {
+            return;
+        }
+        // Corrected efficiency ignores newly-added prompt content by
+        // comparing cached tokens to the smaller of the previous and
+        // current input totals. Emit only clear misses; healthy
+        // chained turns should be close to 1.0 here.
+        if cacheable_input_tokens < cached_tokens.saturating_mul(2) {
+            return;
+        }
+        self.publish_event(
+            None,
+            Event::AgentCacheMissDiagnostic(AgentCacheMissDiagnostic {
+                session_prompt_id: response.session_prompt_id.clone(),
+                model: context.model,
+                previous_response_id: previous_response.id,
+                previous_response_message_index: previous_response.message_index,
+                message_prefix_count: context.message_prefix_count,
+                originator: context.originator,
+                tool_choice: context.tool_choice,
+                prompt_cache_key: None,
+                ws_pool_delta: response.ws_pool_delta,
+                request_body_fingerprint: hex_bytes(&context.request_fingerprint),
+                input_tokens,
+                cached_tokens,
+                previous_input_tokens,
+                cacheable_input_tokens,
+                corrected_cache_efficiency: cached_tokens as f32 / cacheable_input_tokens as f32,
+            }),
+        );
+    }
+
     fn handle_agent_response_finished(
         &mut self,
         mut response: AgentResponseFinished,
@@ -3753,6 +3847,8 @@ impl Harness {
                 .remove(response.session_prompt_id.as_str());
             self.prompt_models.remove(&response.session_prompt_id);
             self.prompt_fingerprints.remove(&response.session_prompt_id);
+            self.prompt_cache_diagnostics
+                .remove(&response.session_prompt_id);
             return Ok(());
         }
         if response.input_tokens.is_some() || response.cached_tokens.is_some() {
@@ -3763,6 +3859,11 @@ impl Harness {
         // status bar, but the harness still needs their context %
         // to surface via `DelegateProgress`.
         if let Some(cid) = self.conversation_for_prompt(&response.session_prompt_id) {
+            let previous_input_tokens = self
+                .conversations
+                .get(&cid)
+                .and_then(|conv| conv.context_input_tokens);
+            self.maybe_emit_cache_miss_diagnostic(&response, previous_input_tokens);
             self.update_conversation_context_usage(&cid, response.input_tokens);
             self.emit_delegate_progress(&cid);
         }

@@ -280,6 +280,8 @@ impl EventName {
         Self::from_static(EventCategory::Agent, "response_updated");
     pub const AGENT_RESPONSE_FINISHED: Self =
         Self::from_static(EventCategory::Agent, "response_finished");
+    pub const AGENT_CACHE_MISS_DIAGNOSTIC: Self =
+        Self::from_static(EventCategory::Agent, "cache_miss_diagnostic");
 }
 
 impl fmt::Display for EventName {
@@ -2178,6 +2180,42 @@ pub struct WsPoolDelta {
     pub chain_strips_on_fresh: u32,
 }
 
+/// Diagnostic emitted when a chained prompt reports unexpectedly low
+/// provider cache reuse. The harness derives it from the original
+/// [`SessionPromptCreated`] plus final [`AgentResponseFinished`]
+/// token usage so offline analysis can distinguish provider/cache-key
+/// misses from obvious WS chain-strip misses.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AgentCacheMissDiagnostic {
+    pub session_prompt_id: SessionPromptId,
+    /// Currently selected model as `"provider/model_id"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelId>,
+    pub previous_response_id: String,
+    pub previous_response_message_index: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_prefix_count: Option<usize>,
+    #[serde(default)]
+    pub originator: PromptOriginator,
+    #[serde(default, skip_serializing_if = "ToolChoice::is_default")]
+    pub tool_choice: ToolChoice,
+    /// Wire `prompt_cache_key` if known to the component emitting the
+    /// diagnostic. The harness currently lacks provider config, so it
+    /// leaves this absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ws_pool_delta: Option<WsPoolDelta>,
+    /// Hex blake3 fingerprint of the provider-visible request fields
+    /// Tau expects to remain stable across a chain.
+    pub request_body_fingerprint: String,
+    pub input_tokens: u64,
+    pub cached_tokens: u64,
+    pub previous_input_tokens: u64,
+    pub cacheable_input_tokens: u64,
+    pub corrected_cache_efficiency: f32,
+}
+
 /// Identifies the LLM backend that handled an
 /// [`AgentResponseFinished`].
 ///
@@ -2491,6 +2529,8 @@ pub enum Event {
     AgentResponseUpdated(AgentResponseUpdated),
     #[serde(rename = "agent.response_finished")]
     AgentResponseFinished(AgentResponseFinished),
+    #[serde(rename = "agent.cache_miss_diagnostic")]
+    AgentCacheMissDiagnostic(AgentCacheMissDiagnostic),
 }
 
 impl Event {
@@ -2562,6 +2602,7 @@ impl Event {
             Self::AgentPromptSubmitted(_) => EventName::AGENT_PROMPT_SUBMITTED,
             Self::AgentResponseUpdated(_) => EventName::AGENT_RESPONSE_UPDATED,
             Self::AgentResponseFinished(_) => EventName::AGENT_RESPONSE_FINISHED,
+            Self::AgentCacheMissDiagnostic(_) => EventName::AGENT_CACHE_MISS_DIAGNOSTIC,
         }
     }
 

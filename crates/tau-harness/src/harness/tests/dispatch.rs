@@ -583,6 +583,81 @@ fn response_id_anchors_next_prompt_with_previous_response() {
     h.shutdown().expect("shutdown");
 }
 
+#[test]
+fn chained_low_corrected_cache_hit_emits_diagnostic() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+
+    h.submit_user_prompt("s1".into(), "first".to_owned())
+        .expect("submit first");
+    let spid1: SessionPromptId = "sp-0".into();
+    h.handle_agent_response_finished(AgentResponseFinished {
+        session_prompt_id: spid1,
+        text: Some("first answer".to_owned()),
+        tool_calls: Vec::new(),
+        input_tokens: Some(1_000),
+        cached_tokens: Some(0),
+        output_tokens: None,
+        thinking: None,
+        token_usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        backend: None,
+        response_id: Some("resp_abc".to_owned()),
+        phase: None,
+        reasoning_items: Vec::new(),
+        ws_pool_delta: None,
+    })
+    .expect("finish first");
+
+    h.submit_user_prompt("s1".into(), "second".to_owned())
+        .expect("submit second");
+    let spid2: SessionPromptId = "sp-1".into();
+    h.handle_agent_response_finished(AgentResponseFinished {
+        session_prompt_id: spid2.clone(),
+        text: Some("second answer".to_owned()),
+        tool_calls: Vec::new(),
+        input_tokens: Some(1_100),
+        cached_tokens: Some(0),
+        output_tokens: None,
+        thinking: None,
+        token_usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        backend: None,
+        response_id: Some("resp_def".to_owned()),
+        phase: None,
+        reasoning_items: Vec::new(),
+        ws_pool_delta: Some(tau_proto::WsPoolDelta {
+            upgrades: 0,
+            silent_reconnects: 0,
+            chain_strips_on_fresh: 0,
+        }),
+    })
+    .expect("finish second");
+
+    let mut cursor = 0;
+    let mut diagnostic = None;
+    while let Some(entry) = h.event_log.get_next_from(cursor) {
+        cursor = entry.seq + 1;
+        if let Event::AgentCacheMissDiagnostic(event) = entry.event {
+            diagnostic = Some(event);
+        }
+    }
+    let diagnostic = diagnostic.expect("cache miss diagnostic");
+    assert_eq!(diagnostic.session_prompt_id, spid2);
+    assert_eq!(diagnostic.model, Some("test/model".into()));
+    assert_eq!(diagnostic.previous_response_id, "resp_abc");
+    assert_eq!(diagnostic.input_tokens, 1_100);
+    assert_eq!(diagnostic.cached_tokens, 0);
+    assert_eq!(diagnostic.previous_input_tokens, 1_000);
+    assert_eq!(diagnostic.cacheable_input_tokens, 1_000);
+    assert_eq!(diagnostic.corrected_cache_efficiency, 0.0);
+    assert_eq!(diagnostic.request_body_fingerprint.len(), 64);
+
+    h.shutdown().expect("shutdown");
+}
+
 /// Switching `selected_model` mid-conversation must bust the chain.
 /// The prior response was produced by a different model — its
 /// stored state on the upstream API is meaningless for the new
