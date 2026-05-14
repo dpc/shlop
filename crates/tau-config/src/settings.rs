@@ -284,9 +284,11 @@ fn default_tools_profiles() -> ToolsProfiles {
             (ToolName::new("apply_patch"), true),
             (ToolName::new("edit"), false),
             (ToolName::new("find"), false),
+            (ToolName::new("gpt_shell"), true),
             (ToolName::new("grep"), false),
             (ToolName::new("ls"), false),
             (ToolName::new("read"), false),
+            (ToolName::new("shell"), false),
             (ToolName::new("write"), false),
         ]),
     )])

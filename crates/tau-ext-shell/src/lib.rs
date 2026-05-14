@@ -1,7 +1,7 @@
 //! Filesystem and shell tool extension.
 //!
 //! Provides `read`, `write`, `edit`, `apply_patch`, `grep`, `find`,
-//! `ls`, and `shell` tools.
+//! `ls`, `shell`, and `gpt_shell` tools.
 //!
 //! The `echo` tool is available under `cfg(test)` or the
 //! `echo-agent` cargo feature for harness-side echo-agent tests.
@@ -34,8 +34,8 @@ use crate::semaphore::Semaphore;
 #[cfg(any(test, feature = "echo-agent"))]
 use crate::tools::ECHO_TOOL_NAME;
 use crate::tools::{
-    APPLY_PATCH_TOOL_NAME, EDIT_TOOL_NAME, FIND_TOOL_NAME, GREP_TOOL_NAME, LS_TOOL_NAME,
-    READ_TOOL_NAME, SHELL_TOOL_NAME, WRITE_TOOL_NAME, execute_tool,
+    APPLY_PATCH_TOOL_NAME, EDIT_TOOL_NAME, FIND_TOOL_NAME, GPT_SHELL_TOOL_NAME, GREP_TOOL_NAME,
+    LS_TOOL_NAME, READ_TOOL_NAME, SHELL_TOOL_NAME, WRITE_TOOL_NAME, execute_tool,
 };
 
 /// Runs the extension on stdin/stdout.
@@ -343,6 +343,33 @@ where
             })),
             format: None,
             enabled_by_default: true,
+            side_effects: ToolSideEffects::Mutating,
+        },
+        ToolSpec {
+            name: tau_proto::ToolName::new(GPT_SHELL_TOOL_NAME),
+            model_visible_name: Some(tau_proto::ToolName::new("shell_command")),
+            description: Some(
+                "Runs a shell command and returns its output.\n\
+                 - For doing file changes, use the apply_patch"
+                    .to_owned(),
+            ),
+            tool_type: tau_proto::ToolType::Function,
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The shell command to execute"
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "Timeout in seconds. The command is killed if it exceeds this. Default: 120"
+                    }
+                },
+                "required": ["command"]
+            })),
+            format: None,
+            enabled_by_default: false,
             side_effects: ToolSideEffects::Mutating,
         },
     ]);

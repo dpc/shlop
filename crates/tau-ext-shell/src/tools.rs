@@ -21,6 +21,7 @@ pub const WRITE_TOOL_NAME: &str = "write";
 pub const EDIT_TOOL_NAME: &str = "edit";
 pub const APPLY_PATCH_TOOL_NAME: &str = "apply_patch";
 pub const SHELL_TOOL_NAME: &str = "shell";
+pub const GPT_SHELL_TOOL_NAME: &str = "gpt_shell";
 pub const GREP_TOOL_NAME: &str = "grep";
 pub const FIND_TOOL_NAME: &str = "find";
 pub const LS_TOOL_NAME: &str = "ls";
@@ -65,7 +66,7 @@ pub(crate) fn execute_tool(
         return wrap_pure(invoke, error_details, ls::run_ls);
     }
 
-    if invoke.tool_name == SHELL_TOOL_NAME {
+    if invoke.tool_name == SHELL_TOOL_NAME || invoke.tool_name == GPT_SHELL_TOOL_NAME {
         let mut events = vec![Event::ToolProgress(ToolProgress {
             call_id: invoke.call_id.clone(),
             tool_name: invoke.tool_name.clone(),

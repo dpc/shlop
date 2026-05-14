@@ -129,9 +129,11 @@ fn harness_settings_built_in_gpt_tools_profile() {
     assert_eq!(s.tools_profiles["gpt"]["apply_patch"], true);
     assert_eq!(s.tools_profiles["gpt"]["edit"], false);
     assert_eq!(s.tools_profiles["gpt"]["find"], false);
+    assert_eq!(s.tools_profiles["gpt"]["gpt_shell"], true);
     assert_eq!(s.tools_profiles["gpt"]["grep"], false);
     assert_eq!(s.tools_profiles["gpt"]["ls"], false);
     assert_eq!(s.tools_profiles["gpt"]["read"], false);
+    assert_eq!(s.tools_profiles["gpt"]["shell"], false);
     assert_eq!(s.tools_profiles["gpt"]["write"], false);
 }
 
@@ -161,9 +163,11 @@ fn harness_settings_load_tools_profiles() {
     assert!(s.tools_profiles["gpt"]["apply_patch"]);
     assert!(s.tools_profiles["gpt"]["edit"]);
     assert!(!s.tools_profiles["gpt"]["find"]);
+    assert!(s.tools_profiles["gpt"]["gpt_shell"]);
     assert!(!s.tools_profiles["gpt"]["grep"]);
     assert!(!s.tools_profiles["gpt"]["ls"]);
     assert!(!s.tools_profiles["gpt"]["read"]);
+    assert!(!s.tools_profiles["gpt"]["shell"]);
     assert!(!s.tools_profiles["gpt"]["write"]);
 }
 

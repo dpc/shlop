@@ -19,8 +19,8 @@ use crate::tools::ls::run_ls;
 use crate::tools::read::{read_file, slice_lines};
 use crate::tools::shell::{command_details_value, run_command};
 use crate::tools::{
-    APPLY_PATCH_TOOL_NAME, EDIT_TOOL_NAME, FIND_TOOL_NAME, LS_TOOL_NAME, READ_TOOL_NAME,
-    SHELL_TOOL_NAME, WRITE_TOOL_NAME,
+    APPLY_PATCH_TOOL_NAME, EDIT_TOOL_NAME, FIND_TOOL_NAME, GPT_SHELL_TOOL_NAME, LS_TOOL_NAME,
+    READ_TOOL_NAME, SHELL_TOOL_NAME, WRITE_TOOL_NAME,
 };
 use crate::truncate::{MAX_OUTPUT_BYTES, MAX_OUTPUT_LINES, truncate_head, truncate_tail};
 
@@ -144,6 +144,7 @@ fn drain_startup(reader: &mut EventReader<BufReader<UnixStream>>) {
         EventName::TOOL_REGISTER, // find
         EventName::TOOL_REGISTER, // ls
         EventName::TOOL_REGISTER, // shell
+        EventName::TOOL_REGISTER, // gpt_shell
     ] {
         let event = reader
             .read_event()
@@ -151,6 +152,36 @@ fn drain_startup(reader: &mut EventReader<BufReader<UnixStream>>) {
             .expect("startup event should arrive");
         assert_eq!(event.name(), EventName::TOOL_REGISTER);
     }
+}
+
+#[test]
+fn startup_registers_gpt_shell_with_shell_command_visible_name() {
+    let (mut reader, mut writer) = spawn_extension();
+
+    let mut found = false;
+    for _ in 0..10 {
+        let event = reader
+            .read_event()
+            .expect("read")
+            .expect("startup event should arrive");
+        let Event::ToolRegister(register) = event else {
+            continue;
+        };
+        if register.tool.name == GPT_SHELL_TOOL_NAME {
+            assert_eq!(
+                register.tool.model_visible_name,
+                Some(tau_proto::ToolName::new("shell_command"))
+            );
+            found = true;
+            break;
+        }
+    }
+    assert!(found, "expected gpt_shell tool registration");
+
+    writer
+        .write_frame(&disconnect_frame(None))
+        .expect("disconnect");
+    writer.flush().expect("flush");
 }
 
 #[test]
@@ -1315,6 +1346,46 @@ fn shell_tool_reports_progress_and_success() {
         panic!("expected tool result");
     };
     assert_eq!(result.tool_name, SHELL_TOOL_NAME);
+    assert_eq!(
+        optional_argument_text(&result.result, "stdout"),
+        Some("hello".to_owned())
+    );
+
+    writer
+        .write_frame(&disconnect_frame(None))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+}
+
+#[test]
+fn gpt_shell_tool_reports_progress_and_success() {
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+
+    writer
+        .write_event(&Event::ToolInvoke(ToolInvoke {
+            call_id: "call-gpt-shell".into(),
+            tool_name: tau_proto::ToolName::new(GPT_SHELL_TOOL_NAME),
+            arguments: CborValue::Map(vec![(
+                CborValue::Text("command".to_owned()),
+                CborValue::Text("printf hello".to_owned()),
+            )]),
+            originator: tau_proto::PromptOriginator::User,
+        }))
+        .expect("invoke");
+    writer.flush().expect("flush");
+
+    let progress = reader.read_event().expect("read").expect("progress");
+    let Event::ToolProgress(progress) = progress else {
+        panic!("expected tool progress");
+    };
+    assert_eq!(progress.tool_name, GPT_SHELL_TOOL_NAME);
+
+    let result = reader.read_event().expect("read").expect("result");
+    let Event::ToolResult(result) = result else {
+        panic!("expected tool result");
+    };
+    assert_eq!(result.tool_name, GPT_SHELL_TOOL_NAME);
     assert_eq!(
         optional_argument_text(&result.result, "stdout"),
         Some("hello".to_owned())
