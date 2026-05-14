@@ -26,12 +26,11 @@ pub(crate) struct ShellConfig {
     /// the UI path where the agent isn't driving the timeout.
     pub(crate) user_command_timeout_secs: u64,
     /// Extra environment variables injected into shell-tool / `!`
-    /// command children, applied after the hard-coded isolation
-    /// allowlist so they override or supplement it. Use this to
-    /// forward `XDG_*` paths, set a custom `PAGER`, or thread any
-    /// other env that the harness's allowlist intentionally strips.
-    /// Keys with an empty value still clear the variable in the
-    /// child env. Does not affect the `rg` child used by `grep`.
+    /// command children, applied after the inherited environment so
+    /// they override or supplement it. Use this to set a custom
+    /// `PAGER` or adjust paths. Keys with an empty value still clear
+    /// the variable in the child env. Does not affect the `rg` child
+    /// used by `grep`.
     extra_env: BTreeMap<String, String>,
 }
 

@@ -985,6 +985,20 @@ fn shell_tool_applies_configured_prefix_and_command() {
 }
 
 #[test]
+fn command_isolation_preserves_explicit_environment() {
+    let mut cmd = std::process::Command::new("sh");
+    cmd.arg("-c")
+        .arg("printf %s \"${TAU_EXPLICIT_ENV_TEST-unset}\"")
+        .env("TAU_EXPLICIT_ENV_TEST", "ok")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    crate::isolation::apply_command_isolation(&mut cmd);
+    let output = cmd.output().expect("run env probe");
+    assert!(output.status.success(), "env probe failed: {output:?}");
+    assert_eq!(String::from_utf8(output.stdout).expect("utf8 stdout"), "ok");
+}
+
+#[test]
 fn shell_extension_rejects_invalid_config() {
     let (mut reader, mut writer) = spawn_extension();
     drain_startup(&mut reader);

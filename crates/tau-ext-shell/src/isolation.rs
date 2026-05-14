@@ -1,40 +1,16 @@
 //! Child-process isolation for shell-style commands.
 //!
 //! Used for every external command this crate spawns so the agent's
-//! environment can't leak (or be leaked into) through shared
-//! filesystem state, a tty, or the parent's environment variables.
+//! commands are detached from the harness's tty and don't hang on
+//! interactive stdin.
 
 use std::process::Command;
 
-/// Allowlist of environment variables forwarded to spawned shell
-/// commands. Anything outside this set (SSH agent sockets, cloud
-/// credentials, shell history config, dev-shell injections) is
-/// stripped so commands run in a predictable environment instead of
-/// inheriting whatever the harness happened to be launched with.
+/// Sanitize a `Command` so the child is fully detached from the
+/// harness's controlling terminal:
 ///
-/// Tau's own version metadata is preserved so the agent can verify
-/// what harness build it is running under when asked.
-const ENV_ALLOWLIST: &[&str] = &[
-    "PATH",
-    "HOME",
-    "USER",
-    "LOGNAME",
-    "SHELL",
-    "TMPDIR",
-    "TZ",
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE",
-    "LC_MESSAGES",
-    "TAU_VERSION",
-    "TAU_BUILD",
-];
-
-/// Sanitize a `Command` so the child runs with a minimal environment
-/// and is fully detached from the harness's controlling terminal:
-///
-/// - Replaces the inherited environment with [`ENV_ALLOWLIST`] plus `TERM=dumb`
-///   / `NO_COLOR=1` / `CLICOLOR=0` so well-behaved tools suppress ANSI escapes
+/// - Overrides display-related environment variables with `TERM=dumb` /
+///   `NO_COLOR=1` / `CLICOLOR=0` so well-behaved tools suppress ANSI escapes
 ///   and TTY-only fancy output.
 /// - Closes stdin so interactive prompts (`sudo`, `ssh`, `read`) fail fast
 ///   instead of hanging on input that will never arrive.
@@ -42,12 +18,6 @@ const ENV_ALLOWLIST: &[&str] = &[
 ///   session with no controlling terminal — even an explicit `open("/dev/tty")`
 ///   will fail rather than reach the harness's tty.
 pub(crate) fn apply_command_isolation(cmd: &mut Command) {
-    cmd.env_clear();
-    for key in ENV_ALLOWLIST {
-        if let Ok(value) = std::env::var(key) {
-            cmd.env(key, value);
-        }
-    }
     cmd.env("TERM", "dumb")
         .env("NO_COLOR", "1")
         .env("CLICOLOR", "0");
