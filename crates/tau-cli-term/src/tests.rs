@@ -712,6 +712,14 @@ mod prompt_action_parse {
     }
 
     #[test]
+    fn parses_role_cycle() {
+        assert!(matches!(
+            PromptShellAction::parse("role-cycle"),
+            Some(PromptShellAction::RoleCycle)
+        ));
+    }
+
+    #[test]
     fn unknown_action_returns_none() {
         assert!(PromptShellAction::parse("not-a-real-action").is_none());
         assert!(PromptShellAction::parse("shell-prompt-bogus:trim:cmd").is_none());

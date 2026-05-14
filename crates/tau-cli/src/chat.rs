@@ -357,6 +357,8 @@ pub(crate) fn run_chat(
     );
     let effort_state = renderer.effort_state();
     let fast_mode_state = renderer.fast_mode_state();
+    let current_role_state = renderer.current_role_state();
+    let roles_available = renderer.roles_available();
     let efforts_available = renderer.efforts_available();
     let editor_context = renderer.editor_context();
     term.set_editor_context_handle(editor_context.clone());
@@ -396,6 +398,8 @@ pub(crate) fn run_chat(
         TerminalInputLoopCtx {
             effort_state,
             fast_mode_state,
+            current_role_state,
+            roles_available,
             efforts_available,
             theme,
             renderer_tx: event_tx,
@@ -476,6 +480,8 @@ enum RendererCmd {
 struct TerminalInputLoopCtx {
     effort_state: Arc<std::sync::atomic::AtomicU8>,
     fast_mode_state: Arc<std::sync::atomic::AtomicBool>,
+    current_role_state: Arc<Mutex<Option<String>>>,
+    roles_available: Arc<Mutex<Vec<String>>>,
     /// Set of effort levels the harness currently accepts, kept in
     /// sync with `HarnessEffortsAvailable` by the renderer. The
     /// Shift+Tab cycle reads it so we don't ask for a level the
@@ -776,6 +782,32 @@ fn terminal_input_loop(
                 let _ = send_event(
                     writer,
                     &Event::UiSetServiceTier(tau_proto::UiSetServiceTier { service_tier }),
+                );
+            }
+            TermEvent::RoleCycle => {
+                let roles = match ctx.roles_available.lock() {
+                    Ok(roles) => roles.clone(),
+                    Err(_) => Vec::new(),
+                };
+                if roles.is_empty() {
+                    print_local("role-cycle: no agent roles are available yet");
+                    continue;
+                }
+                let current = ctx
+                    .current_role_state
+                    .lock()
+                    .ok()
+                    .and_then(|role| role.clone());
+                let next = match current
+                    .as_deref()
+                    .and_then(|current| roles.iter().position(|role| role == current))
+                {
+                    Some(index) => roles[(index + 1) % roles.len()].clone(),
+                    None => roles[0].clone(),
+                };
+                let _ = send_event(
+                    writer,
+                    &Event::UiRoleSelect(tau_proto::UiRoleSelect { role: next }),
                 );
             }
             TermEvent::BackTab => {

@@ -45,6 +45,8 @@ pub enum Event {
     BackTab,
     /// A binding requested Fast mode toggle without touching the prompt draft.
     FastToggle,
+    /// A binding requested cycling to the next agent role.
+    RoleCycle,
 }
 
 /// Higher-level terminal prompt with completion support.
@@ -270,6 +272,7 @@ impl HighTerm {
                 self.handle.set_buffer(buffer, cursor + text.len());
             }
             Ok(Some(PromptShellResult::FastToggle)) => return Some(Event::FastToggle),
+            Ok(Some(PromptShellResult::RoleCycle)) => return Some(Event::RoleCycle),
             Ok(Some(PromptShellResult::History(delta))) => {
                 self.term.trigger_history_step(delta);
             }
@@ -308,6 +311,7 @@ enum PromptShellAction {
     Insert(PromptShellCommand),
     Edit(PromptShellCommand),
     FastToggle,
+    RoleCycle,
     PromptNext,
     PromptPrevious,
 }
@@ -323,6 +327,7 @@ enum PromptShellResult {
     Insert(String),
     Replace(String),
     FastToggle,
+    RoleCycle,
     History(isize),
 }
 
@@ -330,6 +335,7 @@ impl PromptShellAction {
     fn parse(action: &str) -> Option<Self> {
         match action {
             "fast-toggle" => return Some(Self::FastToggle),
+            "role-cycle" => return Some(Self::RoleCycle),
             "prompt-next" => return Some(Self::PromptNext),
             "prompt-previous" => return Some(Self::PromptPrevious),
             _ => {}
@@ -361,6 +367,7 @@ fn run_prompt_shell_action(
         PromptShellAction::PromptNext => return Ok(Some(PromptShellResult::History(1))),
         PromptShellAction::PromptPrevious => return Ok(Some(PromptShellResult::History(-1))),
         PromptShellAction::FastToggle => return Ok(Some(PromptShellResult::FastToggle)),
+        PromptShellAction::RoleCycle => return Ok(Some(PromptShellResult::RoleCycle)),
         PromptShellAction::Insert(shell) | PromptShellAction::Edit(shell) => shell,
     };
     let current = trim_prompt_newlines(&handle.get_buffer()).to_owned();
@@ -374,6 +381,7 @@ fn run_prompt_shell_action(
         PromptShellAction::Edit(_) => append_prompt_trailer(&current, &editor_context),
         PromptShellAction::Insert(_) => current.clone(),
         PromptShellAction::FastToggle
+        | PromptShellAction::RoleCycle
         | PromptShellAction::PromptNext
         | PromptShellAction::PromptPrevious => unreachable!(),
     };
@@ -435,6 +443,7 @@ fn run_prompt_shell_action(
             Ok(Some(PromptShellResult::Replace(new_text)))
         }
         PromptShellAction::FastToggle
+        | PromptShellAction::RoleCycle
         | PromptShellAction::PromptNext
         | PromptShellAction::PromptPrevious => unreachable!(),
     }

@@ -124,10 +124,11 @@ impl CliShellCommand {
 #[serde(default, deny_unknown_fields)]
 pub struct CliBindingAction {
     /// Action name, e.g. `shell-prompt-insert`, `shell-prompt-edit`,
-    /// or `fast-toggle`.
+    /// `fast-toggle`, or `role-cycle`.
     pub action: String,
     /// Shell command to execute. `None` for actions that don't shell
-    /// out (e.g. `prompt-previous`, `prompt-next`, `fast-toggle`).
+    /// out (e.g. `prompt-previous`, `prompt-next`, `fast-toggle`,
+    /// `role-cycle`).
     pub command: Option<String>,
     /// Whether to trim command stdout before insertion.
     pub trim: bool,

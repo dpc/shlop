@@ -121,6 +121,10 @@ pub(crate) struct EventRenderer {
     effort_state: std::sync::Arc<std::sync::atomic::AtomicU8>,
     /// Shared Fast-mode mirror for the input thread's `fast-toggle` binding.
     fast_mode_state: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Shared active-role mirror for the input thread's `role-cycle` binding.
+    current_role_state: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// Shared ordered role names for the input thread's `role-cycle` binding.
+    roles_available: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     /// Shared set of currently-available effort levels, mirrored
     /// from `HarnessEffortsAvailable`. The input thread's Shift+Tab
     /// cycle reads it to skip levels the current model doesn't
@@ -323,6 +327,8 @@ impl EventRenderer {
                 tau_proto::Effort::Off.as_u8(),
             )),
             fast_mode_state: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            current_role_state: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            roles_available: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             // Empty until the first `HarnessEffortsAvailable`
             // arrives. The input loop's BackTab handler treats an
             // empty set as "no allowed levels known yet" and
@@ -389,6 +395,18 @@ impl EventRenderer {
     /// bindings.
     pub(crate) fn fast_mode_state(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
         self.fast_mode_state.clone()
+    }
+
+    /// Returns a clone of the shared active-role mirror, used by configurable
+    /// bindings.
+    pub(crate) fn current_role_state(&self) -> std::sync::Arc<std::sync::Mutex<Option<String>>> {
+        self.current_role_state.clone()
+    }
+
+    /// Returns a clone of the shared ordered role list, used by configurable
+    /// bindings.
+    pub(crate) fn roles_available(&self) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
+        self.roles_available.clone()
     }
 
     /// Returns a clone of the shared available-efforts set. The
@@ -1408,6 +1426,9 @@ impl EventRenderer {
                     .iter()
                     .map(|r| tau_cli_term::CompletionItem::new(&r.name, &r.description))
                     .collect();
+                if let Ok(mut available) = self.roles_available.lock() {
+                    *available = roles.roles.iter().map(|r| r.name.clone()).collect();
+                }
                 self.completion_data
                     .set_arg_completions(tau_cli_term::CommandName::new("/model"), items.clone());
                 let completer: tau_cli_term::ArgCompleter = std::sync::Arc::new(move |args| {
@@ -1471,6 +1492,9 @@ impl EventRenderer {
             Event::HarnessModelSelected(selected) => {
                 self.current_model = selected.model.clone();
                 self.current_role = selected.role.clone();
+                if let Ok(mut role) = self.current_role_state.lock() {
+                    *role = selected.role.clone();
+                }
                 self.current_context_window = selected.context_window;
                 self.render_model_status();
             }

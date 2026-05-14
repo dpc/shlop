@@ -324,8 +324,10 @@ Supported actions:
   command, then replace the prompt with the file contents on success.
 - `shell-prompt-insert`: run the shell command and insert its stdout at the
   cursor on success.
-- `fast-toggle`: toggle Fast mode directly without reading, submitting, or
-  clearing the current draft. For example: `{ action: "fast-toggle" }`.
+- `fast-toggle`: toggle Fast mode directly. For example:
+  `{ action: "fast-toggle" }`.
+- `role-cycle`: cycle to the next available agent role directly. For example:
+  `{ action: "role-cycle" }`.
 
 Command environment:
 
