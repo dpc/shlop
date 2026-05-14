@@ -430,6 +430,15 @@ impl Default for ModelRegistry {
     }
 }
 
+fn merge_default_agent_roles(roles: &mut HashMap<String, AgentRole>) {
+    for (name, built_in_role) in default_agent_roles() {
+        roles
+            .entry(name)
+            .and_modify(|role| role.fill_missing_from(&built_in_role))
+            .or_insert(built_in_role);
+    }
+}
+
 /// Partial agent-role settings loaded from `models.json5` and persisted
 /// to state. `None` means "inherit" for every field.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -447,6 +456,17 @@ pub struct AgentRole {
     pub fast_mode: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "serviceTier")]
     pub service_tier: Option<tau_proto::ServiceTier>,
+}
+
+impl AgentRole {
+    fn fill_missing_from(&mut self, fallback: &Self) {
+        self.model = self.model.clone().or_else(|| fallback.model.clone());
+        self.effort = self.effort.or(fallback.effort);
+        self.verbosity = self.verbosity.or(fallback.verbosity);
+        self.thinking_summary = self.thinking_summary.or(fallback.thinking_summary);
+        self.fast_mode = self.fast_mode.or(fallback.fast_mode);
+        self.service_tier = self.service_tier.or(fallback.service_tier);
+    }
 }
 
 /// One LLM provider configuration.
@@ -874,7 +894,9 @@ pub fn load_models_in(dirs: &TauDirs) -> Result<ModelRegistry, SettingsError> {
     let Some(ref dir) = dirs.config_dir else {
         return Ok(ModelRegistry::default());
     };
-    load_json5_layered(dir, "models")
+    let mut registry: ModelRegistry = load_json5_layered(dir, "models")?;
+    merge_default_agent_roles(&mut registry.default_roles);
+    Ok(registry)
 }
 
 /// Like [`load_json5_layered`] but also stacks an embedded built-in

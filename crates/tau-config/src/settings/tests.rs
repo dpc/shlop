@@ -180,6 +180,43 @@ fn models_load_with_providers() {
 }
 
 #[test]
+fn models_default_roles_merge_with_built_ins() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("models.json5"),
+        r#"{
+            defaultRoles: {
+                default: { model: "openai/gpt-5.5" },
+                custom: { effort: "medium" },
+                deep: { model: "openai/gpt-5.5" },
+            },
+        }"#,
+    )
+    .expect("write");
+
+    let m = load_models_in(&dirs_with_config(dir)).expect("load");
+    assert!(m.default_roles.contains_key("smart"));
+    assert!(m.default_roles.contains_key("rush"));
+    assert_eq!(
+        m.default_roles["custom"].effort,
+        Some(tau_proto::Effort::Medium)
+    );
+
+    let deep = &m.default_roles["deep"];
+    assert_eq!(
+        deep.model.as_ref().map(ToString::to_string).as_deref(),
+        Some("openai/gpt-5.5")
+    );
+    assert_eq!(deep.effort, Some(tau_proto::Effort::XHigh));
+    assert_eq!(deep.verbosity, Some(tau_proto::Verbosity::High));
+    assert_eq!(
+        deep.thinking_summary,
+        Some(tau_proto::ThinkingSummary::Detailed)
+    );
+}
+
+#[test]
 fn missing_user_files_load_the_built_in_baseline() {
     // With no user files present, the loader still returns a fully
     // populated `CliSettings` / `HarnessSettings` from the embedded
